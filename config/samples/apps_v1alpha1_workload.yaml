@@ -1,0 +1,9 @@
+apiVersion: apps.aicloud.dev/v1alpha1
+kind: Workload
+metadata:
+  labels:
+    app.kubernetes.io/name: ai-cloud-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: workload-sample
+spec:
+  # TODO(user): Add fields here

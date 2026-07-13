@@ -1,0 +1,84 @@
+/*
+Copyright 2026 gojnimer-labs.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package convexclient
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestRegisterReturnsIssuedTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operators/register" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req registerRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		if req.EnrollmentSecret != "shh" {
+			t.Fatalf("expected enrollment secret to be forwarded, got %q", req.EnrollmentSecret)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-1", DeployToken: "dp-1"})
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, EnrollmentSecret: "shh", OperatorName: "op-1", ExternalURL: "http://op-1"})
+
+	tokens, err := c.Register(context.Background())
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if tokens.HeartbeatToken != "hb-1" || tokens.DeployToken != "dp-1" {
+		t.Fatalf("unexpected tokens: %+v", tokens)
+	}
+}
+
+func TestHeartbeatSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer hb-1" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: "op-1"})
+	if err := c.Heartbeat(context.Background(), "hb-1"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+}
+
+func TestHeartbeatUnauthorizedMapsToSentinel(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusGone} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+
+		c := New(Config{BaseURL: srv.URL, OperatorName: "op-1"})
+		err := c.Heartbeat(context.Background(), "stale-token")
+		srv.Close()
+
+		if err != ErrUnauthorized {
+			t.Fatalf("status %d: expected ErrUnauthorized, got %v", status, err)
+		}
+	}
+}
