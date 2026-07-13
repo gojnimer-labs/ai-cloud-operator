@@ -82,3 +82,69 @@ func TestHeartbeatUnauthorizedMapsToSentinel(t *testing.T) {
 		}
 	}
 }
+
+func TestUpsertWorkloadSendsExpectedPayload(t *testing.T) {
+	var got upsertWorkloadRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operators/workloads/upsert" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer hb-1" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	err := c.UpsertWorkload(context.Background(), "hb-1", WorkloadInfo{
+		Name:         "demo",
+		Namespace:    "default",
+		Subdomain:    "demo-sub",
+		TemplateName: "nginx",
+		UserID:       "user-1",
+	})
+	if err != nil {
+		t.Fatalf("upsert workload: %v", err)
+	}
+	if got.Name != "demo" || got.Namespace != "default" || got.TemplateID != "nginx" || got.UserID != "user-1" || got.Subdomain != "demo-sub" {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestUpsertWorkloadNonOKIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	if err := c.UpsertWorkload(context.Background(), "hb-1", WorkloadInfo{Name: "demo", Namespace: "default"}); err == nil {
+		t.Fatalf("expected an error on non-200 response")
+	}
+}
+
+func TestRemoveWorkloadSendsExpectedPayload(t *testing.T) {
+	var got removeWorkloadRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operators/workloads/remove" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	if err := c.RemoveWorkload(context.Background(), "hb-1", "demo", "default"); err != nil {
+		t.Fatalf("remove workload: %v", err)
+	}
+	if got.Name != "demo" || got.Namespace != "default" {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+}

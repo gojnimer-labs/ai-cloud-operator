@@ -141,3 +141,88 @@ func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string) error {
 		return fmt.Errorf("heartbeat returned status %d", resp.StatusCode)
 	}
 }
+
+// WorkloadInfo is the ownership/identity data the reconciler reports back to
+// Convex — deliberately just the fields already on Workload.Spec, never
+// runtime status/phase (that stays fetched live, never mirrored).
+type WorkloadInfo struct {
+	Name         string
+	Namespace    string
+	TemplateName string
+	UserID       string
+	Subdomain    string
+}
+
+type upsertWorkloadRequest struct {
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace"`
+	TemplateID string `json:"templateId"`
+	UserID     string `json:"userId"`
+	Subdomain  string `json:"subdomain,omitempty"`
+}
+
+// UpsertWorkload tells Convex this workload currently exists with this
+// ownership info. Called by the reconciler after a successful reconcile of
+// a newly-created or spec-changed Workload — see internal/controller.
+func (c *Client) UpsertWorkload(ctx context.Context, heartbeatToken string, info WorkloadInfo) error {
+	body, err := json.Marshal(upsertWorkloadRequest{
+		Name:       info.Name,
+		Namespace:  info.Namespace,
+		TemplateID: info.TemplateName,
+		UserID:     info.UserID,
+		Subdomain:  info.Subdomain,
+	})
+	if err != nil {
+		return fmt.Errorf("marshaling upsert workload request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/operators/workloads/upsert", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("building upsert workload request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+heartbeatToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("calling upsert workload: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upsert workload returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+type removeWorkloadRequest struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+// RemoveWorkload tells Convex this workload no longer exists. Called by the
+// reconciler when it observes the Workload CR is gone.
+func (c *Client) RemoveWorkload(ctx context.Context, heartbeatToken, name, namespace string) error {
+	body, err := json.Marshal(removeWorkloadRequest{Name: name, Namespace: namespace})
+	if err != nil {
+		return fmt.Errorf("marshaling remove workload request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/operators/workloads/remove", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("building remove workload request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+heartbeatToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("calling remove workload: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("remove workload returned status %d", resp.StatusCode)
+	}
+	return nil
+}

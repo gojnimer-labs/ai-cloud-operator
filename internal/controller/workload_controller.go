@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -30,6 +31,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,7 +40,18 @@ import (
 
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/convexclient"
 )
+
+// WorkloadNotifier lets the reconciler tell Convex about workload lifecycle
+// events so its ownership table stays in sync with the cluster automatically
+// — including workloads created/deleted directly with kubectl, bypassing
+// Convex entirely. Optional: nil disables the callback (e.g. in tests, or a
+// future standalone-operator mode with no Convex attached).
+type WorkloadNotifier interface {
+	UpsertWorkload(ctx context.Context, info convexclient.WorkloadInfo) error
+	RemoveWorkload(ctx context.Context, name, namespace string) error
+}
 
 // WorkloadReconciler reconciles a Workload object.
 //
@@ -48,7 +61,8 @@ import (
 // is deliberately out of scope for this POC.
 type WorkloadReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme       *runtime.Scheme
+	ConvexClient WorkloadNotifier
 }
 
 const (
@@ -85,10 +99,17 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var workload appsv1alpha1.Workload
 	if err := r.Get(ctx, req.NamespacedName, &workload); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.notifyRemoved(ctx, log, req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("getting Workload: %w", err)
 	}
+
+	// Captured before render/status update overwrite ObservedGeneration below
+	// — true only on the reconcile immediately following a spec create/change,
+	// so the Convex upsert callback fires once per spec version rather than on
+	// every periodic status-polling pass.
+	specChanged := workload.Status.ObservedGeneration != workload.Generation
 
 	// selectorLabels stays exactly what it's always been — Deployment/Service
 	// selectors are immutable after creation, so this set must never change
@@ -119,6 +140,10 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	if err := r.reconcileService(ctx, &workload, selectorLabels, objectLabels, rendered); err != nil {
 		return r.setFailed(ctx, &workload, fmt.Errorf("reconciling service: %w", err))
+	}
+
+	if specChanged {
+		r.notifyUpserted(ctx, log, &workload)
 	}
 
 	var deployment appsv1.Deployment
@@ -163,6 +188,37 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// notifyUpserted tells Convex this workload's ownership info is current.
+// Best-effort: a failure here is logged but never fails reconciliation —
+// the Deployment/Service must not depend on Convex being reachable, and the
+// next spec-changing reconcile (or a future retry policy) can catch up.
+func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, log logr.Logger, workload *appsv1alpha1.Workload) {
+	if r.ConvexClient == nil {
+		return
+	}
+	err := r.ConvexClient.UpsertWorkload(ctx, convexclient.WorkloadInfo{
+		Name:         workload.Name,
+		Namespace:    workload.Namespace,
+		Subdomain:    workload.Spec.Subdomain,
+		TemplateName: workload.Spec.TemplateName,
+		UserID:       workload.Spec.UserID,
+	})
+	if err != nil {
+		log.Error(err, "failed to notify convex of workload upsert (best-effort)")
+	}
+}
+
+// notifyRemoved tells Convex this workload no longer exists. Best-effort,
+// same reasoning as notifyUpserted.
+func (r *WorkloadReconciler) notifyRemoved(ctx context.Context, log logr.Logger, key types.NamespacedName) {
+	if r.ConvexClient == nil {
+		return
+	}
+	if err := r.ConvexClient.RemoveWorkload(ctx, key.Name, key.Namespace); err != nil {
+		log.Error(err, "failed to notify convex of workload removal (best-effort)")
+	}
 }
 
 // setFailed marks the Workload as Failed and surfaces the reconcile error via

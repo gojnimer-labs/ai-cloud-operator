@@ -59,6 +59,24 @@ func (r *Runnable) CurrentDeployToken() string {
 	return r.tokens.DeployToken
 }
 
+// UpsertWorkload and RemoveWorkload implement
+// internal/controller.WorkloadNotifier, always presenting whatever
+// heartbeat token is current (it may have rotated since the reconciler's
+// last call).
+func (r *Runnable) UpsertWorkload(ctx context.Context, info WorkloadInfo) error {
+	r.mu.RLock()
+	token := r.tokens.HeartbeatToken
+	r.mu.RUnlock()
+	return r.client.UpsertWorkload(ctx, token, info)
+}
+
+func (r *Runnable) RemoveWorkload(ctx context.Context, name, namespace string) error {
+	r.mu.RLock()
+	token := r.tokens.HeartbeatToken
+	r.mu.RUnlock()
+	return r.client.RemoveWorkload(ctx, token, name, namespace)
+}
+
 // Start implements manager.Runnable. It blocks until ctx is cancelled.
 func (r *Runnable) Start(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("convexclient")

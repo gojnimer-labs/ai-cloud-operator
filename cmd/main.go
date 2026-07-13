@@ -185,16 +185,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.WorkloadReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "workload")
+	convexRunnable, err := setupConvexIntegration(mgr)
+	if err != nil {
+		setupLog.Error(err, "Failed to set up convex registration/heartbeat and operator api")
 		os.Exit(1)
 	}
 
-	if err := setupConvexIntegration(mgr); err != nil {
-		setupLog.Error(err, "Failed to set up convex registration/heartbeat and operator api")
+	if err := (&controller.WorkloadReconciler{
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		ConvexClient: convexRunnable,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "workload")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
@@ -226,8 +228,10 @@ func main() {
 //
 // Both are added to the manager via mgr.Add so their lifecycle (start after
 // the cache syncs, stop on SIGTERM) is managed the same way as the
-// reconcile loop, with no bespoke goroutine plumbing in main.
-func setupConvexIntegration(mgr ctrl.Manager) error {
+// reconcile loop, with no bespoke goroutine plumbing in main. The returned
+// *convexclient.Runnable is also wired into the WorkloadReconciler so it can
+// report workload lifecycle events back to Convex.
+func setupConvexIntegration(mgr ctrl.Manager) (*convexclient.Runnable, error) {
 	convexBaseURL := os.Getenv("CONVEX_BASE_URL")
 	enrollmentSecret := os.Getenv("ENROLLMENT_SECRET")
 	operatorName := os.Getenv("OPERATOR_NAME")
@@ -236,7 +240,7 @@ func setupConvexIntegration(mgr ctrl.Manager) error {
 	gatewaySigningSecret := os.Getenv("GATEWAY_SIGNING_SECRET")
 
 	if convexBaseURL == "" || enrollmentSecret == "" || operatorName == "" || operatorExternalURL == "" || podNamespace == "" || gatewaySigningSecret == "" {
-		return errors.New("CONVEX_BASE_URL, ENROLLMENT_SECRET, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, POD_NAMESPACE, and GATEWAY_SIGNING_SECRET must all be set")
+		return nil, errors.New("CONVEX_BASE_URL, ENROLLMENT_SECRET, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, POD_NAMESPACE, and GATEWAY_SIGNING_SECRET must all be set")
 	}
 
 	apiListenAddr := os.Getenv("API_LISTEN_ADDR")
@@ -248,7 +252,7 @@ func setupConvexIntegration(mgr ctrl.Manager) error {
 	if raw := os.Getenv("HEARTBEAT_INTERVAL"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil {
-			return errors.New("invalid HEARTBEAT_INTERVAL: " + err.Error())
+			return nil, errors.New("invalid HEARTBEAT_INTERVAL: " + err.Error())
 		}
 		heartbeatInterval = parsed
 	}
@@ -264,14 +268,18 @@ func setupConvexIntegration(mgr ctrl.Manager) error {
 		heartbeatInterval,
 	)
 	if err := mgr.Add(convexRunnable); err != nil {
-		return err
+		return nil, err
 	}
 
 	proxy, err := gateway.NewServiceProxy(mgr.GetClient(), mgr.GetConfig())
 	if err != nil {
-		return fmt.Errorf("building gateway service proxy: %w", err)
+		return nil, fmt.Errorf("building gateway service proxy: %w", err)
 	}
 
 	apiServer := api.New(mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken, []byte(gatewaySigningSecret), proxy)
-	return mgr.Add(apiServer)
+	if err := mgr.Add(apiServer); err != nil {
+		return nil, err
+	}
+
+	return convexRunnable, nil
 }
