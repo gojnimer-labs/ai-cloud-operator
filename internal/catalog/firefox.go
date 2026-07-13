@@ -62,9 +62,10 @@ var Firefox = Template{
 			},
 		}, nil
 	},
-	Description: "Full Firefox browser accessible via web interface",
-	ID:          "firefox",
-	Icon:        "🦊",
-	Name:        "Firefox Browser",
-	Parameters:  browserParameters,
+	CustomFunctions: []CustomFunction{backupStateFunction(".mozilla/firefox", "firefox")},
+	Description:     "Full Firefox browser accessible via web interface",
+	ID:              "firefox",
+	Icon:            "🦊",
+	Name:            "Firefox Browser",
+	Parameters:      browserParameters,
 }

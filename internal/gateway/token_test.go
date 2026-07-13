@@ -17,10 +17,6 @@ limitations under the License.
 package gateway
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"testing"
 	"time"
 )
@@ -29,15 +25,11 @@ const testSecret = "test-gateway-signing-secret"
 
 func mintTestToken(t *testing.T, secret string, p Payload) string {
 	t.Helper()
-	raw, err := json.Marshal(p)
+	token, err := Sign([]byte(secret), p)
 	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
+		t.Fatalf("sign: %v", err)
 	}
-	payloadB64 := base64.RawURLEncoding.EncodeToString(raw)
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(payloadB64))
-	sigB64 := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	return payloadB64 + "." + sigB64
+	return token
 }
 
 func TestVerifyValidTokenRoundTrips(t *testing.T) {

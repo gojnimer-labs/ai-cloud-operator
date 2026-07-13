@@ -43,6 +43,7 @@ import (
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/controller"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/convexclient"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/podexec"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
 	// +kubebuilder:scaffold:imports
 )
@@ -276,7 +277,12 @@ func setupConvexIntegration(mgr ctrl.Manager) (*convexclient.Runnable, error) {
 		return nil, fmt.Errorf("building gateway service proxy: %w", err)
 	}
 
-	apiServer := api.New(mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken, []byte(gatewaySigningSecret), proxy)
+	podExecutor, err := podexec.New(mgr.GetConfig())
+	if err != nil {
+		return nil, fmt.Errorf("building pod executor: %w", err)
+	}
+
+	apiServer := api.New(mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken, []byte(gatewaySigningSecret), convexRunnable, proxy, podExecutor)
 	if err := mgr.Add(apiServer); err != nil {
 		return nil, err
 	}

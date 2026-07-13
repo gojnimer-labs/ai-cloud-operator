@@ -265,7 +265,7 @@ func (r *WorkloadReconciler) render(workload *appsv1alpha1.Workload) (catalog.Re
 		return catalog.Rendered{}, fmt.Errorf("parsing config: %w", err)
 	}
 
-	resolvedParams, err := catalog.ResolveParams(tmpl, rawParams)
+	resolvedParams, err := catalog.ResolveParams(tmpl.Parameters, rawParams)
 	if err != nil {
 		return catalog.Rendered{}, fmt.Errorf("resolving template parameters: %w", err)
 	}

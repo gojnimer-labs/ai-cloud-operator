@@ -71,9 +71,10 @@ var Chrome = Template{
 			},
 		}, nil
 	},
-	Description: "Full Chrome browser accessible via web interface",
-	ID:          "chrome",
-	Icon:        "🌐",
-	Name:        "Chrome Browser",
-	Parameters:  browserParameters,
+	CustomFunctions: []CustomFunction{backupStateFunction(".config/google-chrome", "chrome")},
+	Description:     "Full Chrome browser accessible via web interface",
+	ID:              "chrome",
+	Icon:            "🌐",
+	Name:            "Chrome Browser",
+	Parameters:      browserParameters,
 }

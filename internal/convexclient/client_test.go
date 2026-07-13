@@ -127,6 +127,48 @@ func TestUpsertWorkloadNonOKIsError(t *testing.T) {
 	}
 }
 
+func TestVerifyGatewayTokenSendsExpectedPayload(t *testing.T) {
+	var got verifyGatewayTokenRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operators/gateway/verify" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer hb-1" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(verifyGatewayTokenResponse{UserID: "user-1"})
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	userID, err := c.VerifyGatewayToken(context.Background(), "hb-1", "one-time-token", "default", "demo")
+	if err != nil {
+		t.Fatalf("verify gateway token: %v", err)
+	}
+	if userID != "user-1" {
+		t.Fatalf("expected userId user-1, got %q", userID)
+	}
+	if got.Token != "one-time-token" || got.Namespace != "default" || got.Name != "demo" {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestVerifyGatewayTokenNonOKIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	if _, err := c.VerifyGatewayToken(context.Background(), "hb-1", "bad-token", "default", "demo"); err == nil {
+		t.Fatalf("expected an error on non-200 response")
+	}
+}
+
 func TestRemoveWorkloadSendsExpectedPayload(t *testing.T) {
 	var got removeWorkloadRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

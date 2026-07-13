@@ -195,6 +195,53 @@ func (c *Client) UpsertWorkload(ctx context.Context, heartbeatToken string, info
 	return nil
 }
 
+type verifyGatewayTokenRequest struct {
+	Token     string `json:"token"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+type verifyGatewayTokenResponse struct {
+	UserID string `json:"userId"`
+}
+
+// VerifyGatewayToken asks Convex to check and consume a one-time gateway
+// access token minted for namespace/name. Convex is the only party that can
+// enforce true single-use (it holds the state), so the operator always
+// defers here rather than verifying anything about the token itself locally
+// — see internal/gateway.Sign/Verify for what the operator mints *after*
+// this call succeeds (its own session cookie, entirely local from then on).
+// Returns the token's userId on success.
+func (c *Client) VerifyGatewayToken(ctx context.Context, heartbeatToken, token, namespace, name string) (string, error) {
+	body, err := json.Marshal(verifyGatewayTokenRequest{Token: token, Namespace: namespace, Name: name})
+	if err != nil {
+		return "", fmt.Errorf("marshaling verify gateway token request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/operators/gateway/verify", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("building verify gateway token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+heartbeatToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("calling verify gateway token: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("verify gateway token returned status %d", resp.StatusCode)
+	}
+
+	var out verifyGatewayTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decoding verify gateway token response: %w", err)
+	}
+	return out.UserID, nil
+}
+
 type removeWorkloadRequest struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`

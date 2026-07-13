@@ -43,16 +43,28 @@ func Get(id string) (Template, bool) {
 	return Template{}, false
 }
 
+// GetCustomFunction looks up a named CustomFunction on a template.
+func GetCustomFunction(t Template, key string) (CustomFunction, bool) {
+	for _, fn := range t.CustomFunctions {
+		if fn.Key == key {
+			return fn, true
+		}
+	}
+	return CustomFunction{}, false
+}
+
 // ResolveParams applies each parameter's default (when the caller didn't
 // supply a value) and checks that every required parameter ends up with a
-// value. It returns a new map — raw is never mutated.
-func ResolveParams(t Template, raw map[string]any) (map[string]any, error) {
-	resolved := make(map[string]any, len(t.Parameters))
+// value. It returns a new map — raw is never mutated. Takes a bare parameter
+// list rather than a Template so it's equally usable for a Template's own
+// Parameters and a CustomFunction's Parameters.
+func ResolveParams(params []Parameter, raw map[string]any) (map[string]any, error) {
+	resolved := make(map[string]any, len(params))
 	for k, v := range raw {
 		resolved[k] = v
 	}
 
-	for _, p := range t.Parameters {
+	for _, p := range params {
 		if _, ok := resolved[p.Key]; !ok && p.Default != nil {
 			resolved[p.Key] = p.Default
 		}

@@ -16,7 +16,25 @@ limitations under the License.
 
 package catalog
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+// fakePodExecutor is a minimal in-package stand-in for a real client-go SPDY
+// exec, recording the single call made so tests can assert on it.
+type fakePodExecutor struct {
+	namespace, podName, container string
+	command                       []string
+	stdout, stderr                string
+	err                           error
+}
+
+func (f *fakePodExecutor) Exec(_ context.Context, namespace, podName, container string, command []string) (string, string, error) {
+	f.namespace, f.podName, f.container, f.command = namespace, podName, container, command
+	return f.stdout, f.stderr, f.err
+}
 
 func TestGetReturnsKnownTemplates(t *testing.T) {
 	for _, id := range []string{"nginx", "firefox", "chrome"} {
@@ -31,7 +49,7 @@ func TestGetReturnsKnownTemplates(t *testing.T) {
 
 func TestResolveParamsAppliesDefaults(t *testing.T) {
 	tmpl, _ := Get("nginx")
-	resolved, err := ResolveParams(tmpl, map[string]any{})
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,7 +63,7 @@ func TestResolveParamsAppliesDefaults(t *testing.T) {
 
 func TestResolveParamsUserValueOverridesDefault(t *testing.T) {
 	tmpl, _ := Get("nginx")
-	resolved, err := ResolveParams(tmpl, map[string]any{"logLevel": "error"})
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{"logLevel": "error"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -61,14 +79,14 @@ func TestResolveParamsRejectsMissingRequired(t *testing.T) {
 			{Key: "name", Required: true, Type: ParameterTypeString},
 		},
 	}
-	if _, err := ResolveParams(tmpl, map[string]any{}); err == nil {
+	if _, err := ResolveParams(tmpl.Parameters, map[string]any{}); err == nil {
 		t.Fatalf("expected an error for missing required parameter")
 	}
 }
 
 func TestNginxBuildUsesResolvedParams(t *testing.T) {
 	tmpl, _ := Get("nginx")
-	resolved, err := ResolveParams(tmpl, map[string]any{"logLevel": "warn"})
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{"logLevel": "warn"})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -107,6 +125,86 @@ func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected PROFILE_DOWNLOAD_URL env var on init container, got %+v", rendered.InitContainers[0].Env)
+	}
+}
+
+func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
+	for _, id := range []string{"firefox", "chrome"} {
+		tmpl, _ := Get(id)
+		fn, ok := GetCustomFunction(tmpl, "backup_state")
+		if !ok {
+			t.Fatalf("%s: expected a backup_state custom function", id)
+		}
+		if len(fn.Parameters) != 2 || fn.Parameters[0].Key != "label" || fn.Parameters[1].Key != "uploadUrl" {
+			t.Fatalf("%s: expected label and uploadUrl parameters, got %+v", id, fn.Parameters)
+		}
+		if fn.Parameters[0].Source != ParameterSourceUser {
+			t.Fatalf("%s: expected label to be user-sourced", id)
+		}
+		if fn.Parameters[1].Source != ParameterSourceSystem {
+			t.Fatalf("%s: expected uploadUrl to be system-sourced", id)
+		}
+	}
+	if _, ok := GetCustomFunction(Template{}, "backup_state"); ok {
+		t.Fatalf("expected no functions on an empty template")
+	}
+}
+
+func TestBackupStateFunctionRequiresUploadURL(t *testing.T) {
+	tmpl, _ := Get("firefox")
+	fn, _ := GetCustomFunction(tmpl, "backup_state")
+
+	exec := &fakePodExecutor{}
+	if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: "default", PodName: "firefox-abc"}, map[string]any{}); err == nil {
+		t.Fatalf("expected an error when uploadUrl is missing")
+	}
+	if exec.command != nil {
+		t.Fatalf("expected no exec call when validation fails, got %+v", exec.command)
+	}
+}
+
+func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
+	tmpl, _ := Get("firefox")
+	fn, _ := GetCustomFunction(tmpl, "backup_state")
+
+	exec := &fakePodExecutor{stdout: "Backup completed successfully"}
+	result, err := fn.Run(context.Background(), exec, PodRef{Namespace: "default", PodName: "firefox-abc"}, map[string]any{
+		"uploadUrl": "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result["stdout"] != "Backup completed successfully" {
+		t.Fatalf("expected stdout to be returned, got %+v", result)
+	}
+
+	if exec.namespace != "default" || exec.podName != "firefox-abc" || exec.container != "firefox" {
+		t.Fatalf("unexpected exec target: namespace=%q podName=%q container=%q", exec.namespace, exec.podName, exec.container)
+	}
+	// The profile path and upload URL must travel as trailing positional
+	// args (not interpolated into the script string) — see
+	// backupStateFunction's doc comment for why.
+	if len(exec.command) < 2 {
+		t.Fatalf("expected at least 2 trailing args, got %+v", exec.command)
+	}
+	lastTwo := exec.command[len(exec.command)-2:]
+	if lastTwo[0] != ".mozilla/firefox" {
+		t.Fatalf("expected profile path as second-to-last arg, got %q", lastTwo[0])
+	}
+	if lastTwo[1] != "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900" {
+		t.Fatalf("expected upload URL as last arg, got %q", lastTwo[1])
+	}
+}
+
+func TestBackupStateFunctionWrapsExecutorError(t *testing.T) {
+	tmpl, _ := Get("chrome")
+	fn, _ := GetCustomFunction(tmpl, "backup_state")
+
+	exec := &fakePodExecutor{stderr: "tar: /config/.config/google-chrome: No such file", err: errors.New("command terminated with exit code 1")}
+	if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: "default", PodName: "chrome-abc"}, map[string]any{
+		"uploadUrl": "https://r2.example.com/upload",
+	}); err == nil {
+		t.Fatalf("expected the executor's error to surface")
 	}
 }
 

@@ -77,6 +77,15 @@ func (r *Runnable) RemoveWorkload(ctx context.Context, name, namespace string) e
 	return r.client.RemoveWorkload(ctx, token, name, namespace)
 }
 
+// VerifyGatewayToken implements internal/api.GatewayVerifier, always
+// presenting whatever heartbeat token is current.
+func (r *Runnable) VerifyGatewayToken(ctx context.Context, token, namespace, name string) (string, error) {
+	r.mu.RLock()
+	heartbeatToken := r.tokens.HeartbeatToken
+	r.mu.RUnlock()
+	return r.client.VerifyGatewayToken(ctx, heartbeatToken, token, namespace, name)
+}
+
 // Start implements manager.Runnable. It blocks until ctx is cancelled.
 func (r *Runnable) Start(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("convexclient")

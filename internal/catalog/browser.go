@@ -17,6 +17,7 @@ limitations under the License.
 package catalog
 
 import (
+	"context"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -34,9 +35,12 @@ var browserParameters = []Parameter{
 		Key:         "profileName",
 		Label:       "Profile name",
 		Description: "Identifies which saved profile to restore, if any.",
-		Type:        ParameterTypeString,
-		Source:      ParameterSourceUser,
-		Required:    false,
+		// The value is a selectOptions row id, not a literal profile name —
+		// Convex resolves it back to an actual R2 object when restoring (see
+		// convex/workloads/actions.ts#deployWorkload).
+		Type:     DynamicSelectType("profiles_browser"),
+		Source:   ParameterSourceUser,
+		Required: false,
 	},
 	{
 		Key:      "restoreProfile",
@@ -61,23 +65,24 @@ var browserParameters = []Parameter{
 // env var, never string-interpolated into the shell script itself, so it
 // can't break out of quoting.
 //
-// Unlike v1's version of this script, this checks the HTTP status before
-// extracting — a 404 (no profile saved yet) is treated as "start fresh"
-// instead of trying to tar-extract an error response body.
+// Deliberately uses only tools already built into alpine:latest's BusyBox
+// (tar, gzip, wget) rather than `apk add curl tar gzip` — that install step
+// needs network access to Alpine's own package index just to start a
+// container that, in the common no-restore-requested case, needs no network
+// at all. Any wget failure (missing profile, network error) is treated as
+// "start fresh" rather than distinguished by HTTP status.
 func restoreProfileInitContainer(profilePath string, profileDownloadURL string) corev1.Container {
 	script := fmt.Sprintf(`set -e
-apk add --no-cache curl tar gzip
 PROFILE_DIR="/config/%s"
 mkdir -p "$PROFILE_DIR"
 if [ -n "$PROFILE_DOWNLOAD_URL" ]; then
   echo "Attempting profile restore from R2..."
-  status=$(curl -sL -w "%%{http_code}" -o /tmp/profile.tar.gz "$PROFILE_DOWNLOAD_URL")
-  if [ "$status" = "200" ]; then
+  if wget -q -O /tmp/profile.tar.gz "$PROFILE_DOWNLOAD_URL"; then
     tar -xzf /tmp/profile.tar.gz -C /config
     rm -f /tmp/profile.tar.gz
     echo "Profile restored successfully"
   else
-    echo "No existing profile found (HTTP $status), starting fresh"
+    echo "No existing profile found (or download failed), starting fresh"
     rm -f /tmp/profile.tar.gz
   fi
 else
@@ -96,6 +101,64 @@ chmod -R 755 /config
 		Name:  "restore-profile",
 		VolumeMounts: []corev1.VolumeMount{
 			{MountPath: "/config", Name: "config"},
+		},
+	}
+}
+
+// backupStateFunction builds the "backup_state" CustomFunction shared by
+// firefox/chrome: the first instance of the reusable custom-function
+// pattern (see catalog.CustomFunction) — a named operation against an
+// already-running workload, discovered by the frontend through the same
+// catalog response as deploy-time parameters, with its own Parameters
+// (including a system-sourced uploadUrl Convex computes, mirroring how
+// profileDownloadUrl works for deploy-time restore).
+//
+// profilePath and uploadUrl are passed as sh positional parameters ($1, $2)
+// rather than interpolated into the script string, so a URL containing
+// shell-meaningful characters (S3 presigned URLs are full of & and % in
+// their query string) can never be misparsed as script syntax.
+func backupStateFunction(profilePath, containerName string) CustomFunction {
+	return CustomFunction{
+		Key:         "backup_state",
+		Label:       "Backup profile",
+		Description: "Tars the current browser profile and uploads it to R2 so it can be restored into a future deploy.",
+		Parameters: []Parameter{
+			{
+				Key:         "label",
+				Label:       "Backup name",
+				Description: "A name to identify this saved profile later, when restoring it into a future deploy.",
+				Type:        ParameterTypeString,
+				Source:      ParameterSourceUser,
+				Required:    false,
+			},
+			{
+				Key:      "uploadUrl",
+				Label:    "Upload URL (system)",
+				Type:     ParameterTypeString,
+				Source:   ParameterSourceSystem,
+				Required: true,
+			},
+		},
+		// Run never reads "label" — it exists only so the frontend knows to
+		// prompt for it; Convex reads it back from the request to name the
+		// selectOptions row it records after a successful backup (see
+		// ai-cloud-v2's workloads/actions.ts#runCustomFunction).
+		Run: func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) (map[string]any, error) {
+			uploadURL := paramString(params, "uploadUrl", "")
+			if uploadURL == "" {
+				return nil, fmt.Errorf("uploadUrl is required")
+			}
+			const script = `set -e
+tar czf /tmp/backup.tar.gz -C /config "$1"
+curl -sf -X PUT --upload-file /tmp/backup.tar.gz "$2"
+rm -f /tmp/backup.tar.gz
+`
+			command := []string{"/bin/sh", "-c", script, "sh", profilePath, uploadURL}
+			stdout, stderr, err := exec.Exec(ctx, pod.Namespace, pod.PodName, containerName, command)
+			if err != nil {
+				return nil, fmt.Errorf("backup exec failed: %w (stderr: %s)", err, stderr)
+			}
+			return map[string]any{"stdout": stdout}, nil
 		},
 	}
 }
