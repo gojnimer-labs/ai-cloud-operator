@@ -83,6 +83,7 @@ func (s *Server) testHandler() http.Handler {
 	mux.Handle("GET /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
 	mux.Handle("DELETE /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
 	mux.Handle("GET /gw/{namespace}/{name}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
+	mux.Handle("GET /catalog", s.requireDeployToken(http.HandlerFunc(s.handleCatalog)))
 	return mux
 }
 
@@ -302,5 +303,102 @@ func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 	}
 	if rec.Body.String() != "ok from service" {
 		t.Fatalf("unexpected proxied body: %q", rec.Body.String())
+	}
+}
+
+func TestCatalogRequiresDeployToken(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/catalog", nil)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestCatalogListsKnownTemplates(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/catalog", nil)
+	req.Header.Set("Authorization", "Bearer "+testDeployToken)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var templates []struct {
+		ID         string `json:"id"`
+		Parameters []struct {
+			Key    string `json:"key"`
+			Source string `json:"source"`
+		} `json:"parameters"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &templates); err != nil {
+		t.Fatalf("decoding catalog response: %v", err)
+	}
+	if len(templates) != 3 {
+		t.Fatalf("expected 3 templates, got %d", len(templates))
+	}
+
+	for _, tmpl := range templates {
+		if tmpl.ID == "firefox" {
+			foundSystem := false
+			for _, p := range tmpl.Parameters {
+				if p.Key == "profileDownloadUrl" && p.Source == "system" {
+					foundSystem = true
+				}
+			}
+			if !foundSystem {
+				t.Fatalf("expected firefox template to expose profileDownloadUrl as a system parameter")
+			}
+		}
+	}
+}
+
+func TestDeployRejectsUnknownTemplate(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	body, _ := json.Marshal(deployRequest{
+		Name:         "demo",
+		Namespace:    "default",
+		TemplateName: "does-not-exist",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testDeployToken)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeployWithTemplateNameSkipsImageRequirement(t *testing.T) {
+	s, c := newTestServer(t)
+
+	body, _ := json.Marshal(deployRequest{
+		Name:         "demo-nginx",
+		Namespace:    "default",
+		TemplateName: "nginx",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testDeployToken)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var workload appsv1alpha1.Workload
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "demo-nginx"}, &workload); err != nil {
+		t.Fatalf("expected workload CR to be created: %v", err)
+	}
+	if workload.Spec.TemplateName != "nginx" {
+		t.Fatalf("expected templateName=nginx, got %q", workload.Spec.TemplateName)
 	}
 }

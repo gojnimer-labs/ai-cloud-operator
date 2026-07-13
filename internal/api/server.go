@@ -25,6 +25,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
 )
 
@@ -78,6 +80,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.Handle("GET /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
 	mux.Handle("DELETE /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
 	mux.Handle("GET /gw/{namespace}/{name}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
+	mux.Handle("GET /catalog", s.requireDeployToken(http.HandlerFunc(s.handleCatalog)))
 
 	s.httpServer = &http.Server{
 		Addr:              s.listenAddr,
@@ -155,10 +158,20 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleCatalog returns the full template registry, including
+// system-sourced parameters (e.g. profileDownloadUrl) — Convex needs to know
+// those keys exist so it can compute and inject them, and the frontend is
+// expected to only render source:"user" parameters as form fields.
+func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(catalog.List())
+}
+
 type deployRequest struct {
 	Name          string          `json:"name"`
 	Namespace     string          `json:"namespace"`
-	Image         string          `json:"image"`
+	TemplateName  string          `json:"templateName,omitempty"`
+	Image         string          `json:"image,omitempty"`
 	Replicas      *int32          `json:"replicas,omitempty"`
 	ContainerPort int32           `json:"containerPort,omitempty"`
 	Env           []corev1.EnvVar `json:"env,omitempty"`
@@ -179,9 +192,24 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
-	if req.Name == "" || req.Namespace == "" || req.Image == "" {
-		http.Error(w, "name, namespace, and image are required", http.StatusBadRequest)
+	if req.Name == "" || req.Namespace == "" {
+		http.Error(w, "name and namespace are required", http.StatusBadRequest)
 		return
+	}
+	if req.TemplateName == "" && req.Image == "" {
+		http.Error(w, "image is required when templateName is unset", http.StatusBadRequest)
+		return
+	}
+	if req.TemplateName != "" {
+		tmpl, ok := catalog.Get(req.TemplateName)
+		if !ok {
+			http.Error(w, fmt.Sprintf("unknown template %q", req.TemplateName), http.StatusBadRequest)
+			return
+		}
+		if _, err := catalog.ResolveParams(tmpl, req.Config); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	ctx := r.Context()
@@ -193,6 +221,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, s.client, workload, func() error {
+		workload.Spec.TemplateName = req.TemplateName
 		workload.Spec.Image = req.Image
 		workload.Spec.Replicas = req.Replicas
 		workload.Spec.ContainerPort = req.ContainerPort
