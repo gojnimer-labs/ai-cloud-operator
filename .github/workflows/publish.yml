@@ -22,11 +22,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up QEMU (for arm64 builds — k3s commonly runs on ARM)
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # Patches the builder stage's FROM to --platform=$BUILDPLATFORM (same
+      # trick the Makefile's docker-buildx target uses) so the Go compiler
+      # runs natively and just cross-compiles via GOARCH for each target —
+      # no QEMU emulation of the actual build. Without this, buildx runs the
+      # *entire* builder stage (compiling client-go/controller-runtime from
+      # scratch) under full QEMU emulation for arm64, which is dramatically
+      # slower and prone to hanging.
+      - name: Generate cross-compilation Dockerfile
+        run: |
+          sed -e '1 s/\(^FROM\)/FROM --platform=${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -49,6 +57,7 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          file: Dockerfile.cross
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
@@ -60,3 +69,34 @@ jobs:
 # visibility to Public and link it to this repository. GITHUB_TOKEN can't
 # reliably change package visibility itself, so this one-time step isn't
 # automated here.
+
+  release:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    name: Attach consolidated install.yaml to the release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      # A single YAML with CRDs + RBAC + Deployment (image already
+      # substituted) — so a target machine only needs one `kubectl apply -f`
+      # and never has to clone this repo. See docs/production-deploy.md.
+      - name: Build consolidated install manifest
+        run: make build-installer IMG=ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+
+      - name: Attach to the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" --generate-notes --title "${{ github.ref_name }}" || true
+          gh release upload "${{ github.ref_name }}" dist/install.yaml --clobber
