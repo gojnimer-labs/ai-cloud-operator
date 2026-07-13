@@ -1,0 +1,42 @@
+# Optional — disabled by default (see the commented-out reference in
+# config/default/kustomization.yaml). A generic networking.k8s.io/v1 Ingress
+# works unmodified against k3s's built-in Traefik or a standalone Traefik
+# deployment (both implement the standard Ingress resource), as well as
+# nginx-ingress or most other controllers.
+#
+# TODO(user): before enabling —
+#   1. Set spec.rules[0].host to this operator's real public hostname (must
+#      match OPERATOR_EXTERNAL_URL in config/manager/params.env).
+#   2. Set spec.tls[0].secretName to a Secret holding a TLS cert for that
+#      host — either created out-of-band, or automatically by cert-manager
+#      if the ClusterIssuer annotation below is uncommented and configured.
+#   3. Adjust/remove the ingressClassName if your cluster's default ingress
+#      controller isn't named "traefik" (k3s's bundled Traefik uses this
+#      name; check `kubectl get ingressclass`).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  namespace: system
+  labels:
+    app.kubernetes.io/name: ai-cloud-operator
+    app.kubernetes.io/managed-by: kustomize
+  # annotations:
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: operator.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api
+            port:
+              name: https
+  tls:
+  - hosts:
+    - operator.example.com
+    secretName: ai-cloud-operator-api-tls

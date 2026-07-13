@@ -65,9 +65,56 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        env:
+          # Downward API — the operator persists its Convex-issued token in a
+          # Secret in its own namespace (see internal/tokenstore), so it must
+          # know which namespace that is at runtime.
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          # Explicitly NOT :8443 (the default) — controller-runtime's own
+          # metrics server is already bound to :8443 in this same container
+          # (see manager_metrics_patch.yaml's --metrics-bind-address=:8443).
+          # Leaving this unset would make the two servers race for the same
+          # port and crash-loop one of them.
+          - name: API_LISTEN_ADDR
+            value: ":9443"
+          - name: CONVEX_BASE_URL
+            valueFrom:
+              configMapKeyRef:
+                name: params
+                key: CONVEX_BASE_URL
+          - name: OPERATOR_NAME
+            valueFrom:
+              configMapKeyRef:
+                name: params
+                key: OPERATOR_NAME
+          - name: OPERATOR_EXTERNAL_URL
+            valueFrom:
+              configMapKeyRef:
+                name: params
+                key: OPERATOR_EXTERNAL_URL
+          # Created out-of-band per cluster, never checked into git — see
+          # docs/production-deploy.md. Not a kustomize-generated resource, so
+          # its name here is the literal final name kubectl must create it
+          # with (no namePrefix rewriting applies to it).
+          - name: ENROLLMENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: ai-cloud-operator-env
+                key: ENROLLMENT_SECRET
+          - name: GATEWAY_SIGNING_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: ai-cloud-operator-env
+                key: GATEWAY_SIGNING_SECRET
         ports:
         - containerPort: 8081
           name: health
+          protocol: TCP
+        - containerPort: 9443
+          name: operator-api
           protocol: TCP
         securityContext:
           readOnlyRootFilesystem: true
