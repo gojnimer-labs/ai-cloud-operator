@@ -11,7 +11,14 @@ spec:
     control-plane: controller-manager
     app.kubernetes.io/name: ai-cloud-operator
   ports:
-  - name: https
-    port: 443
+  # Named "http" and numbered 9443, not "https"/443: TLS terminates at the
+  # Ingress edge (see config/ingress) — the operator's own server
+  # (internal/api) speaks plain HTTP on 9443. Traefik's Kubernetes ingress
+  # provider auto-detects a TLS backend from a port literally named "https"
+  # OR numbered 443 — either one alone is enough to make it try, and fail, a
+  # TLS handshake against this plain-HTTP backend ("tls: first record does
+  # not look like a TLS handshake").
+  - name: http
+    port: 9443
     targetPort: 9443
     protocol: TCP

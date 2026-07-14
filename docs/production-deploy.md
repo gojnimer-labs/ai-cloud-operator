@@ -71,7 +71,7 @@ spec:
           service:
             name: ai-cloud-operator-api
             port:
-              name: https
+              name: http
   tls:
   - hosts:
     - operator.example.com
