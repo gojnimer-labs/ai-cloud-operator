@@ -91,8 +91,15 @@ jobs:
       # A single YAML with CRDs + RBAC + Deployment (image already
       # substituted) — so a target machine only needs one `kubectl apply -f`
       # and never has to clone this repo. See docs/production-deploy.md.
+      #
+      # IMG must match the tag docker/metadata-action actually pushed in the
+      # publish job, NOT github.ref_name verbatim — its
+      # `type=semver,pattern={{version}}` rule strips the leading "v" (e.g.
+      # ref v0.1.0 -> pushed tag 0.1.0), so using ref_name directly here
+      # would bake in a tag that was never published, causing
+      # ImagePullBackOff on every deploy.
       - name: Build consolidated install manifest
-        run: make build-installer IMG=ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+        run: make build-installer IMG=ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}
 
       - name: Attach to the GitHub Release
         env:
