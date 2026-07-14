@@ -25,7 +25,7 @@ import (
 // parameters — deliberately exercising the select and number widget types.
 var Nginx = Template{
 	Build: func(params map[string]any) (Rendered, error) {
-		logLevel := paramString(params, "logLevel", "info")
+		logLevel := paramString(params, paramKeyLogLevel, logLevelInfo)
 		workerConnections := paramInt32(params, "workerConnections", 1024)
 
 		return Rendered{
@@ -36,28 +36,28 @@ var Nginx = Template{
 						{Name: "WORKER_CONNECTIONS", Value: int32ToString(workerConnections)},
 					},
 					Image: "nginxdemos/hello:latest",
-					Name:  "nginx",
-					Ports: []corev1.ContainerPort{{ContainerPort: 80, Name: "http"}},
+					Name:  templateIDNginx,
+					Ports: []corev1.ContainerPort{{ContainerPort: 80, Name: portNameHTTP}},
 				},
 			},
 			ServicePorts: []corev1.ServicePort{
-				{Name: "http", Port: 80, TargetPort: intstr.FromInt32(80)},
+				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(80)},
 			},
 		}, nil
 	},
 	Description: "Simple nginx web server with hello world demo",
-	ID:          "nginx",
+	ID:          templateIDNginx,
 	Icon:        "🌐",
 	Name:        "Nginx",
 	Parameters: []Parameter{
 		{
-			Default: "info",
-			Key:     "logLevel",
+			Default: logLevelInfo,
+			Key:     paramKeyLogLevel,
 			Label:   "Log level",
 			Options: []SelectOption{
-				{Label: "Info", Value: "info"},
-				{Label: "Warn", Value: "warn"},
-				{Label: "Error", Value: "error"},
+				{Label: "Info", Value: logLevelInfo},
+				{Label: "Warn", Value: logLevelWarn},
+				{Label: "Error", Value: logLevelError},
 			},
 			Required: false,
 			Source:   ParameterSourceUser,

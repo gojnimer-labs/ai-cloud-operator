@@ -25,6 +25,28 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+// Shared string/numeric literals across the catalog package (source and
+// tests) — extracted so the same value is never typed twice with a chance
+// to drift out of sync.
+const (
+	templateIDNginx   = "nginx"
+	templateIDFirefox = "firefox"
+	templateIDChrome  = "chrome"
+
+	portNameHTTP    = "http"
+	browserHTTPPort = int32(3000)
+
+	browserConfigMountPath = "/config"
+	configVolumeName       = "config"
+	envProfileDownloadURL  = "PROFILE_DOWNLOAD_URL"
+
+	paramKeyLogLevel  = "logLevel"
+	logLevelInfo      = "info"
+	logLevelWarn      = "warn"
+	logLevelError     = "error"
+	paramKeyUploadURL = "uploadUrl"
+)
+
 // browserParameters is the parameter set shared by firefox/chrome: a
 // user-facing choice of whether/what profile to restore, and a
 // system-computed presigned download URL Convex fills in when restore is
@@ -95,12 +117,12 @@ chmod -R 755 /config
 	return corev1.Container{
 		Command: []string{"/bin/sh", "-c", script},
 		Env: []corev1.EnvVar{
-			{Name: "PROFILE_DOWNLOAD_URL", Value: profileDownloadURL},
+			{Name: envProfileDownloadURL, Value: profileDownloadURL},
 		},
 		Image: "alpine:latest",
 		Name:  "restore-profile",
 		VolumeMounts: []corev1.VolumeMount{
-			{MountPath: "/config", Name: "config"},
+			{MountPath: browserConfigMountPath, Name: configVolumeName},
 		},
 	}
 }
@@ -132,7 +154,7 @@ func backupStateFunction(profilePath, containerName string) CustomFunction {
 				Required:    false,
 			},
 			{
-				Key:      "uploadUrl",
+				Key:      paramKeyUploadURL,
 				Label:    "Upload URL (system)",
 				Type:     ParameterTypeString,
 				Source:   ParameterSourceSystem,
@@ -144,7 +166,7 @@ func backupStateFunction(profilePath, containerName string) CustomFunction {
 		// selectOptions row it records after a successful backup (see
 		// ai-cloud-v2's workloads/actions.ts#runCustomFunction).
 		Run: func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) (map[string]any, error) {
-			uploadURL := paramString(params, "uploadUrl", "")
+			uploadURL := paramString(params, paramKeyUploadURL, "")
 			if uploadURL == "" {
 				return nil, fmt.Errorf("uploadUrl is required")
 			}
@@ -176,7 +198,9 @@ func browserResources(cpu, memRequest, memLimit string) corev1.ResourceRequireme
 	}
 }
 
-func browserProbe(port int32, initialDelay int32) *corev1.Probe {
+// browserProbe always targets browserHTTPPort — firefox/chrome are the only
+// callers, and both images listen on the same port.
+func browserProbe(initialDelay int32) *corev1.Probe {
 	return &corev1.Probe{
 		FailureThreshold:    3,
 		InitialDelaySeconds: initialDelay,
@@ -184,7 +208,7 @@ func browserProbe(port int32, initialDelay int32) *corev1.Probe {
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
 				Path: "/",
-				Port: intstr.FromInt32(port),
+				Port: intstr.FromInt32(browserHTTPPort),
 			},
 		},
 		TimeoutSeconds: 5,

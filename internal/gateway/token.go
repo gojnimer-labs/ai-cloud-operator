@@ -89,11 +89,10 @@ func Sign(secret []byte, payload Payload) (string, error) {
 // the base64url payload string, keyed by secret) — exactly what Sign
 // produces.
 func Verify(secret []byte, namespace, name, token string) (*Payload, error) {
-	dot := strings.IndexByte(token, '.')
-	if dot < 0 {
+	payloadB64, sigB64, ok := strings.Cut(token, ".")
+	if !ok {
 		return nil, ErrMalformedToken
 	}
-	payloadB64, sigB64 := token[:dot], token[dot+1:]
 
 	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
 	if err != nil {

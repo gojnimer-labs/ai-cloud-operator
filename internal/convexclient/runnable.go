@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
@@ -88,9 +87,9 @@ func (r *Runnable) VerifyGatewayToken(ctx context.Context, token, namespace, nam
 
 // Start implements manager.Runnable. It blocks until ctx is cancelled.
 func (r *Runnable) Start(ctx context.Context) error {
-	log := logf.FromContext(ctx).WithName("convexclient")
+	ctx = logf.IntoContext(ctx, logf.FromContext(ctx).WithName("convexclient"))
 
-	if err := r.loadOrRegister(ctx, log); err != nil {
+	if err := r.loadOrRegister(ctx); err != nil {
 		return err
 	}
 
@@ -102,7 +101,7 @@ func (r *Runnable) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			r.heartbeatOnce(ctx, log)
+			r.heartbeatOnce(ctx)
 		}
 	}
 }
@@ -110,7 +109,8 @@ func (r *Runnable) Start(ctx context.Context) error {
 // loadOrRegister tries to reuse a persisted token (validating it with one
 // heartbeat call) and falls back to fresh registration if none exists or the
 // stored token is rejected.
-func (r *Runnable) loadOrRegister(ctx context.Context, log logr.Logger) error {
+func (r *Runnable) loadOrRegister(ctx context.Context) error {
+	log := logf.FromContext(ctx)
 	if tokens, ok, err := r.store.Load(ctx); err == nil && ok {
 		if err := r.client.Heartbeat(ctx, tokens.HeartbeatToken); err == nil {
 			log.Info("reusing persisted operator token")
@@ -122,10 +122,10 @@ func (r *Runnable) loadOrRegister(ctx context.Context, log logr.Logger) error {
 		log.Error(err, "failed to load persisted token, will register fresh")
 	}
 
-	return r.register(ctx, log)
+	return r.register(ctx)
 }
 
-func (r *Runnable) register(ctx context.Context, log logr.Logger) error {
+func (r *Runnable) register(ctx context.Context) error {
 	tokens, err := r.client.Register(ctx)
 	if err != nil {
 		return err
@@ -133,12 +133,12 @@ func (r *Runnable) register(ctx context.Context, log logr.Logger) error {
 	if err := r.store.Save(ctx, tokens); err != nil {
 		return err
 	}
-	log.Info("registered with convex")
+	logf.FromContext(ctx).Info("registered with convex")
 	r.setTokens(tokens)
 	return nil
 }
 
-func (r *Runnable) heartbeatOnce(ctx context.Context, log logr.Logger) {
+func (r *Runnable) heartbeatOnce(ctx context.Context) {
 	r.mu.RLock()
 	heartbeatToken := r.tokens.HeartbeatToken
 	r.mu.RUnlock()
@@ -148,13 +148,14 @@ func (r *Runnable) heartbeatOnce(ctx context.Context, log logr.Logger) {
 		return
 	}
 
+	log := logf.FromContext(ctx)
 	if err != ErrUnauthorized {
 		log.Error(err, "heartbeat failed")
 		return
 	}
 
 	log.Info("heartbeat token rejected by convex, re-registering")
-	if err := r.register(ctx, log); err != nil {
+	if err := r.register(ctx); err != nil {
 		log.Error(err, "re-registration failed")
 	}
 }

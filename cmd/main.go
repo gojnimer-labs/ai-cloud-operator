@@ -28,10 +28,12 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -163,7 +165,21 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
+		Scheme: scheme,
+		Client: client.Options{
+			// internal/tokenstore reads/writes exactly one named Secret
+			// under an RBAC grant scoped to get/update/create on that name
+			// only — never list/watch. Left in the default cache, the
+			// manager's shared informer tries to List/Watch all Secrets to
+			// serve that Get, gets 403, and the resulting stuck reflector
+			// stalls the whole shared cache (dragging down the Workload and
+			// Deployment watches with it) until the hardcoded 2-minute
+			// CacheSyncTimeout kills the manager. Excluding Secret routes
+			// tokenstore straight to the API server instead.
+			Cache: &client.CacheOptions{
+				DisableFor: []client.Object{&corev1.Secret{}},
+			},
+		},
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -240,8 +256,12 @@ func setupConvexIntegration(mgr ctrl.Manager) (*convexclient.Runnable, error) {
 	podNamespace := os.Getenv("POD_NAMESPACE")
 	gatewaySigningSecret := os.Getenv("GATEWAY_SIGNING_SECRET")
 
-	if convexBaseURL == "" || enrollmentSecret == "" || operatorName == "" || operatorExternalURL == "" || podNamespace == "" || gatewaySigningSecret == "" {
-		return nil, errors.New("CONVEX_BASE_URL, ENROLLMENT_SECRET, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, POD_NAMESPACE, and GATEWAY_SIGNING_SECRET must all be set")
+	missingRequiredEnv := convexBaseURL == "" || enrollmentSecret == "" || operatorName == "" ||
+		operatorExternalURL == "" || podNamespace == "" || gatewaySigningSecret == ""
+	if missingRequiredEnv {
+		return nil, errors.New(
+			"CONVEX_BASE_URL, ENROLLMENT_SECRET, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, " +
+				"POD_NAMESPACE, and GATEWAY_SIGNING_SECRET must all be set")
 	}
 
 	apiListenAddr := os.Getenv("API_LISTEN_ADDR")
@@ -282,7 +302,10 @@ func setupConvexIntegration(mgr ctrl.Manager) (*convexclient.Runnable, error) {
 		return nil, fmt.Errorf("building pod executor: %w", err)
 	}
 
-	apiServer := api.New(mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken, []byte(gatewaySigningSecret), convexRunnable, proxy, podExecutor)
+	apiServer := api.New(
+		mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken,
+		[]byte(gatewaySigningSecret), convexRunnable, proxy, podExecutor,
+	)
 	if err := mgr.Add(apiServer); err != nil {
 		return nil, err
 	}

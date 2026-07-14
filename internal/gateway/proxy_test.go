@@ -31,11 +31,7 @@ import (
 )
 
 func TestHandlerRewritesToServicesProxyPath(t *testing.T) {
-	const (
-		namespace = "default"
-		name      = "demo"
-		port      = int32(8080)
-	)
+	const port = int32(8080)
 
 	// Fake API server standing in for the real kube-apiserver: asserts the
 	// request path/method it receives matches the services/proxy convention,

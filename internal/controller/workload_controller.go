@@ -20,10 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 	"time"
 
-	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -99,7 +99,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var workload appsv1alpha1.Workload
 	if err := r.Get(ctx, req.NamespacedName, &workload); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.notifyRemoved(ctx, log, req.NamespacedName)
+			r.notifyRemoved(ctx, req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("getting Workload: %w", err)
@@ -122,9 +122,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		labelInstance:  string(workload.UID),
 	}
 	objectLabels := make(map[string]string, len(selectorLabels)+1)
-	for k, v := range selectorLabels {
-		objectLabels[k] = v
-	}
+	maps.Copy(objectLabels, selectorLabels)
 	if v, ok := sanitizeLabelValue(workload.Spec.UserID); ok {
 		objectLabels[labelUserID] = v
 	}
@@ -143,7 +141,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	if specChanged {
-		r.notifyUpserted(ctx, log, &workload)
+		r.notifyUpserted(ctx, &workload)
 	}
 
 	var deployment appsv1.Deployment
@@ -194,7 +192,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // Best-effort: a failure here is logged but never fails reconciliation —
 // the Deployment/Service must not depend on Convex being reachable, and the
 // next spec-changing reconcile (or a future retry policy) can catch up.
-func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, log logr.Logger, workload *appsv1alpha1.Workload) {
+func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, workload *appsv1alpha1.Workload) {
 	if r.ConvexClient == nil {
 		return
 	}
@@ -206,18 +204,18 @@ func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, log logr.Logger
 		UserID:       workload.Spec.UserID,
 	})
 	if err != nil {
-		log.Error(err, "failed to notify convex of workload upsert (best-effort)")
+		logf.FromContext(ctx).Error(err, "failed to notify convex of workload upsert (best-effort)")
 	}
 }
 
 // notifyRemoved tells Convex this workload no longer exists. Best-effort,
 // same reasoning as notifyUpserted.
-func (r *WorkloadReconciler) notifyRemoved(ctx context.Context, log logr.Logger, key types.NamespacedName) {
+func (r *WorkloadReconciler) notifyRemoved(ctx context.Context, key types.NamespacedName) {
 	if r.ConvexClient == nil {
 		return
 	}
 	if err := r.ConvexClient.RemoveWorkload(ctx, key.Name, key.Namespace); err != nil {
-		log.Error(err, "failed to notify convex of workload removal (best-effort)")
+		logf.FromContext(ctx).Error(err, "failed to notify convex of workload removal (best-effort)")
 	}
 }
 
@@ -333,7 +331,7 @@ func (r *WorkloadReconciler) reconcileDeployment(ctx context.Context, workload *
 		deployment.Labels = objectLabels
 		deployment.Spec.Replicas = &replicas
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: selectorLabels}
-		deployment.Spec.Template.ObjectMeta.Labels = objectLabels
+		deployment.Spec.Template.Labels = objectLabels
 		deployment.Spec.Template.Spec.Containers = rendered.Containers
 		deployment.Spec.Template.Spec.InitContainers = rendered.InitContainers
 		deployment.Spec.Template.Spec.Volumes = rendered.Volumes

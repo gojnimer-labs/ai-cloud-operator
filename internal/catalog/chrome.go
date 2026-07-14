@@ -37,16 +37,16 @@ var Chrome = Template{
 						{Name: "TZ", Value: "Etc/UTC"},
 					},
 					Image:         "lscr.io/linuxserver/chrome:latest",
-					LivenessProbe: browserProbe(3000, 30),
-					Name:          "chrome",
+					LivenessProbe: browserProbe(30),
+					Name:          templateIDChrome,
 					Ports: []corev1.ContainerPort{
-						{ContainerPort: 3000, Name: "http"},
+						{ContainerPort: browserHTTPPort, Name: portNameHTTP},
 						{ContainerPort: 3001, Name: "https"},
 					},
-					ReadinessProbe: browserProbe(3000, 15),
+					ReadinessProbe: browserProbe(15),
 					Resources:      browserResources("1000m", "1500Mi", "3Gi"),
 					VolumeMounts: []corev1.VolumeMount{
-						{MountPath: "/config", Name: "config"},
+						{MountPath: browserConfigMountPath, Name: configVolumeName},
 						{MountPath: "/dev/shm", Name: "dshm"},
 					},
 				},
@@ -55,10 +55,10 @@ var Chrome = Template{
 				restoreProfileInitContainer(".config/google-chrome", profileDownloadURL),
 			},
 			ServicePorts: []corev1.ServicePort{
-				{Name: "http", Port: 80, TargetPort: intstr.FromInt32(3000)},
+				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(browserHTTPPort)},
 			},
 			Volumes: []corev1.Volume{
-				{Name: "config", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{Name: configVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 				{
 					Name: "dshm",
 					VolumeSource: corev1.VolumeSource{
@@ -71,9 +71,9 @@ var Chrome = Template{
 			},
 		}, nil
 	},
-	CustomFunctions: []CustomFunction{backupStateFunction(".config/google-chrome", "chrome")},
+	CustomFunctions: []CustomFunction{backupStateFunction(".config/google-chrome", templateIDChrome)},
 	Description:     "Full Chrome browser accessible via web interface",
-	ID:              "chrome",
+	ID:              templateIDChrome,
 	Icon:            "🌐",
 	Name:            "Chrome Browser",
 	Parameters:      browserParameters,

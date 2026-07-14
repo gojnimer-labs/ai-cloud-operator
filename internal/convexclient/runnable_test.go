@@ -25,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -47,14 +46,14 @@ func newFakeTokenStore(t *testing.T) *tokenstore.Store {
 // path: no Secret exists yet, so the Runnable must call Register and persist
 // the result before its first heartbeat.
 func TestLoadOrRegisterFallsBackWhenNoPersistedToken(t *testing.T) {
-	var registerCalls int32
+	var registerCalls atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/operators/register":
-			atomic.AddInt32(&registerCalls, 1)
+		case pathOperatorsRegister:
+			registerCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-1", DeployToken: "dp-1"})
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue})
 		default:
 			t.Fatalf("unexpected call to %s before any token exists", r.URL.Path)
 		}
@@ -62,16 +61,16 @@ func TestLoadOrRegisterFallsBackWhenNoPersistedToken(t *testing.T) {
 	defer srv.Close()
 
 	store := newFakeTokenStore(t)
-	client := New(Config{BaseURL: srv.URL, OperatorName: "op-1"})
+	client := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
 	runnable := NewRunnable(client, store, time.Hour)
 
-	if err := runnable.loadOrRegister(context.Background(), logr.Discard()); err != nil {
+	if err := runnable.loadOrRegister(context.Background()); err != nil {
 		t.Fatalf("loadOrRegister: %v", err)
 	}
-	if got := atomic.LoadInt32(&registerCalls); got != 1 {
+	if got := registerCalls.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 register call, got %d", got)
 	}
-	if runnable.CurrentDeployToken() != "dp-1" {
+	if runnable.CurrentDeployToken() != testDeployTokenValue {
 		t.Fatalf("expected deploy token dp-1, got %q", runnable.CurrentDeployToken())
 	}
 
@@ -79,7 +78,7 @@ func TestLoadOrRegisterFallsBackWhenNoPersistedToken(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("expected token to be persisted, ok=%v err=%v", ok, err)
 	}
-	if persisted.HeartbeatToken != "hb-1" {
+	if persisted.HeartbeatToken != testHeartbeatToken {
 		t.Fatalf("expected persisted heartbeat token hb-1, got %q", persisted.HeartbeatToken)
 	}
 }
@@ -88,15 +87,15 @@ func TestLoadOrRegisterFallsBackWhenNoPersistedToken(t *testing.T) {
 // token" path: the first heartbeat call returns 401, which must trigger a
 // fresh Register call and rotate the in-memory + persisted tokens.
 func TestHeartbeatOnceReregistersOnRejection(t *testing.T) {
-	var heartbeatCalls, registerCalls int32
+	var heartbeatCalls, registerCalls atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/operators/heartbeat":
-			atomic.AddInt32(&heartbeatCalls, 1)
+			heartbeatCalls.Add(1)
 			w.WriteHeader(http.StatusUnauthorized)
-		case "/operators/register":
-			atomic.AddInt32(&registerCalls, 1)
+		case pathOperatorsRegister:
+			registerCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-2", DeployToken: "dp-2"})
 		}
@@ -104,16 +103,16 @@ func TestHeartbeatOnceReregistersOnRejection(t *testing.T) {
 	defer srv.Close()
 
 	store := newFakeTokenStore(t)
-	client := New(Config{BaseURL: srv.URL, OperatorName: "op-1"})
+	client := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
 	runnable := NewRunnable(client, store, time.Hour)
 	runnable.setTokens(tokenstore.Tokens{HeartbeatToken: "hb-stale", DeployToken: "dp-stale"})
 
-	runnable.heartbeatOnce(context.Background(), logr.Discard())
+	runnable.heartbeatOnce(context.Background())
 
-	if atomic.LoadInt32(&heartbeatCalls) != 1 {
+	if heartbeatCalls.Load() != 1 {
 		t.Fatalf("expected 1 heartbeat attempt")
 	}
-	if atomic.LoadInt32(&registerCalls) != 1 {
+	if registerCalls.Load() != 1 {
 		t.Fatalf("expected rejection to trigger exactly 1 re-registration")
 	}
 	if runnable.CurrentDeployToken() != "dp-2" {

@@ -21,11 +21,15 @@ import (
 	"time"
 )
 
-const testSecret = "test-gateway-signing-secret"
+const (
+	testSecret = "test-gateway-signing-secret"
+	namespace  = "default"
+	name       = "demo"
+)
 
-func mintTestToken(t *testing.T, secret string, p Payload) string {
+func mintTestToken(t *testing.T, p Payload) string {
 	t.Helper()
-	token, err := Sign([]byte(secret), p)
+	token, err := Sign([]byte(testSecret), p)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
@@ -33,14 +37,14 @@ func mintTestToken(t *testing.T, secret string, p Payload) string {
 }
 
 func TestVerifyValidTokenRoundTrips(t *testing.T) {
-	token := mintTestToken(t, testSecret, Payload{
-		Namespace: "default",
-		Name:      "demo",
+	token := mintTestToken(t, Payload{
+		Namespace: namespace,
+		Name:      name,
 		UserID:    "user-1",
 		Exp:       time.Now().Add(time.Minute).Unix(),
 	})
 
-	p, err := Verify([]byte(testSecret), "default", "demo", token)
+	p, err := Verify([]byte(testSecret), namespace, name, token)
 	if err != nil {
 		t.Fatalf("expected valid token, got %v", err)
 	}
@@ -50,69 +54,69 @@ func TestVerifyValidTokenRoundTrips(t *testing.T) {
 }
 
 func TestVerifyRejectsTamperedSignature(t *testing.T) {
-	token := mintTestToken(t, testSecret, Payload{
-		Namespace: "default",
-		Name:      "demo",
+	token := mintTestToken(t, Payload{
+		Namespace: namespace,
+		Name:      name,
 		Exp:       time.Now().Add(time.Minute).Unix(),
 	})
 	tampered := token[:len(token)-1] + "x"
 
-	if _, err := Verify([]byte(testSecret), "default", "demo", tampered); err != ErrInvalidSignature {
+	if _, err := Verify([]byte(testSecret), namespace, name, tampered); err != ErrInvalidSignature {
 		t.Fatalf("expected ErrInvalidSignature, got %v", err)
 	}
 }
 
 func TestVerifyRejectsWrongSecret(t *testing.T) {
-	token := mintTestToken(t, testSecret, Payload{
-		Namespace: "default",
-		Name:      "demo",
+	token := mintTestToken(t, Payload{
+		Namespace: namespace,
+		Name:      name,
 		Exp:       time.Now().Add(time.Minute).Unix(),
 	})
 
-	if _, err := Verify([]byte("wrong-secret"), "default", "demo", token); err != ErrInvalidSignature {
+	if _, err := Verify([]byte("wrong-secret"), namespace, name, token); err != ErrInvalidSignature {
 		t.Fatalf("expected ErrInvalidSignature, got %v", err)
 	}
 }
 
 func TestVerifyRejectsExpiredToken(t *testing.T) {
-	token := mintTestToken(t, testSecret, Payload{
-		Namespace: "default",
-		Name:      "demo",
+	token := mintTestToken(t, Payload{
+		Namespace: namespace,
+		Name:      name,
 		Exp:       time.Now().Add(-time.Hour).Unix(),
 	})
 
-	if _, err := Verify([]byte(testSecret), "default", "demo", token); err != ErrExpired {
+	if _, err := Verify([]byte(testSecret), namespace, name, token); err != ErrExpired {
 		t.Fatalf("expected ErrExpired, got %v", err)
 	}
 }
 
 func TestVerifyToleratesSmallClockSkew(t *testing.T) {
-	token := mintTestToken(t, testSecret, Payload{
-		Namespace: "default",
-		Name:      "demo",
+	token := mintTestToken(t, Payload{
+		Namespace: namespace,
+		Name:      name,
 		Exp:       time.Now().Add(-10 * time.Second).Unix(),
 	})
 
-	if _, err := Verify([]byte(testSecret), "default", "demo", token); err != nil {
+	if _, err := Verify([]byte(testSecret), namespace, name, token); err != nil {
 		t.Fatalf("expected token within clock-skew tolerance to verify, got %v", err)
 	}
 }
 
 func TestVerifyRejectsWrongWorkloadScope(t *testing.T) {
-	token := mintTestToken(t, testSecret, Payload{
-		Namespace: "default",
+	token := mintTestToken(t, Payload{
+		Namespace: namespace,
 		Name:      "workload-a",
 		Exp:       time.Now().Add(time.Minute).Unix(),
 	})
 
-	if _, err := Verify([]byte(testSecret), "default", "workload-b", token); err != ErrScopeMismatch {
+	if _, err := Verify([]byte(testSecret), namespace, "workload-b", token); err != ErrScopeMismatch {
 		t.Fatalf("expected ErrScopeMismatch, got %v", err)
 	}
 }
 
 func TestVerifyRejectsMalformedToken(t *testing.T) {
 	for _, tok := range []string{"", "no-dot-here", ".", "abc.", ".abc"} {
-		if _, err := Verify([]byte(testSecret), "default", "demo", tok); err == nil {
+		if _, err := Verify([]byte(testSecret), namespace, name, tok); err == nil {
 			t.Fatalf("expected an error for malformed token %q", tok)
 		}
 	}

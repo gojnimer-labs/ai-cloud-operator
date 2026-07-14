@@ -92,7 +92,7 @@ func (c *Client) Register(ctx context.Context) (tokenstore.Tokens, error) {
 	if err != nil {
 		return tokenstore.Tokens{}, fmt.Errorf("calling register: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return tokenstore.Tokens{}, fmt.Errorf("register returned status %d", resp.StatusCode)
@@ -130,7 +130,7 @@ func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string) error {
 	if err != nil {
 		return fmt.Errorf("calling heartbeat: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -187,7 +187,7 @@ func (c *Client) UpsertWorkload(ctx context.Context, heartbeatToken string, info
 	if err != nil {
 		return fmt.Errorf("calling upsert workload: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("upsert workload returned status %d", resp.StatusCode)
@@ -229,7 +229,7 @@ func (c *Client) VerifyGatewayToken(ctx context.Context, heartbeatToken, token, 
 	if err != nil {
 		return "", fmt.Errorf("calling verify gateway token: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("verify gateway token returned status %d", resp.StatusCode)
@@ -266,7 +266,7 @@ func (c *Client) RemoveWorkload(ctx context.Context, heartbeatToken, name, names
 	if err != nil {
 		return fmt.Errorf("calling remove workload: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("remove workload returned status %d", resp.StatusCode)

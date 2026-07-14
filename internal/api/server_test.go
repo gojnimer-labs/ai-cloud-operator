@@ -44,10 +44,21 @@ const (
 	testServiceName   = "gw-demo"
 	testServiceNS     = "default"
 	testServicePort   = int32(8080)
+	// testOneTimeToken is the only one-time token value these tests ever
+	// need — each test issues it for exactly one (namespace, name) and
+	// requests "?token="+testOneTimeToken, so there's never a reason for it
+	// to vary.
+	testOneTimeToken = "tok-1"
+
+	testWorkloadName        = "demo"
+	testImage               = "nginx:latest"
+	testFirefoxTemplateID   = "firefox"
+	testFirefoxWorkloadName = "my-firefox"
+	testUserID              = "user-1"
 )
 
 // fakeGatewayVerifier stands in for a real Convex round trip: issue records
-// a one-time token as valid for exactly one (namespace, name), and
+// testOneTimeToken as valid for exactly one (namespace, name), and
 // VerifyGatewayToken consumes it — a second attempt to use the same token
 // fails, mirroring Convex's real single-use enforcement.
 type fakeGatewayVerifier struct {
@@ -58,8 +69,8 @@ func newFakeGatewayVerifier() *fakeGatewayVerifier {
 	return &fakeGatewayVerifier{tokens: map[string]struct{ namespace, name, userID string }{}}
 }
 
-func (f *fakeGatewayVerifier) issue(token, namespace, name, userID string) {
-	f.tokens[token] = struct{ namespace, name, userID string }{namespace, name, userID}
+func (f *fakeGatewayVerifier) issue(name string) {
+	f.tokens[testOneTimeToken] = struct{ namespace, name, userID string }{testServiceNS, name, testUserID}
 }
 
 func (f *fakeGatewayVerifier) VerifyGatewayToken(_ context.Context, token, namespace, name string) (string, error) {
@@ -179,9 +190,9 @@ func TestDeployCreatesWorkloadCR(t *testing.T) {
 	s, c, _, _ := newTestServer(t)
 
 	body, _ := json.Marshal(deployRequest{
-		Name:          "demo",
-		Namespace:     "default",
-		Image:         "nginx:latest",
+		Name:          testWorkloadName,
+		Namespace:     testServiceNS,
+		Image:         testImage,
 		ContainerPort: 8080,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
@@ -195,10 +206,10 @@ func TestDeployCreatesWorkloadCR(t *testing.T) {
 	}
 
 	var workload appsv1alpha1.Workload
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "demo"}, &workload); err != nil {
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: testWorkloadName}, &workload); err != nil {
 		t.Fatalf("expected workload CR to be created: %v", err)
 	}
-	if workload.Spec.Image != "nginx:latest" {
+	if workload.Spec.Image != testImage {
 		t.Fatalf("expected image nginx:latest, got %q", workload.Spec.Image)
 	}
 }
@@ -206,7 +217,7 @@ func TestDeployCreatesWorkloadCR(t *testing.T) {
 func TestDeployRejectsMissingFields(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
-	body, _ := json.Marshal(deployRequest{Name: "demo"})
+	body, _ := json.Marshal(deployRequest{Name: testWorkloadName})
 	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testDeployToken)
 	rec := httptest.NewRecorder()
@@ -237,9 +248,9 @@ func TestDeleteRemovesWorkloadCR(t *testing.T) {
 	ctx := context.Background()
 
 	workload := &appsv1alpha1.Workload{}
-	workload.Name = "demo"
-	workload.Namespace = "default"
-	workload.Spec.Image = "nginx:latest"
+	workload.Name = testWorkloadName
+	workload.Namespace = testServiceNS
+	workload.Spec.Image = testImage
 	if err := c.Create(ctx, workload); err != nil {
 		t.Fatalf("seeding workload: %v", err)
 	}
@@ -255,7 +266,7 @@ func TestDeleteRemovesWorkloadCR(t *testing.T) {
 	}
 
 	var check appsv1alpha1.Workload
-	err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "demo"}, &check)
+	err := c.Get(ctx, client.ObjectKey{Namespace: testServiceNS, Name: testWorkloadName}, &check)
 	if err == nil {
 		t.Fatalf("expected workload to be deleted")
 	}
@@ -286,8 +297,8 @@ func TestGatewayRejectsUnknownOrWrongScopeToken(t *testing.T) {
 	s, _, verifier, _ := newTestServer(t)
 
 	// Issued for a different workload name — must not authorize this one.
-	verifier.issue("tok-1", testServiceNS, "some-other-workload", "user-1")
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token=tok-1", nil)
+	verifier.issue("some-other-workload")
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -335,14 +346,14 @@ func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 		if r.URL.Path != wantPath {
 			t.Errorf("unexpected upstream path: %s", r.URL.Path)
 		}
-		w.Write([]byte("ok from service"))
+		_, _ = w.Write([]byte("ok from service"))
 	}))
 	defer apiServer.Close()
 
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
-	verifier.issue("tok-1", testServiceNS, testServiceName, "user-1")
+	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token=tok-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -365,14 +376,14 @@ func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 
 func TestGatewayTokenIsSingleUse(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	defer apiServer.Close()
 
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
-	verifier.issue("tok-1", testServiceNS, testServiceName, "user-1")
+	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token=tok-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -381,7 +392,7 @@ func TestGatewayTokenIsSingleUse(t *testing.T) {
 
 	// Same token again, no cookie this time — the fake verifier already
 	// deleted it on first use, exactly like Convex's real single-use check.
-	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token=tok-1", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
 	rec2 := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusUnauthorized {
@@ -391,14 +402,14 @@ func TestGatewayTokenIsSingleUse(t *testing.T) {
 
 func TestGatewayCookieAuthorizesSubsequentRequestsWithoutToken(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	defer apiServer.Close()
 
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
-	verifier.issue("tok-1", testServiceNS, testServiceName, "user-1")
+	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token=tok-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -493,7 +504,7 @@ func TestCatalogListsKnownTemplates(t *testing.T) {
 	}
 
 	for _, tmpl := range templates {
-		if tmpl.ID == "firefox" {
+		if tmpl.ID == testFirefoxTemplateID {
 			foundSystem := false
 			for _, p := range tmpl.Parameters {
 				if p.Key == "profileDownloadUrl" && p.Source == "system" {
@@ -511,8 +522,8 @@ func TestDeployRejectsUnknownTemplate(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
 	body, _ := json.Marshal(deployRequest{
-		Name:         "demo",
-		Namespace:    "default",
+		Name:         testWorkloadName,
+		Namespace:    testServiceNS,
 		TemplateName: "does-not-exist",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
@@ -530,7 +541,7 @@ func TestDeployWithTemplateNameSkipsImageRequirement(t *testing.T) {
 
 	body, _ := json.Marshal(deployRequest{
 		Name:         "demo-nginx",
-		Namespace:    "default",
+		Namespace:    testServiceNS,
 		TemplateName: "nginx",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
@@ -543,7 +554,7 @@ func TestDeployWithTemplateNameSkipsImageRequirement(t *testing.T) {
 	}
 
 	var workload appsv1alpha1.Workload
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "demo-nginx"}, &workload); err != nil {
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: "demo-nginx"}, &workload); err != nil {
 		t.Fatalf("expected workload CR to be created: %v", err)
 	}
 	if workload.Spec.TemplateName != "nginx" {
@@ -562,7 +573,7 @@ func seedRunningPod(t *testing.T, c client.Client, namespace, workloadName, podN
 			Namespace: namespace,
 			Labels:    map[string]string{"app.kubernetes.io/name": workloadName},
 		},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "firefox", Image: "linuxserver/firefox:latest"}}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: testFirefoxTemplateID, Image: "linuxserver/firefox:latest"}}},
 	}
 	if err := c.Create(context.Background(), pod); err != nil {
 		t.Fatalf("seeding pod: %v", err)
@@ -578,13 +589,13 @@ func TestRunFunctionExecutesAgainstRunningPod(t *testing.T) {
 	executor.stdout = "Backup completed successfully"
 
 	workload := &appsv1alpha1.Workload{}
-	workload.Name = "my-firefox"
-	workload.Namespace = "default"
-	workload.Spec.TemplateName = "firefox"
+	workload.Name = testFirefoxWorkloadName
+	workload.Namespace = testServiceNS
+	workload.Spec.TemplateName = testFirefoxTemplateID
 	if err := c.Create(context.Background(), workload); err != nil {
 		t.Fatalf("seeding workload: %v", err)
 	}
-	seedRunningPod(t, c, "default", "my-firefox", "my-firefox-abc123")
+	seedRunningPod(t, c, testServiceNS, testFirefoxWorkloadName, "my-firefox-abc123")
 
 	body, _ := json.Marshal(runFunctionRequest{Params: map[string]any{"uploadUrl": "https://r2.example.com/upload"}})
 	req := httptest.NewRequest(http.MethodPost, "/workloads/default/my-firefox/functions/backup_state", bytes.NewReader(body))
@@ -606,7 +617,7 @@ func TestRunFunctionExecutesAgainstRunningPod(t *testing.T) {
 		t.Fatalf("expected exactly one exec call, got %d", len(executor.calls))
 	}
 	call := executor.calls[0]
-	if call.podName != "my-firefox-abc123" || call.container != "firefox" {
+	if call.podName != "my-firefox-abc123" || call.container != testFirefoxTemplateID {
 		t.Fatalf("unexpected exec target: podName=%q container=%q", call.podName, call.container)
 	}
 }
@@ -615,9 +626,9 @@ func TestRunFunctionRejectsUnknownFunctionKey(t *testing.T) {
 	s, c, _, _ := newTestServer(t)
 
 	workload := &appsv1alpha1.Workload{}
-	workload.Name = "my-firefox"
-	workload.Namespace = "default"
-	workload.Spec.TemplateName = "firefox"
+	workload.Name = testFirefoxWorkloadName
+	workload.Namespace = testServiceNS
+	workload.Spec.TemplateName = testFirefoxTemplateID
 	if err := c.Create(context.Background(), workload); err != nil {
 		t.Fatalf("seeding workload: %v", err)
 	}
@@ -637,9 +648,9 @@ func TestRunFunctionRejectsMissingRequiredParam(t *testing.T) {
 	s, c, _, _ := newTestServer(t)
 
 	workload := &appsv1alpha1.Workload{}
-	workload.Name = "my-firefox"
-	workload.Namespace = "default"
-	workload.Spec.TemplateName = "firefox"
+	workload.Name = testFirefoxWorkloadName
+	workload.Namespace = testServiceNS
+	workload.Spec.TemplateName = testFirefoxTemplateID
 	if err := c.Create(context.Background(), workload); err != nil {
 		t.Fatalf("seeding workload: %v", err)
 	}
@@ -659,9 +670,9 @@ func TestRunFunctionFailsWhenNoPodIsRunning(t *testing.T) {
 	s, c, _, _ := newTestServer(t)
 
 	workload := &appsv1alpha1.Workload{}
-	workload.Name = "my-firefox"
-	workload.Namespace = "default"
-	workload.Spec.TemplateName = "firefox"
+	workload.Name = testFirefoxWorkloadName
+	workload.Namespace = testServiceNS
+	workload.Spec.TemplateName = testFirefoxTemplateID
 	if err := c.Create(context.Background(), workload); err != nil {
 		t.Fatalf("seeding workload: %v", err)
 	}

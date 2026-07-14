@@ -18,6 +18,7 @@ package catalog
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 )
 
@@ -60,9 +61,7 @@ func GetCustomFunction(t Template, key string) (CustomFunction, bool) {
 // Parameters and a CustomFunction's Parameters.
 func ResolveParams(params []Parameter, raw map[string]any) (map[string]any, error) {
 	resolved := make(map[string]any, len(params))
-	for k, v := range raw {
-		resolved[k] = v
-	}
+	maps.Copy(resolved, raw)
 
 	for _, p := range params {
 		if _, ok := resolved[p.Key]; !ok && p.Default != nil {
@@ -81,15 +80,6 @@ func paramString(params map[string]any, key, fallback string) string {
 	if v, ok := params[key]; ok {
 		if s, ok := v.(string); ok && s != "" {
 			return s
-		}
-	}
-	return fallback
-}
-
-func paramBool(params map[string]any, key string, fallback bool) bool {
-	if v, ok := params[key]; ok {
-		if b, ok := v.(bool); ok {
-			return b
 		}
 	}
 	return fallback

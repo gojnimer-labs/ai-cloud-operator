@@ -22,6 +22,11 @@ import (
 	"testing"
 )
 
+const (
+	testNamespace  = "default"
+	testFirefoxPod = "firefox-abc"
+)
+
 // fakePodExecutor is a minimal in-package stand-in for a real client-go SPDY
 // exec, recording the single call made so tests can assert on it.
 type fakePodExecutor struct {
@@ -37,7 +42,7 @@ func (f *fakePodExecutor) Exec(_ context.Context, namespace, podName, container 
 }
 
 func TestGetReturnsKnownTemplates(t *testing.T) {
-	for _, id := range []string{"nginx", "firefox", "chrome"} {
+	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome} {
 		if _, ok := Get(id); !ok {
 			t.Fatalf("expected template %q to be registered", id)
 		}
@@ -48,13 +53,13 @@ func TestGetReturnsKnownTemplates(t *testing.T) {
 }
 
 func TestResolveParamsAppliesDefaults(t *testing.T) {
-	tmpl, _ := Get("nginx")
+	tmpl, _ := Get(templateIDNginx)
 	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resolved["logLevel"] != "info" {
-		t.Fatalf("expected default logLevel=info, got %v", resolved["logLevel"])
+	if resolved[paramKeyLogLevel] != logLevelInfo {
+		t.Fatalf("expected default logLevel=info, got %v", resolved[paramKeyLogLevel])
 	}
 	if resolved["workerConnections"] != float64(1024) {
 		t.Fatalf("expected default workerConnections=1024, got %v", resolved["workerConnections"])
@@ -62,13 +67,13 @@ func TestResolveParamsAppliesDefaults(t *testing.T) {
 }
 
 func TestResolveParamsUserValueOverridesDefault(t *testing.T) {
-	tmpl, _ := Get("nginx")
-	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{"logLevel": "error"})
+	tmpl, _ := Get(templateIDNginx)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{paramKeyLogLevel: logLevelError})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resolved["logLevel"] != "error" {
-		t.Fatalf("expected logLevel=error, got %v", resolved["logLevel"])
+	if resolved[paramKeyLogLevel] != logLevelError {
+		t.Fatalf("expected logLevel=error, got %v", resolved[paramKeyLogLevel])
 	}
 }
 
@@ -85,8 +90,8 @@ func TestResolveParamsRejectsMissingRequired(t *testing.T) {
 }
 
 func TestNginxBuildUsesResolvedParams(t *testing.T) {
-	tmpl, _ := Get("nginx")
-	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{"logLevel": "warn"})
+	tmpl, _ := Get(templateIDNginx)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{paramKeyLogLevel: logLevelWarn})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -99,7 +104,7 @@ func TestNginxBuildUsesResolvedParams(t *testing.T) {
 	}
 	found := false
 	for _, env := range rendered.Containers[0].Env {
-		if env.Name == "LOG_LEVEL" && env.Value == "warn" {
+		if env.Name == "LOG_LEVEL" && env.Value == logLevelWarn {
 			found = true
 		}
 	}
@@ -109,7 +114,7 @@ func TestNginxBuildUsesResolvedParams(t *testing.T) {
 }
 
 func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
-	tmpl, _ := Get("firefox")
+	tmpl, _ := Get(templateIDFirefox)
 	rendered, err := tmpl.Build(map[string]any{"profileDownloadUrl": "https://example.com/profile.tar.gz"})
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -119,7 +124,7 @@ func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 	}
 	found := false
 	for _, env := range rendered.InitContainers[0].Env {
-		if env.Name == "PROFILE_DOWNLOAD_URL" && env.Value == "https://example.com/profile.tar.gz" {
+		if env.Name == envProfileDownloadURL && env.Value == "https://example.com/profile.tar.gz" {
 			found = true
 		}
 	}
@@ -129,13 +134,13 @@ func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 }
 
 func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
-	for _, id := range []string{"firefox", "chrome"} {
+	for _, id := range []string{templateIDFirefox, templateIDChrome} {
 		tmpl, _ := Get(id)
 		fn, ok := GetCustomFunction(tmpl, "backup_state")
 		if !ok {
 			t.Fatalf("%s: expected a backup_state custom function", id)
 		}
-		if len(fn.Parameters) != 2 || fn.Parameters[0].Key != "label" || fn.Parameters[1].Key != "uploadUrl" {
+		if len(fn.Parameters) != 2 || fn.Parameters[0].Key != "label" || fn.Parameters[1].Key != paramKeyUploadURL {
 			t.Fatalf("%s: expected label and uploadUrl parameters, got %+v", id, fn.Parameters)
 		}
 		if fn.Parameters[0].Source != ParameterSourceUser {
@@ -151,11 +156,11 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 }
 
 func TestBackupStateFunctionRequiresUploadURL(t *testing.T) {
-	tmpl, _ := Get("firefox")
+	tmpl, _ := Get(templateIDFirefox)
 	fn, _ := GetCustomFunction(tmpl, "backup_state")
 
 	exec := &fakePodExecutor{}
-	if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: "default", PodName: "firefox-abc"}, map[string]any{}); err == nil {
+	if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: testFirefoxPod}, map[string]any{}); err == nil {
 		t.Fatalf("expected an error when uploadUrl is missing")
 	}
 	if exec.command != nil {
@@ -164,12 +169,12 @@ func TestBackupStateFunctionRequiresUploadURL(t *testing.T) {
 }
 
 func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
-	tmpl, _ := Get("firefox")
+	tmpl, _ := Get(templateIDFirefox)
 	fn, _ := GetCustomFunction(tmpl, "backup_state")
 
 	exec := &fakePodExecutor{stdout: "Backup completed successfully"}
-	result, err := fn.Run(context.Background(), exec, PodRef{Namespace: "default", PodName: "firefox-abc"}, map[string]any{
-		"uploadUrl": "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900",
+	result, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: testFirefoxPod}, map[string]any{
+		paramKeyUploadURL: "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -178,7 +183,7 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 		t.Fatalf("expected stdout to be returned, got %+v", result)
 	}
 
-	if exec.namespace != "default" || exec.podName != "firefox-abc" || exec.container != "firefox" {
+	if exec.namespace != testNamespace || exec.podName != testFirefoxPod || exec.container != templateIDFirefox {
 		t.Fatalf("unexpected exec target: namespace=%q podName=%q container=%q", exec.namespace, exec.podName, exec.container)
 	}
 	// The profile path and upload URL must travel as trailing positional
@@ -197,25 +202,25 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 }
 
 func TestBackupStateFunctionWrapsExecutorError(t *testing.T) {
-	tmpl, _ := Get("chrome")
+	tmpl, _ := Get(templateIDChrome)
 	fn, _ := GetCustomFunction(tmpl, "backup_state")
 
 	exec := &fakePodExecutor{stderr: "tar: /config/.config/google-chrome: No such file", err: errors.New("command terminated with exit code 1")}
-	if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: "default", PodName: "chrome-abc"}, map[string]any{
-		"uploadUrl": "https://r2.example.com/upload",
+	if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: "chrome-abc"}, map[string]any{
+		paramKeyUploadURL: "https://r2.example.com/upload",
 	}); err == nil {
 		t.Fatalf("expected the executor's error to surface")
 	}
 }
 
 func TestFirefoxBuildWithoutProfileURLStartsFresh(t *testing.T) {
-	tmpl, _ := Get("firefox")
+	tmpl, _ := Get(templateIDFirefox)
 	rendered, err := tmpl.Build(map[string]any{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	for _, env := range rendered.InitContainers[0].Env {
-		if env.Name == "PROFILE_DOWNLOAD_URL" && env.Value != "" {
+		if env.Name == envProfileDownloadURL && env.Value != "" {
 			t.Fatalf("expected empty PROFILE_DOWNLOAD_URL when not provided, got %q", env.Value)
 		}
 	}

@@ -34,6 +34,8 @@ import (
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/convexclient"
 )
 
+const testImage = "nginx:latest"
+
 // fakeNotifier records UpsertWorkload/RemoveWorkload calls for assertions,
 // standing in for a real *convexclient.Runnable.
 type fakeNotifier struct {
@@ -93,7 +95,7 @@ var _ = Describe("Workload Controller", func() {
 						Namespace: resourceNamespace,
 					},
 					Spec: appsv1alpha1.WorkloadSpec{
-						Image: "nginx:latest",
+						Image: testImage,
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -152,7 +154,7 @@ var _ = Describe("Workload Controller", func() {
 		It("applies a valid Spec.UserID as a label on object metadata but not the selector", func() {
 			resource := &appsv1alpha1.Workload{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
-				Spec:       appsv1alpha1.WorkloadSpec{Image: "nginx:latest", UserID: "user-123"},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage, UserID: "user-123"},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 
@@ -200,7 +202,7 @@ var _ = Describe("Workload Controller", func() {
 			resource := &appsv1alpha1.Workload{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
 				Spec: appsv1alpha1.WorkloadSpec{
-					Image:        "nginx:latest",
+					Image:        testImage,
 					Subdomain:    "demo-sub",
 					TemplateName: "nginx",
 					UserID:       "user-456",
