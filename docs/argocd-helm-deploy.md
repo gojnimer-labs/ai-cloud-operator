@@ -75,7 +75,7 @@ spec:
   source:
     repoURL: ghcr.io/gojnimer-labs/charts
     chart: ai-cloud-operator
-    targetRevision: 0.1.3   # matches the vX.Y.Z tag pushed to this repo
+    targetRevision: 0.1.7   # pin to whatever's current — see the repo's Releases page or `git tag -l 'v*' | sort -V | tail -1`; every merge to main gets a new one automatically (.github/workflows/auto-tag.yml)
     helm:
       values: |
         params:
@@ -140,8 +140,8 @@ repository by `repoURL`.
 ## 5. Verify
 
 ```sh
-helm show values oci://ghcr.io/gojnimer-labs/charts/ai-cloud-operator --version 0.1.3
-helm template ai-cloud-operator oci://ghcr.io/gojnimer-labs/charts/ai-cloud-operator --version 0.1.3 -f my-values.yaml
+helm show values oci://ghcr.io/gojnimer-labs/charts/ai-cloud-operator --version 0.1.7
+helm template ai-cloud-operator oci://ghcr.io/gojnimer-labs/charts/ai-cloud-operator --version 0.1.7 -f my-values.yaml
 ```
 
 Then, same as the other deploy paths: `kubectl logs` for `"registered with

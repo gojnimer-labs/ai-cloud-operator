@@ -54,13 +54,14 @@ Helm repository to add.
 
 ```sh
 helm install ai-cloud-operator oci://ghcr.io/gojnimer-labs/charts/ai-cloud-operator \
-  --version 0.1.5 \
   --namespace ai-cloud-operator-system --create-namespace \
   --set params.convexBaseUrl=https://your-convex-deployment.example.com \
   --set params.operatorName=my-cluster \
   --set params.operatorExternalUrl=https://operator.example.com \
   --set enrollmentSecret.existingSecretName=ai-cloud-operator-enrollment
 ```
+
+(omitting `--version` pulls the latest published chart — pass one explicitly to pin, e.g. `--version 0.1.7`)
 
 (create that Secret first: `kubectl create secret generic
 ai-cloud-operator-enrollment -n ai-cloud-operator-system
