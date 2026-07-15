@@ -129,7 +129,7 @@ checked by `TestEntrypointsMatchRenderedServicePorts` in
 `internal/catalog/catalog_test.go`, which runs against every template in the
 registry — forgetting to add an `Entrypoint`, or misspelling its `Name`
 relative to your `ServicePorts`, fails that test immediately. This is what
-lets the gateway route `/gw/{namespace}/{name}/{entrypoint}/{subpath...}`
+lets the gateway route `/gw/{name}/{entrypoint}/{subpath...}`
 requests to the right port by name instead of always using the first one —
 see `internal/gateway/proxy.go`. Only declare an `Entrypoint` for a port that
 actually speaks HTTP; the gateway proxies over HTTP, so a non-HTTP port (a

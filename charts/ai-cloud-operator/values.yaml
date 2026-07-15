@@ -59,6 +59,7 @@ params:
   convexBaseUrl: ""
   operatorExternalUrl: ""
   operatorName: ""
+  workloadNamespace: ai-cloud-workloads
 serviceAccount:
   annotations: {}
   automount: true

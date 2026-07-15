@@ -250,8 +250,8 @@ type Template struct {
 	Parameters []Parameter `json:"parameters"`
 	// Entrypoints lists every web entrypoint this template's Service
 	// exposes. Every template must declare at least one — the gateway's
-	// /gw/{namespace}/{name}/{entrypoint}/{subpath...} route always requires
-	// this segment.
+	// /gw/{name}/{entrypoint}/{subpath...} route always requires this
+	// segment.
 	Entrypoints []Entrypoint                                  `json:"entrypoints"`
 	Operations  []Operation                                   `json:"operations,omitempty"`
 	Build       func(params map[string]any) (Rendered, error) `json:"-"`

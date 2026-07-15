@@ -8,3 +8,4 @@ data:
   CONVEX_BASE_URL: {{ .Values.params.convexBaseUrl | quote }}
   OPERATOR_EXTERNAL_URL: {{ .Values.params.operatorExternalUrl | quote }}
   OPERATOR_NAME: {{ .Values.params.operatorName | quote }}
+  WORKLOAD_NAMESPACE: {{ .Values.params.workloadNamespace | quote }}

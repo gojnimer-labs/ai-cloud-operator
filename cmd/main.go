@@ -48,6 +48,7 @@ import (
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/podexec"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/workloadns"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -258,13 +259,14 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 	operatorName := os.Getenv("OPERATOR_NAME")
 	operatorExternalURL := os.Getenv("OPERATOR_EXTERNAL_URL")
 	podNamespace := os.Getenv("POD_NAMESPACE")
+	workloadNamespace := os.Getenv("WORKLOAD_NAMESPACE")
 
 	missingRequiredEnv := convexBaseURL == "" || enrollmentSecret == "" || operatorName == "" ||
-		operatorExternalURL == "" || podNamespace == ""
+		operatorExternalURL == "" || podNamespace == "" || workloadNamespace == ""
 	if missingRequiredEnv {
 		return nil, errors.New(
 			"CONVEX_BASE_URL, ENROLLMENT_SECRET, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, " +
-				"and POD_NAMESPACE must all be set")
+				"POD_NAMESPACE, and WORKLOAD_NAMESPACE must all be set")
 	}
 
 	// GATEWAY_SIGNING_SECRET is never shared with Convex or anyone else — it
@@ -275,6 +277,15 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 	gatewaySigningSecret, err := gateway.NewKeyStore(mgr.GetClient(), podNamespace).LoadOrGenerate(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("loading or generating gateway signing key: %w", err)
+	}
+
+	// WORKLOAD_NAMESPACE is the single, fixed namespace every workload this
+	// operator manages gets deployed into — an install-time decision, not
+	// something Convex chooses or sends per-request (see internal/api.Server
+	// and internal/gateway.ServiceProxy). A blind create, so this is safe to
+	// call before mgr.Start() (see workloadns.EnsureNamespace).
+	if err := workloadns.EnsureNamespace(ctx, mgr.GetClient(), workloadNamespace); err != nil {
+		return nil, fmt.Errorf("ensuring workload namespace: %w", err)
 	}
 
 	apiListenAddr := os.Getenv("API_LISTEN_ADDR")
@@ -306,7 +317,7 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		return nil, err
 	}
 
-	proxy, err := gateway.NewServiceProxy(mgr.GetClient(), mgr.GetConfig())
+	proxy, err := gateway.NewServiceProxy(mgr.GetClient(), mgr.GetConfig(), workloadNamespace)
 	if err != nil {
 		return nil, fmt.Errorf("building gateway service proxy: %w", err)
 	}
@@ -318,7 +329,7 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 
 	apiServer := api.New(
 		mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken,
-		gatewaySigningSecret, convexRunnable, proxy, podExecutor,
+		gatewaySigningSecret, convexRunnable, proxy, podExecutor, workloadNamespace,
 	)
 	if err := mgr.Add(apiServer); err != nil {
 		return nil, err

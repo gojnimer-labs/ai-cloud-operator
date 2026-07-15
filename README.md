@@ -18,7 +18,7 @@ backend for ownership tracking and browser-facing access:
   changes made directly with `kubectl`, bypassing Convex entirely. Delivery
   is retried until it succeeds, tracked via a `ConvexSynced` status
   condition.
-- **Browser-facing gateway** — `/gw/{namespace}/{name}/{entrypoint}/...` reverse-proxies
+- **Browser-facing gateway** — `/gw/{name}/{entrypoint}/...` reverse-proxies
   into a running workload via the Kubernetes API server's `services/proxy`
   subresource, authenticated by a round trip to Convex followed by a
   self-issued, per-workload signed session cookie (`internal/gateway`).

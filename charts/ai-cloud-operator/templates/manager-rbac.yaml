@@ -15,18 +15,19 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - namespaces
+  - pods/exec
+  - secrets
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
   - get
   - list
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/exec
-  - secrets
-  verbs:
-  - create
 - apiGroups:
   - ""
   resourceNames:

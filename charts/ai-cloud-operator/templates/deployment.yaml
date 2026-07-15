@@ -59,6 +59,11 @@ spec:
             configMapKeyRef:
               key: OPERATOR_EXTERNAL_URL
               name: {{ include "ai-cloud-operator.fullname" . }}-params
+        - name: WORKLOAD_NAMESPACE
+          valueFrom:
+            configMapKeyRef:
+              key: WORKLOAD_NAMESPACE
+              name: {{ include "ai-cloud-operator.fullname" . }}-params
         - name: ENROLLMENT_SECRET
           valueFrom:
             secretKeyRef:

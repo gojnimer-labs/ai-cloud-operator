@@ -95,6 +95,11 @@ spec:
               configMapKeyRef:
                 name: params
                 key: OPERATOR_EXTERNAL_URL
+          - name: WORKLOAD_NAMESPACE
+            valueFrom:
+              configMapKeyRef:
+                name: params
+                key: WORKLOAD_NAMESPACE
           # Created out-of-band per cluster, never checked into git — see
           # docs/production-deploy.md. Not a kustomize-generated resource, so
           # its name here is the literal final name kubectl must create it

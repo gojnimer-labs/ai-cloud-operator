@@ -19,7 +19,7 @@ The image is all CI publishes for code; the manifests are published too, as one 
 kubectl apply -f https://github.com/gojnimer-labs/ai-cloud-operator/releases/latest/download/install.yaml
 ```
 
-This creates the namespace, CRDs, RBAC, the Deployment (image already pinned to the tag it was built from), the API Service, and a ConfigMap with empty placeholder values.
+This creates the namespace, CRDs, RBAC, the Deployment (image already pinned to the tag it was built from), the API Service, and a ConfigMap — `CONVEX_BASE_URL`/`OPERATOR_NAME`/`OPERATOR_EXTERNAL_URL` ship as empty placeholders; `WORKLOAD_NAMESPACE` ships with a real default (`ai-cloud-workloads`) since it doesn't need a per-cluster value to be meaningful.
 
 ### 2. Set this instance's config
 
@@ -31,6 +31,12 @@ kubectl set env deployment/ai-cloud-operator-controller-manager -n ai-cloud-oper
 ```
 
 `kubectl set env` overrides these directly on the Deployment's pod template (regardless that they were originally wired via `configMapKeyRef`) and triggers a rollout automatically. `OPERATOR_EXTERNAL_URL` must be the URL you'll expose this operator at once step 4 (ingress) is wired up — Convex calls back into it for deploy/delete/catalog/gateway-verify, and browsers use it for `/gw/*` routes.
+
+`WORKLOAD_NAMESPACE` is the single Kubernetes namespace every workload this
+operator manages gets deployed into — not something Convex chooses or sends
+per-request. The operator creates it automatically on first boot if it
+doesn't already exist. Only override it (the same `kubectl set env` way) if
+you want workloads somewhere other than the default `ai-cloud-workloads`.
 
 ### 3. Create the Secret
 

@@ -72,15 +72,15 @@ func TestHandlerRewritesToServicesProxyPath(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, readyWorkload()).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: apiServer.URL})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: apiServer.URL}, namespace)
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+	mux.Handle("/gw/{name}/{entrypoint}/{subpath...}", proxy.Handler())
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/http/some/path?token=secret-should-be-stripped&foo=bar", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/demo/http/some/path?token=secret-should-be-stripped&foo=bar", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -118,15 +118,15 @@ func TestHandlerReturns404WhenServiceMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost}, namespace)
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+	mux.Handle("/gw/{name}/{entrypoint}/{subpath...}", proxy.Handler())
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/default/does-not-exist/http/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/does-not-exist/http/", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -152,15 +152,15 @@ func TestHandlerReturns404WhenEntrypointUnknown(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, readyWorkload()).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost}, namespace)
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+	mux.Handle("/gw/{name}/{entrypoint}/{subpath...}", proxy.Handler())
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/does-not-exist/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/demo/does-not-exist/", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -179,15 +179,15 @@ func TestHandlerReturns404WhenWorkloadMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost}, namespace)
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+	mux.Handle("/gw/{name}/{entrypoint}/{subpath...}", proxy.Handler())
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/http/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/demo/http/", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -215,15 +215,15 @@ func TestHandlerServesWaitingPageWhenWorkloadNotReady(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost}, namespace)
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+	mux.Handle("/gw/{name}/{entrypoint}/{subpath...}", proxy.Handler())
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/http/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/demo/http/", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -266,15 +266,15 @@ func TestHandlerServesFailedPageWhenWorkloadFailed(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost}, namespace)
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+	mux.Handle("/gw/{name}/{entrypoint}/{subpath...}", proxy.Handler())
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/http/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/demo/http/", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

@@ -78,13 +78,25 @@ resolves `profileName`/system params), `convex/workloads/actions.ts#runCustomFun
 - [ ] Parse `templates[].entrypoints` (`Entrypoint[]`, always present, at
       least one entry). See **Entrypoints**.
 - [ ] Build gateway URLs as
-      `/gw/{namespace}/{name}/{entrypoint}/{subpath...}` — the entrypoint
-      segment is now **mandatory** for every workload, including
-      single-entrypoint templates like `nginx` (use its one declared
-      `entrypoints[].name`, e.g. `"http"`).
+      `/gw/{name}/{entrypoint}/{subpath...}` — the entrypoint segment is now
+      **mandatory** for every workload, including single-entrypoint templates
+      like `nginx` (use its one declared `entrypoints[].name`, e.g. `"http"`).
 - [ ] When a template declares more than one entrypoint, decide how to
       pick/display which one to open (e.g. a tab/dropdown keyed on
       `entrypoints[].label`) — the operator has no opinion on UI here.
+
+**7. Identity (name and namespace are now operator-owned)**
+- [ ] Stop sending `name`/`namespace` on `POST /workloads` for a template
+      deploy — the operator derives the workload's name itself from
+      `userId`+`templateName`, and deploys into a single fixed namespace
+      configured for this operator instance. `userId` becomes **required**
+      for a template deploy (400 if missing).
+- [ ] Drop the namespace segment from every URL you build:
+      `GET`/`DELETE /workloads/{name}`, `POST /workloads/{name}/functions/
+      {key}`, and the gateway's `/gw/{name}/{entrypoint}/{subpath...}`.
+- [ ] `workloadResponse.namespace` still exists in the deploy response if you
+      want to log/display it — it just always reflects the same
+      operator-configured value now.
 
 ## The shape, field by field
 
@@ -254,7 +266,7 @@ unrelated templates changing doesn't touch it.
 ```
 
 These are operations against an already-*running* workload (invoked via
-`POST /workloads/{namespace}/{name}/functions/{key}`, not the deploy
+`POST /workloads/{name}/functions/{key}`, not the deploy
 endpoint), discovered through this same `/catalog` response. Their
 `parameters` follow every rule above identically (DataSource/Visibility/
 Validation/Required all apply the same way, including "none needed" — an
@@ -276,7 +288,7 @@ operator-side regardless of how often you call a refreshable operation —
 pick a sane interval (seconds-to-minutes) yourselves, since each call is a
 real `exec` into the pod via the Kubernetes API server, not a cheap read.
 
-### Invoking one: `POST /workloads/{namespace}/{name}/functions/{key}`
+### Invoking one: `POST /workloads/{name}/functions/{key}`
 
 Request body: `{ "params": { ... } }` (or `{}`/omit `params` entirely for an
 operation with no parameters). Response body:
@@ -325,7 +337,7 @@ entrypoint name as a path segment for every workload, single-entrypoint or
 not:
 
 ```
-/gw/{namespace}/{name}/{entrypoint}/{subpath...}
+/gw/{name}/{entrypoint}/{subpath...}
 ```
 
 `{entrypoint}` must be one of that workload's template's `entrypoints[].name`
@@ -451,14 +463,12 @@ operation):
 `chrome` is identical in shape to `firefox` (same `browserParameters`,
 different image/id/name/icon).
 
-## Deploying (unchanged by this refactor, included for completeness)
+## Deploying (name/namespace are now operator-owned, not sent by you)
 
 `POST /workloads`:
 
 ```jsonc
 {
-  "name": "my-firefox",
-  "namespace": "default",
   "templateName": "firefox",
   "userId": "user-123",
   "config": {
@@ -469,11 +479,18 @@ different image/id/name/icon).
 }
 ```
 
+No `name` or `namespace` field for a template deploy: the operator derives
+the workload's name itself from `userId`+`templateName` (one workload per
+user per template), and deploys into a single namespace fixed for this
+operator instance at install time. `userId` is **required** — 400 if
+missing. (`name` still exists for the legacy non-template/raw-`image` deploy
+path, which you shouldn't need.)
+
 `config` only needs `static`/`dynamic` (user-facing) keys the user actually
 set plus whatever `system` keys apply — the operator resolves defaults for
 anything else. Response is `202 Accepted` with
 `{ "name", "namespace", "status" }` (the Workload's current `.status`, likely
-still `"Deploying"` at this point — poll `GET /workloads/{namespace}/{name}`
+still `"Deploying"` at this point — poll `GET /workloads/{name}`
 or watch for the Convex-side upsert notification for the real end state).
 
 ## What changed from the old shape
@@ -495,7 +512,7 @@ If you're updating existing Convex code rather than starting fresh:
 - `templates[].customFunctions` → renamed to `templates[].operations` (same
   shape at the Template level, still omitted when empty). Each entry also
   gains `refreshable` (see **Operations** above).
-- Invoking one (`POST /workloads/{namespace}/{name}/functions/{key}`)'s
+- Invoking one (`POST /workloads/{name}/functions/{key}`)'s
   response body shape changed: previously a bare, ad hoc JSON object (e.g.
   `{"stdout": "..."}`); now always
   `{"additionalInfo": [{"name", "type", "value"}, ...]}` — every value is
@@ -503,9 +520,20 @@ If you're updating existing Convex code rather than starting fresh:
   convention which fields might be sensitive.
 - `templates[].entrypoints` → **new**, always present, at least one entry.
   The gateway URL shape changed to require an entrypoint segment:
-  `/gw/{namespace}/{name}/{subpath...}` → 
+  `/gw/{namespace}/{name}/{subpath...}` →
   `/gw/{namespace}/{name}/{entrypoint}/{subpath...}` — **breaking for every
   workload**, not just multi-entrypoint ones. See **Entrypoints**.
+- `deployRequest.name`/`.namespace` → **removed** for a template deploy. The
+  operator derives the workload's name itself from `userId`+`templateName`
+  and deploys into a single namespace fixed for this operator instance —
+  `userId` is now **required** (400 if missing) for a template deploy. Every
+  namespace-taking URL lost its `{namespace}` segment as a result:
+  `/workloads/{namespace}/{name}` → `/workloads/{name}`,
+  `/workloads/{namespace}/{name}/functions/{key}` →
+  `/workloads/{name}/functions/{key}`, and
+  `/gw/{namespace}/{name}/{entrypoint}/{subpath...}` →
+  `/gw/{name}/{entrypoint}/{subpath...}`. `workloadResponse.namespace` is
+  unchanged shape-wise, just always the same operator-configured value now.
 
 ## Ground truth, if you need to verify anything
 

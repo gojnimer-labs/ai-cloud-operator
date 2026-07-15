@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -82,6 +83,10 @@ type Server struct {
 	gatewayVerifier GatewayVerifier
 	proxy           *gateway.ServiceProxy
 	podExecutor     catalog.PodExecutor
+	// namespace is the single, fixed WORKLOAD_NAMESPACE every workload this
+	// operator manages lives in — an install-time config value, not
+	// something the caller sends per-request.
+	namespace string
 
 	httpServer *http.Server
 }
@@ -89,10 +94,11 @@ type Server struct {
 // New builds a Server listening on listenAddr, using c to read/write
 // Workload custom resources, token to authenticate Convex's management
 // calls, gatewaySecret/verifier/proxy to authenticate and serve end-user
-// gateway requests, and podExecutor to run a workload's Operations (see
-// handleRunFunction).
-func New(c client.Client, listenAddr string, token TokenGetter, gatewaySecret []byte, verifier GatewayVerifier, proxy *gateway.ServiceProxy, podExecutor catalog.PodExecutor) *Server {
-	return &Server{client: c, listenAddr: listenAddr, token: token, gatewaySecret: gatewaySecret, gatewayVerifier: verifier, proxy: proxy, podExecutor: podExecutor}
+// gateway requests, podExecutor to run a workload's Operations (see
+// handleRunFunction), and namespace as the single fixed namespace every
+// workload gets deployed into.
+func New(c client.Client, listenAddr string, token TokenGetter, gatewaySecret []byte, verifier GatewayVerifier, proxy *gateway.ServiceProxy, podExecutor catalog.PodExecutor, namespace string) *Server {
+	return &Server{client: c, listenAddr: listenAddr, token: token, gatewaySecret: gatewaySecret, gatewayVerifier: verifier, proxy: proxy, podExecutor: podExecutor, namespace: namespace}
 }
 
 // Start implements manager.Runnable. It blocks until ctx is cancelled, then
@@ -103,11 +109,11 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.Handle("POST /workloads", s.requireDeployToken(http.HandlerFunc(s.handleDeploy)))
-	mux.Handle("GET /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
-	mux.Handle("DELETE /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
-	mux.Handle("GET /gw/{namespace}/{name}/{entrypoint}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
+	mux.Handle("GET /workloads/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
+	mux.Handle("DELETE /workloads/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
+	mux.Handle("GET /gw/{name}/{entrypoint}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
 	mux.Handle("GET /catalog", s.requireDeployToken(http.HandlerFunc(s.handleCatalog)))
-	mux.Handle("POST /workloads/{namespace}/{name}/functions/{key}", s.requireDeployToken(http.HandlerFunc(s.handleRunFunction)))
+	mux.Handle("POST /workloads/{name}/functions/{key}", s.requireDeployToken(http.HandlerFunc(s.handleRunFunction)))
 
 	s.httpServer = &http.Server{
 		Addr:              s.listenAddr,
@@ -178,10 +184,10 @@ func (s *Server) requireDeployToken(next http.Handler) http.Handler {
 //     including sub-resource ones — authenticates from the cookie alone.
 func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		namespace, name := r.PathValue("namespace"), r.PathValue("name")
+		name := r.PathValue("name")
 
 		if cookie, err := r.Cookie(gatewayCookieName); err == nil {
-			if _, err := gateway.Verify(s.gatewaySecret, namespace, name, cookie.Value); err == nil {
+			if _, err := gateway.Verify(s.gatewaySecret, s.namespace, name, cookie.Value); err == nil {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -192,14 +198,14 @@ func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 			http.Error(w, "missing token", http.StatusUnauthorized)
 			return
 		}
-		userID, err := s.gatewayVerifier.VerifyGatewayToken(r.Context(), token, namespace, name)
+		userID, err := s.gatewayVerifier.VerifyGatewayToken(r.Context(), token, s.namespace, name)
 		if err != nil {
 			http.Error(w, "invalid or expired token", http.StatusUnauthorized)
 			return
 		}
 
 		signed, err := gateway.Sign(s.gatewaySecret, gateway.Payload{
-			Namespace: namespace,
+			Namespace: s.namespace,
 			Name:      name,
 			UserID:    userID,
 			Exp:       time.Now().Add(gatewayCookieTTL).Unix(),
@@ -211,7 +217,7 @@ func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 		http.SetCookie(w, &http.Cookie{
 			Name:     gatewayCookieName,
 			Value:    signed,
-			Path:     "/gw/" + namespace + "/" + name,
+			Path:     "/gw/" + name,
 			MaxAge:   int(gatewayCookieTTL.Seconds()),
 			HttpOnly: true,
 			Secure:   true,
@@ -251,7 +257,7 @@ type runFunctionResponse struct {
 // hand off to the operation's own Run implementation.
 func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 	log := logf.FromContext(r.Context())
-	namespace := r.PathValue("namespace")
+	namespace := s.namespace
 	name := r.PathValue("name")
 	key := r.PathValue("key")
 
@@ -308,8 +314,11 @@ func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 }
 
 type deployRequest struct {
-	Name          string          `json:"name"`
-	Namespace     string          `json:"namespace"`
+	// Name is only used for a non-template (raw image) deploy. For a
+	// template deploy, this is ignored entirely — the operator derives the
+	// Workload's name itself from UserID+TemplateName (see workloadSlug) so
+	// the caller never has to pick or track a Kubernetes-safe identifier.
+	Name          string          `json:"name,omitempty"`
 	TemplateName  string          `json:"templateName,omitempty"`
 	Image         string          `json:"image,omitempty"`
 	Replicas      *int32          `json:"replicas,omitempty"`
@@ -335,22 +344,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
-	// Deliberately not logging req.Config: a system-sourced parameter (e.g.
-	// profileDownloadUrl) can be a presigned URL with an auth signature
-	// baked into its query string — logging it in plaintext would leak
-	// that credential into the operator's own logs.
-	log.Info("handleDeploy: received request",
-		"name", req.Name, "namespace", req.Namespace, "templateName", req.TemplateName)
 
-	if req.Name == "" || req.Namespace == "" {
-		http.Error(w, "name and namespace are required", http.StatusBadRequest)
-		return
-	}
-	if errs := validation.IsDNS1123Subdomain(req.Name); len(errs) > 0 {
-		log.Info("handleDeploy: invalid name", "name", req.Name, "errors", errs)
-		http.Error(w, fmt.Sprintf("invalid name %q: %s", req.Name, strings.Join(errs, "; ")), http.StatusBadRequest)
-		return
-	}
 	if req.TemplateName == "" && req.Image == "" {
 		http.Error(w, "image is required when templateName is unset", http.StatusBadRequest)
 		return
@@ -362,18 +356,47 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("unknown template %q", req.TemplateName), http.StatusBadRequest)
 			return
 		}
+		if req.UserID == "" {
+			http.Error(w, "userId is required for a template deploy", http.StatusBadRequest)
+			return
+		}
+		// The caller never picks a name for a template deploy — deriving it
+		// from (userId, templateName) means one workload per user per
+		// template, addressed consistently without Convex having to mint or
+		// track a Kubernetes-safe identifier. Any client-supplied req.Name is
+		// ignored.
+		req.Name = workloadSlug(req.UserID, req.TemplateName)
 		if _, err := catalog.ResolveParams(tmpl.Parameters, req.Config); err != nil {
 			log.Error(err, "handleDeploy: resolving template parameters failed", "templateName", req.TemplateName)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	} else if req.Name == "" {
+		http.Error(w, "name is required for a non-template deploy", http.StatusBadRequest)
+		return
 	}
+	// Service.Name mirrors Workload.Name exactly (see
+	// workload_controller.go's reconcileService), so this must satisfy the
+	// stricter DNS-1123 label rules (<=63 chars, no dots) rather than the
+	// more permissive subdomain form.
+	if errs := validation.IsDNS1123Label(req.Name); len(errs) > 0 {
+		log.Info("handleDeploy: invalid name", "name", req.Name, "errors", errs)
+		http.Error(w, fmt.Sprintf("invalid name %q: %s", req.Name, strings.Join(errs, "; ")), http.StatusBadRequest)
+		return
+	}
+
+	// Deliberately not logging req.Config: a system-sourced parameter (e.g.
+	// profileDownloadUrl) can be a presigned URL with an auth signature
+	// baked into its query string — logging it in plaintext would leak
+	// that credential into the operator's own logs.
+	log.Info("handleDeploy: received request",
+		"name", req.Name, "namespace", s.namespace, "templateName", req.TemplateName)
 
 	ctx := r.Context()
 	workload := &appsv1alpha1.Workload{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      req.Name,
-			Namespace: req.Namespace,
+			Namespace: s.namespace,
 		},
 	}
 
@@ -395,7 +418,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		log.Error(err, "handleDeploy: failed to apply workload", "name", req.Name, "namespace", req.Namespace)
+		log.Error(err, "handleDeploy: failed to apply workload", "name", req.Name, "namespace", s.namespace)
 		http.Error(w, "failed to apply workload: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -410,8 +433,28 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// workloadSlugInvalidChars matches every run of characters a DNS-1123 label
+// can't contain, once userID/templateName have already been lowercased.
+var workloadSlugInvalidChars = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// workloadSlug derives a Workload's Kubernetes name from its owning user and
+// template — one workload per (userId, templateName) pair, so a template
+// deploy never needs the caller to pick or track a Kubernetes-safe
+// identifier. Must satisfy DNS-1123 label rules (<=63 chars, lowercase
+// alphanumeric/hyphen, since Service.Name mirrors this exactly — see
+// workload_controller.go's reconcileService), so this lowercases, replaces
+// every invalid run with a single hyphen, and truncates to fit.
+func workloadSlug(userID, templateName string) string {
+	raw := strings.ToLower(templateName + "-" + userID)
+	slug := strings.Trim(workloadSlugInvalidChars.ReplaceAllString(raw, "-"), "-")
+	if len(slug) > validation.DNS1123LabelMaxLength {
+		slug = strings.TrimRight(slug[:validation.DNS1123LabelMaxLength], "-")
+	}
+	return slug
+}
+
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
-	namespace := r.PathValue("namespace")
+	namespace := s.namespace
 	name := r.PathValue("name")
 
 	var workload appsv1alpha1.Workload
@@ -433,7 +476,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	namespace := r.PathValue("namespace")
+	namespace := s.namespace
 	name := r.PathValue("name")
 
 	workload := &appsv1alpha1.Workload{

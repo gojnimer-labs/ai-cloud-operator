@@ -55,12 +55,16 @@ type ServiceProxy struct {
 	k8sClient client.Client
 	transport http.RoundTripper
 	apiURL    *url.URL
+	// namespace is the single, fixed WORKLOAD_NAMESPACE every workload this
+	// operator manages lives in — an install-time config value, not
+	// something the caller sends per-request (see internal/api.Server).
+	namespace string
 }
 
 // NewServiceProxy builds a ServiceProxy that authenticates to the API server
 // using cfg — the same *rest.Config the manager already uses for every other
 // client-go call, so TLS/auth is handled identically.
-func NewServiceProxy(k8sClient client.Client, cfg *rest.Config) (*ServiceProxy, error) {
+func NewServiceProxy(k8sClient client.Client, cfg *rest.Config, namespace string) (*ServiceProxy, error) {
 	transport, err := rest.TransportFor(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("building api-server transport: %w", err)
@@ -69,20 +73,20 @@ func NewServiceProxy(k8sClient client.Client, cfg *rest.Config) (*ServiceProxy, 
 	if err != nil {
 		return nil, fmt.Errorf("parsing api server host %q: %w", cfg.Host, err)
 	}
-	return &ServiceProxy{k8sClient: k8sClient, transport: transport, apiURL: apiURL}, nil
+	return &ServiceProxy{k8sClient: k8sClient, transport: transport, apiURL: apiURL, namespace: namespace}, nil
 }
 
-// Handler proxies requests for {namespace}/{name}/{entrypoint}/{subpath}
-// through the API server's services/proxy subresource. The target Service's
-// port is resolved with a live Get (not from the Workload CR's spec) — this
-// doubles as an existence check (404 if the Service is gone) and avoids
-// drift between the CR spec and actual cluster state. entrypoint selects
-// which of the Service's (possibly several) named ports to route to — it
-// matches a catalog.Entrypoint.Name, which by construction equals a real
-// corev1.ServicePort.Name (see catalog.TestEntrypointsMatchRenderedServicePorts).
+// Handler proxies requests for {name}/{entrypoint}/{subpath} through the API
+// server's services/proxy subresource, always against p.namespace — the
+// single fixed WORKLOAD_NAMESPACE this operator instance manages. The target
+// Service's port is resolved with a live Get (not from the Workload CR's
+// spec) — this doubles as an existence check (404 if the Service is gone)
+// and avoids drift between the CR spec and actual cluster state. entrypoint
+// selects which of the Service's (possibly several) named ports to route to
+// — it matches a catalog.Entrypoint.Name, which by construction equals a
+// real corev1.ServicePort.Name (see catalog.TestEntrypointsMatchRenderedServicePorts).
 func (p *ServiceProxy) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		namespace := r.PathValue("namespace")
 		name := r.PathValue("name")
 		entrypoint := r.PathValue("entrypoint")
 		subpath := r.PathValue("subpath")
@@ -90,7 +94,7 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 		log := logf.FromContext(r.Context()).WithName("gateway")
 
 		var workload appsv1alpha1.Workload
-		if err := p.k8sClient.Get(r.Context(), client.ObjectKey{Namespace: namespace, Name: name}, &workload); err != nil {
+		if err := p.k8sClient.Get(r.Context(), client.ObjectKey{Namespace: p.namespace, Name: name}, &workload); err != nil {
 			if apierrors.IsNotFound(err) {
 				http.Error(w, "workload not found", http.StatusNotFound)
 				return
@@ -115,7 +119,7 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 				status = http.StatusServiceUnavailable
 			}
 			renderWaitingPage(w, r, status, waitingPageData{
-				Namespace:       namespace,
+				Namespace:       p.namespace,
 				Name:            name,
 				Phase:           workload.Status.Phase,
 				Message:         message,
@@ -129,7 +133,7 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 		}
 
 		var svc corev1.Service
-		if err := p.k8sClient.Get(r.Context(), client.ObjectKey{Namespace: namespace, Name: name}, &svc); err != nil {
+		if err := p.k8sClient.Get(r.Context(), client.ObjectKey{Namespace: p.namespace, Name: name}, &svc); err != nil {
 			if apierrors.IsNotFound(err) {
 				http.Error(w, "workload service not found", http.StatusNotFound)
 				return
@@ -155,7 +159,7 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 			return
 		}
 
-		targetPath := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%d/proxy/%s", namespace, name, port, subpath)
+		targetPath := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%d/proxy/%s", p.namespace, name, port, subpath)
 
 		proxy := &httputil.ReverseProxy{
 			Transport: p.transport,

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +54,7 @@ const (
 
 	testWorkloadName        = "demo"
 	testImage               = "nginx:latest"
+	testNginxTemplateID     = "nginx"
 	testFirefoxTemplateID   = "firefox"
 	testFirefoxWorkloadName = "my-firefox"
 	testUserID              = "user-1"
@@ -123,14 +125,14 @@ func newTestServer(t *testing.T) (*Server, client.Client, *fakeGatewayVerifier, 
 		WithObjects(svc).
 		Build()
 
-	proxy, err := gateway.NewServiceProxy(c, &rest.Config{Host: "http://127.0.0.1:0"})
+	proxy, err := gateway.NewServiceProxy(c, &rest.Config{Host: "http://127.0.0.1:0"}, testServiceNS)
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 
 	verifier := newFakeGatewayVerifier()
 	executor := &fakePodExecutor{}
-	s := New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, executor)
+	s := New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, executor, testServiceNS)
 	return s, c, verifier, executor
 }
 
@@ -138,11 +140,11 @@ func (s *Server) testHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.Handle("POST /workloads", s.requireDeployToken(http.HandlerFunc(s.handleDeploy)))
-	mux.Handle("GET /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
-	mux.Handle("DELETE /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
-	mux.Handle("GET /gw/{namespace}/{name}/{entrypoint}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
+	mux.Handle("GET /workloads/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
+	mux.Handle("DELETE /workloads/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
+	mux.Handle("GET /gw/{name}/{entrypoint}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
 	mux.Handle("GET /catalog", s.requireDeployToken(http.HandlerFunc(s.handleCatalog)))
-	mux.Handle("POST /workloads/{namespace}/{name}/functions/{key}", s.requireDeployToken(http.HandlerFunc(s.handleRunFunction)))
+	mux.Handle("POST /workloads/{name}/functions/{key}", s.requireDeployToken(http.HandlerFunc(s.handleRunFunction)))
 	return mux
 }
 
@@ -172,7 +174,7 @@ func TestWorkloadsRequiresBearerToken(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/workloads/default/demo", nil)
+			req := httptest.NewRequest(http.MethodGet, "/workloads/demo", nil)
 			if tc.header != "" {
 				req.Header.Set("Authorization", tc.header)
 			}
@@ -192,7 +194,6 @@ func TestDeployCreatesWorkloadCR(t *testing.T) {
 
 	body, _ := json.Marshal(deployRequest{
 		Name:          testWorkloadName,
-		Namespace:     testServiceNS,
 		Image:         testImage,
 		ContainerPort: 8080,
 	})
@@ -233,7 +234,7 @@ func TestDeployRejectsMissingFields(t *testing.T) {
 func TestGetReturns404ForUnknownWorkload(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/workloads/default/does-not-exist", nil)
+	req := httptest.NewRequest(http.MethodGet, "/workloads/does-not-exist", nil)
 	req.Header.Set("Authorization", "Bearer "+testDeployToken)
 	rec := httptest.NewRecorder()
 
@@ -256,7 +257,7 @@ func TestDeleteRemovesWorkloadCR(t *testing.T) {
 		t.Fatalf("seeding workload: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodDelete, "/workloads/default/demo", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/workloads/demo", nil)
 	req.Header.Set("Authorization", "Bearer "+testDeployToken)
 	rec := httptest.NewRecorder()
 
@@ -285,7 +286,7 @@ func mintTestCookie(t *testing.T, secret, namespace, name string, exp time.Time)
 func TestGatewayRequiresToken(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/", nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -299,7 +300,7 @@ func TestGatewayRejectsUnknownOrWrongScopeToken(t *testing.T) {
 
 	// Issued for a different workload name — must not authorize this one.
 	verifier.issue("some-other-workload")
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -311,7 +312,7 @@ func TestGatewayRejectsUnknownOrWrongScopeToken(t *testing.T) {
 func TestGatewayRejectsWhenVerifierFails(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token=bogus", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token=bogus", nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -345,12 +346,12 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 		Status:     appsv1alpha1.WorkloadStatus{Phase: "Running"},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, wl).Build()
-	proxy, err := gateway.NewServiceProxy(c, &rest.Config{Host: apiServerURL})
+	proxy, err := gateway.NewServiceProxy(c, &rest.Config{Host: apiServerURL}, testServiceNS)
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 	verifier := newFakeGatewayVerifier()
-	return New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, &fakePodExecutor{}), verifier
+	return New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, &fakePodExecutor{}, testServiceNS), verifier
 }
 
 func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
@@ -368,7 +369,7 @@ func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -383,7 +384,7 @@ func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 	if len(cookies) != 1 || cookies[0].Name != gatewayCookieName {
 		t.Fatalf("expected a %s cookie to be set, got %+v", gatewayCookieName, cookies)
 	}
-	wantPath := "/gw/" + testServiceNS + "/" + testServiceName
+	wantPath := "/gw/" + testServiceName
 	if cookies[0].Path != wantPath {
 		t.Fatalf("expected cookie Path %q, got %q", wantPath, cookies[0].Path)
 	}
@@ -398,7 +399,7 @@ func TestGatewayTokenIsSingleUse(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -407,7 +408,7 @@ func TestGatewayTokenIsSingleUse(t *testing.T) {
 
 	// Same token again, no cookie this time — the fake verifier already
 	// deleted it on first use, exactly like Convex's real single-use check.
-	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec2 := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusUnauthorized {
@@ -424,7 +425,7 @@ func TestGatewayCookieAuthorizesSubsequentRequestsWithoutToken(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -439,7 +440,7 @@ func TestGatewayCookieAuthorizesSubsequentRequestsWithoutToken(t *testing.T) {
 	// cookie but no ?token=. This must succeed purely from the cookie: the
 	// one-time token was already consumed above, so any accidental fallback
 	// to the verifier would fail this request.
-	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/assets/app.js", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/assets/app.js", nil)
 	req2.AddCookie(cookies[0])
 	rec2 := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec2, req2)
@@ -464,7 +465,7 @@ func TestGatewayCookieAuthorizesDifferentEntrypointsOfSameWorkload(t *testing.T)
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -477,7 +478,7 @@ func TestGatewayCookieAuthorizesDifferentEntrypointsOfSameWorkload(t *testing.T)
 
 	// Same cookie, no token, but against the "backoffice" entrypoint of the
 	// same workload — must succeed purely from the workload-scoped cookie.
-	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/backoffice/", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/backoffice/", nil)
 	req2.AddCookie(cookies[0])
 	rec2 := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec2, req2)
@@ -494,7 +495,7 @@ func TestGatewayCookieRejectedForDifferentWorkload(t *testing.T) {
 	// authorize this workload's path — defense in depth alongside the
 	// cookie's own Path scoping, which a client could in principle ignore.
 	cookie := mintTestCookie(t, testGatewaySecret, testServiceNS, "some-other-workload", time.Now().Add(time.Minute))
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/", nil)
 	req.AddCookie(&http.Cookie{Name: gatewayCookieName, Value: cookie})
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
@@ -508,7 +509,7 @@ func TestGatewayCookieRejectedWhenExpired(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
 	cookie := mintTestCookie(t, testGatewaySecret, testServiceNS, testServiceName, time.Now().Add(-time.Hour))
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/", nil)
 	req.AddCookie(&http.Cookie{Name: gatewayCookieName, Value: cookie})
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
@@ -582,7 +583,6 @@ func TestDeployRejectsUnknownTemplate(t *testing.T) {
 
 	body, _ := json.Marshal(deployRequest{
 		Name:         testWorkloadName,
-		Namespace:    testServiceNS,
 		TemplateName: "does-not-exist",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
@@ -599,9 +599,8 @@ func TestDeployWithTemplateNameSkipsImageRequirement(t *testing.T) {
 	s, c, _, _ := newTestServer(t)
 
 	body, _ := json.Marshal(deployRequest{
-		Name:         "demo-nginx",
-		Namespace:    testServiceNS,
-		TemplateName: "nginx",
+		TemplateName: testNginxTemplateID,
+		UserID:       testUserID,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testDeployToken)
@@ -612,12 +611,78 @@ func TestDeployWithTemplateNameSkipsImageRequirement(t *testing.T) {
 		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
 	}
 
+	wantName := workloadSlug(testUserID, testNginxTemplateID)
 	var workload appsv1alpha1.Workload
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: "demo-nginx"}, &workload); err != nil {
-		t.Fatalf("expected workload CR to be created: %v", err)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: wantName}, &workload); err != nil {
+		t.Fatalf("expected workload CR to be created at derived name %q: %v", wantName, err)
 	}
-	if workload.Spec.TemplateName != "nginx" {
+	if workload.Spec.TemplateName != testNginxTemplateID {
 		t.Fatalf("expected templateName=nginx, got %q", workload.Spec.TemplateName)
+	}
+}
+
+// TestDeployIgnoresClientSuppliedNameForTemplateDeploy is the concrete proof
+// that a template deploy's name is never taken from the caller — even a
+// well-formed, distinct req.Name must be overridden by the derived slug.
+func TestDeployIgnoresClientSuppliedNameForTemplateDeploy(t *testing.T) {
+	s, c, _, _ := newTestServer(t)
+
+	body, _ := json.Marshal(deployRequest{
+		Name:         "whatever-the-caller-sent",
+		TemplateName: testNginxTemplateID,
+		UserID:       testUserID,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testDeployToken)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	wantName := workloadSlug(testUserID, testNginxTemplateID)
+	var workload appsv1alpha1.Workload
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: wantName}, &workload); err != nil {
+		t.Fatalf("expected workload CR to be created at derived name %q (ignoring client-supplied name): %v", wantName, err)
+	}
+}
+
+func TestDeployRequiresUserIDForTemplateDeploy(t *testing.T) {
+	s, _, _, _ := newTestServer(t)
+
+	body, _ := json.Marshal(deployRequest{
+		TemplateName: testNginxTemplateID,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testDeployToken)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when userId is missing, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorkloadSlugSanitizesAndTruncates(t *testing.T) {
+	cases := []struct {
+		name, userID, templateName, want string
+	}{
+		{"lowercases and joins", "User_123", "Nginx", "nginx-user-123"},
+		{"strips invalid characters", "user!!123", "firefox", "firefox-user-123"},
+		{"truncates to 63 chars and trims trailing hyphen", strings.Repeat("a", 100),
+			"firefox", "firefox-" + strings.Repeat("a", 55)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := workloadSlug(tc.userID, tc.templateName)
+			if got != tc.want {
+				t.Fatalf("workloadSlug(%q, %q) = %q, want %q", tc.userID, tc.templateName, got, tc.want)
+			}
+			if len(got) > 63 {
+				t.Fatalf("slug exceeds 63 chars: %q", got)
+			}
+		})
 	}
 }
 
@@ -657,7 +722,7 @@ func TestRunFunctionExecutesAgainstRunningPod(t *testing.T) {
 	seedRunningPod(t, c, testServiceNS, testFirefoxWorkloadName, "my-firefox-abc123")
 
 	body, _ := json.Marshal(runFunctionRequest{Params: map[string]any{"uploadUrl": "https://r2.example.com/upload"}})
-	req := httptest.NewRequest(http.MethodPost, "/workloads/default/my-firefox/functions/backup_state", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/workloads/my-firefox/functions/backup_state", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testDeployToken)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
@@ -695,7 +760,7 @@ func TestRunFunctionRejectsUnknownFunctionKey(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(runFunctionRequest{})
-	req := httptest.NewRequest(http.MethodPost, "/workloads/default/my-firefox/functions/does-not-exist", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/workloads/my-firefox/functions/does-not-exist", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testDeployToken)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
@@ -717,7 +782,7 @@ func TestRunFunctionRejectsMissingRequiredParam(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(runFunctionRequest{})
-	req := httptest.NewRequest(http.MethodPost, "/workloads/default/my-firefox/functions/backup_state", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/workloads/my-firefox/functions/backup_state", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testDeployToken)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
@@ -739,7 +804,7 @@ func TestRunFunctionFailsWhenNoPodIsRunning(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(runFunctionRequest{Params: map[string]any{"uploadUrl": "https://r2.example.com/upload"}})
-	req := httptest.NewRequest(http.MethodPost, "/workloads/default/my-firefox/functions/backup_state", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/workloads/my-firefox/functions/backup_state", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testDeployToken)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
@@ -752,7 +817,7 @@ func TestRunFunctionFailsWhenNoPodIsRunning(t *testing.T) {
 func TestRunFunctionRequiresDeployToken(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/workloads/default/my-firefox/functions/backup_state", bytes.NewReader([]byte(`{}`)))
+	req := httptest.NewRequest(http.MethodPost, "/workloads/my-firefox/functions/backup_state", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
