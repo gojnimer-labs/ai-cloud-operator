@@ -1,11 +1,25 @@
 name: Publish
 
 on:
+  # No `branches: [main]` trigger here — auto-tag.yml fires on every main
+  # push and calls this workflow via workflow_call below, so a direct
+  # branch-push trigger here would double-build the image for the same
+  # commit. `tags: v*` stays as a fallback for a direct `git push origin
+  # vX.Y.Z` that bypasses auto-tag.yml entirely.
   push:
-    branches:
-      - main
     tags:
       - "v*"
+  # Lets auto-tag.yml invoke this directly with the tag it just pushed —
+  # necessary because a tag pushed with the default GITHUB_TOKEN (as
+  # auto-tag.yml's push is) does NOT trigger other workflows' `on: push:
+  # tags` matchers. That's an intentional GitHub Actions anti-recursion
+  # guard, not something fixable by changing the trigger syntax here.
+  workflow_call:
+    inputs:
+      tag:
+        description: "vX.Y.Z tag this build is for (set by auto-tag.yml). Leave unset for a plain branch build — produces latest+sha image tags only, no versioned tag and no install.yaml release asset."
+        required: false
+        type: string
 
 permissions: {}
 
@@ -16,11 +30,29 @@ jobs:
       packages: write
     name: Build and push image to GHCR
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      # Single source of truth for "what release is this build for", used
+      # below by both the image tag list and (if non-empty) the release job.
+      # Prefers the explicit workflow_call input; falls back to inspecting
+      # the actual triggering ref for a direct `git push origin vX.Y.Z`
+      # (bypassing auto-tag.yml entirely) or a plain branch push (empty).
+      - name: Resolve version tag
+        id: version
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -51,7 +83,7 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
-            type=semver,pattern={{version}}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.tag != '' }}
 
       - name: Build and push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -72,7 +104,7 @@ jobs:
 
   release:
     needs: publish
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.publish.outputs.tag != ''
     permissions:
       contents: write
     name: Attach consolidated install.yaml to the release
@@ -92,18 +124,16 @@ jobs:
       # substituted) — so a target machine only needs one `kubectl apply -f`
       # and never has to clone this repo. See docs/production-deploy.md.
       #
-      # IMG must match the tag docker/metadata-action actually pushed in the
-      # publish job, NOT github.ref_name verbatim — its
-      # `type=semver,pattern={{version}}` rule strips the leading "v" (e.g.
-      # ref v0.1.0 -> pushed tag 0.1.0), so using ref_name directly here
-      # would bake in a tag that was never published, causing
-      # ImagePullBackOff on every deploy.
+      # IMG uses needs.publish.outputs.version, NOT the tag verbatim — that
+      # output is what the publish job actually pushed the image under
+      # (leading "v" stripped), computed once in that job's "Resolve version
+      # tag" step so both jobs can never disagree about it.
       - name: Build consolidated install manifest
-        run: make build-installer IMG=ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}
+        run: make build-installer IMG=ghcr.io/${{ github.repository }}:${{ needs.publish.outputs.version }}
 
       - name: Attach to the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" --generate-notes --title "${{ github.ref_name }}" || true
-          gh release upload "${{ github.ref_name }}" dist/install.yaml --clobber
+          gh release create "${{ needs.publish.outputs.tag }}" --generate-notes --title "${{ needs.publish.outputs.tag }}" || true
+          gh release upload "${{ needs.publish.outputs.tag }}" dist/install.yaml --clobber

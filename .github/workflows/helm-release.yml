@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  # Lets auto-tag.yml invoke this directly with the tag it just pushed — see
+  # publish.yml's workflow_call comment for why a tag pushed by auto-tag.yml
+  # itself never triggers the `on: push: tags` matcher above.
+  workflow_call:
+    inputs:
+      tag:
+        description: "vX.Y.Z tag to package the chart under (set by auto-tag.yml). Falls back to the triggering push's tag when unset (a direct `git push origin vX.Y.Z` bypassing auto-tag.yml)."
+        required: false
+        type: string
 
 permissions: {}
 
@@ -28,6 +37,18 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
+      # Prefers the explicit workflow_call input; falls back to the
+      # triggering ref for a direct `git push origin vX.Y.Z` that bypasses
+      # auto-tag.yml entirely.
+      - name: Resolve version
+        id: version
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
       # Regenerates charts/ai-cloud-operator from config/* (see
       # hack/render-helm-chart.sh) and fails the release if that doesn't
       # exactly match what's committed — the same drift check lint.yml runs
@@ -41,16 +62,15 @@ jobs:
             exit 1
           }
 
-      # IMG must match the tag docker/metadata-action actually publishes in
-      # publish.yml's job (strips the leading "v"), same reasoning as that
-      # workflow's build-installer step — the chart's image tag and the
-      # image GHCR actually has for this release must agree.
+      # version here must match what publish.yml's image is actually pushed
+      # under (its "Resolve version tag" step derives the same value the
+      # same way) — the chart's appVersion and the real GHCR image tag must
+      # agree.
       - name: Package chart
         run: |
-          version="${GITHUB_REF_NAME#v}"
           helm package charts/ai-cloud-operator \
-            --version "$version" \
-            --app-version "$version" \
+            --version "${{ steps.version.outputs.version }}" \
+            --app-version "${{ steps.version.outputs.version }}" \
             --destination dist/
 
       - name: Log in to GHCR
@@ -58,8 +78,7 @@ jobs:
 
       - name: Push chart
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          helm push "dist/ai-cloud-operator-${version}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          helm push "dist/ai-cloud-operator-${{ steps.version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
 
 # First run only: same one-time visibility step publish.yml's image job
 # needs — go to https://github.com/orgs/gojnimer-labs/packages (or the
