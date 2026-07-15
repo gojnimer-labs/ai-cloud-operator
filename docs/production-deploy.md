@@ -37,14 +37,13 @@ kubectl set env deployment/ai-cloud-operator-controller-manager -n ai-cloud-oper
 ```sh
 kubectl create secret generic ai-cloud-operator-env \
   --namespace ai-cloud-operator-system \
-  --from-literal=ENROLLMENT_SECRET='<must match Convex ENROLLMENT_SECRET>' \
-  --from-literal=GATEWAY_SIGNING_SECRET="$(openssl rand -hex 32)"
+  --from-literal=ENROLLMENT_SECRET='<must match Convex ENROLLMENT_SECRET>'
 kubectl rollout restart deployment/ai-cloud-operator-controller-manager -n ai-cloud-operator-system
 ```
 
-`ENROLLMENT_SECRET` is only actually used once, at first registration — the operator persists its issued token afterward (see `internal/tokenstore`) and reuses it across restarts. It still must be set at startup or the container fails fast (`cmd/main.go`'s `setupConvexIntegration`).
+`ENROLLMENT_SECRET` must be set at startup or the container fails fast (`cmd/main.go`'s `setupConvexIntegration`). After first registration the operator persists its issued token (see `internal/tokenstore`) and reuses it across restarts — but it also keeps polling this Secret in the background (`internal/convexclient`'s `EnrollmentSecretWatcher`), so if you rotate `ENROLLMENT_SECRET` later (e.g. `kubectl edit secret ai-cloud-operator-env -n ai-cloud-operator-system`), the operator picks up the new value and re-registers on its own within one heartbeat interval — no `rollout restart` needed for a rotation, only for this initial creation.
 
-`GATEWAY_SIGNING_SECRET` is purely local to this operator now — it signs/verifies its own gateway session cookies (see `internal/gateway/token.go`) and is never shared with Convex, so a fresh random value is fine (and each operator instance can have its own).
+There's no `GATEWAY_SIGNING_SECRET` to create here. It's purely local to this operator — it signs/verifies its own gateway session cookies (see `internal/gateway/token.go`) and is never shared with Convex — so instead of asking you to mint and hand it one, the operator generates a random value itself on first boot and persists it in its own Secret (`ai-cloud-operator-gateway-key`, see `internal/gateway/keystore.go`).
 
 ### 4. Expose it publicly
 
@@ -91,7 +90,7 @@ cd ai-cloud-operator
 make manifests && make install                      # CRDs
 # edit config/manager/params.env for this cluster
 kubectl create secret generic ai-cloud-operator-env -n ai-cloud-operator-system \
-  --from-literal=ENROLLMENT_SECRET='...' --from-literal=GATEWAY_SIGNING_SECRET="$(openssl rand -hex 32)"
+  --from-literal=ENROLLMENT_SECRET='...'
 make deploy IMG=ghcr.io/gojnimer-labs/ai-cloud-operator:latest
 # edit config/ingress/ingress.yaml, then uncomment "- ../ingress" in config/default/kustomization.yaml
 make deploy IMG=ghcr.io/gojnimer-labs/ai-cloud-operator:latest

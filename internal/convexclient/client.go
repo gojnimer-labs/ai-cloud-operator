@@ -56,6 +56,20 @@ func New(cfg Config) *Client {
 	}
 }
 
+// EnrollmentSecret returns the enrollment secret this Client currently
+// registers with.
+func (c *Client) EnrollmentSecret() string {
+	return c.config.EnrollmentSecret
+}
+
+// SetEnrollmentSecret updates the enrollment secret used by future calls to
+// Register — e.g. after Runnable detects the backing Secret was rotated.
+// Only safe to call from the same goroutine that drives Runnable.Start, same
+// as the rest of Client's state.
+func (c *Client) SetEnrollmentSecret(secret string) {
+	c.config.EnrollmentSecret = secret
+}
+
 type registerRequest struct {
 	Name             string         `json:"name"`
 	ExternalURL      string         `json:"externalUrl"`

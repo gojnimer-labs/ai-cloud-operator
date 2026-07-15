@@ -29,6 +29,23 @@ rules:
 - apiGroups:
   - ""
   resourceNames:
+  - ai-cloud-operator-env
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resourceNames:
+  - ai-cloud-operator-gateway-key
+  resources:
+  - secrets
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - ""
+  resourceNames:
   - ai-cloud-operator-token
   resources:
   - secrets

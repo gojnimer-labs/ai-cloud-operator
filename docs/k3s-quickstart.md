@@ -87,13 +87,18 @@ kubectl set env deployment/ai-cloud-operator-controller-manager -n ai-cloud-oper
 ```sh
 kubectl create secret generic ai-cloud-operator-env \
   --namespace ai-cloud-operator-system \
-  --from-literal=ENROLLMENT_SECRET='<same value as Convex ENROLLMENT_SECRET>' \
-  --from-literal=GATEWAY_SIGNING_SECRET="$(openssl rand -hex 32)"
+  --from-literal=ENROLLMENT_SECRET='<same value as Convex ENROLLMENT_SECRET>'
 kubectl rollout restart deployment/ai-cloud-operator-controller-manager -n ai-cloud-operator-system
 ```
 
 (`ENROLLMENT_SECRET` must match what's set on your Convex deployment — check
 with `npx convex env get ENROLLMENT_SECRET` from `ai-cloud-v2` if unsure.)
+
+No `GATEWAY_SIGNING_SECRET` to create — the operator generates and persists
+its own on first boot. And if you ever need to rotate `ENROLLMENT_SECRET`
+later, `kubectl create secret ... -o yaml --dry-run=client | kubectl apply
+-f -` (or `kubectl edit secret`) is enough on its own; the operator polls
+this Secret and re-registers automatically, no `rollout restart` needed.
 
 ## 7. Wire the ingress
 

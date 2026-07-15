@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -202,7 +203,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	convexRunnable, err := setupConvexIntegration(mgr)
+	ctx := ctrl.SetupSignalHandler()
+
+	convexRunnable, err := setupConvexIntegration(ctx, mgr)
 	if err != nil {
 		setupLog.Error(err, "Failed to set up convex registration/heartbeat and operator api")
 		os.Exit(1)
@@ -228,7 +231,7 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
@@ -238,7 +241,8 @@ func main() {
 // operator's side of the register/heartbeat/deploy contract with Convex:
 //   - convexclient.Runnable registers with Convex once (reusing a token
 //     persisted in a Secret across restarts when possible) and heartbeats
-//     on a fixed interval thereafter.
+//     on a fixed interval thereafter, also watching ENROLLMENT_SECRET for
+//     an out-of-band rotation.
 //   - api.Server exposes the inbound HTTP API Convex calls to
 //     deploy/delete/inspect Workload custom resources, authenticated with
 //     the deploy token minted at registration.
@@ -248,20 +252,29 @@ func main() {
 // reconcile loop, with no bespoke goroutine plumbing in main. The returned
 // *convexclient.Runnable is also wired into the WorkloadReconciler so it can
 // report workload lifecycle events back to Convex.
-func setupConvexIntegration(mgr ctrl.Manager) (*convexclient.Runnable, error) {
+func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclient.Runnable, error) {
 	convexBaseURL := os.Getenv("CONVEX_BASE_URL")
 	enrollmentSecret := os.Getenv("ENROLLMENT_SECRET")
 	operatorName := os.Getenv("OPERATOR_NAME")
 	operatorExternalURL := os.Getenv("OPERATOR_EXTERNAL_URL")
 	podNamespace := os.Getenv("POD_NAMESPACE")
-	gatewaySigningSecret := os.Getenv("GATEWAY_SIGNING_SECRET")
 
 	missingRequiredEnv := convexBaseURL == "" || enrollmentSecret == "" || operatorName == "" ||
-		operatorExternalURL == "" || podNamespace == "" || gatewaySigningSecret == ""
+		operatorExternalURL == "" || podNamespace == ""
 	if missingRequiredEnv {
 		return nil, errors.New(
 			"CONVEX_BASE_URL, ENROLLMENT_SECRET, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, " +
-				"POD_NAMESPACE, and GATEWAY_SIGNING_SECRET must all be set")
+				"and POD_NAMESPACE must all be set")
+	}
+
+	// GATEWAY_SIGNING_SECRET is never shared with Convex or anyone else — it
+	// only has to be internally consistent with itself across this
+	// operator's own restarts — so rather than asking a human to mint and
+	// hand it one, the operator generates it once and persists it in its own
+	// namespace (see internal/gateway.KeyStore).
+	gatewaySigningSecret, err := gateway.NewKeyStore(mgr.GetClient(), podNamespace).LoadOrGenerate(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("loading or generating gateway signing key: %w", err)
 	}
 
 	apiListenAddr := os.Getenv("API_LISTEN_ADDR")
@@ -286,6 +299,7 @@ func setupConvexIntegration(mgr ctrl.Manager) (*convexclient.Runnable, error) {
 			ExternalURL:      operatorExternalURL,
 		}),
 		tokenstore.New(mgr.GetClient(), podNamespace),
+		convexclient.NewEnrollmentSecretWatcher(mgr.GetClient(), podNamespace),
 		heartbeatInterval,
 	)
 	if err := mgr.Add(convexRunnable); err != nil {
@@ -304,7 +318,7 @@ func setupConvexIntegration(mgr ctrl.Manager) (*convexclient.Runnable, error) {
 
 	apiServer := api.New(
 		mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken,
-		[]byte(gatewaySigningSecret), convexRunnable, proxy, podExecutor,
+		gatewaySigningSecret, convexRunnable, proxy, podExecutor,
 	)
 	if err := mgr.Add(apiServer); err != nil {
 		return nil, err

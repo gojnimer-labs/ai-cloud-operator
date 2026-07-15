@@ -33,6 +33,7 @@ import (
 type Runnable struct {
 	client            *Client
 	store             *tokenstore.Store
+	enrollment        *EnrollmentSecretWatcher
 	heartbeatInterval time.Duration
 
 	mu     sync.RWMutex
@@ -40,11 +41,14 @@ type Runnable struct {
 }
 
 // NewRunnable builds a Runnable that talks to Convex via client and persists
-// tokens via store, heartbeating every heartbeatInterval.
-func NewRunnable(client *Client, store *tokenstore.Store, heartbeatInterval time.Duration) *Runnable {
+// tokens via store, heartbeating every heartbeatInterval. On every heartbeat
+// tick it also checks enrollment for an out-of-band rotation of
+// ENROLLMENT_SECRET, re-registering immediately when one is found.
+func NewRunnable(client *Client, store *tokenstore.Store, enrollment *EnrollmentSecretWatcher, heartbeatInterval time.Duration) *Runnable {
 	return &Runnable{
 		client:            client,
 		store:             store,
+		enrollment:        enrollment,
 		heartbeatInterval: heartbeatInterval,
 	}
 }
@@ -102,7 +106,32 @@ func (r *Runnable) Start(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			r.heartbeatOnce(ctx)
+			r.checkEnrollmentSecret(ctx)
 		}
+	}
+}
+
+// checkEnrollmentSecret compares the live ENROLLMENT_SECRET Secret against
+// what this operator last registered with, re-registering immediately on a
+// mismatch — e.g. an operator re-running the kubectl create secret step to
+// rotate the value doesn't need to also restart the operator pod for it to
+// take effect.
+func (r *Runnable) checkEnrollmentSecret(ctx context.Context) {
+	log := logf.FromContext(ctx)
+
+	current, err := r.enrollment.Current(ctx)
+	if err != nil {
+		log.Error(err, "failed to read enrollment secret")
+		return
+	}
+	if current == "" || current == r.client.EnrollmentSecret() {
+		return
+	}
+
+	log.Info("enrollment secret changed, re-registering")
+	r.client.SetEnrollmentSecret(current)
+	if err := r.register(ctx); err != nil {
+		log.Error(err, "re-registration after enrollment secret change failed")
 	}
 }
 

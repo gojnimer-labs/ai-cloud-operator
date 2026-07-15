@@ -98,17 +98,21 @@ spec:
           # Created out-of-band per cluster, never checked into git — see
           # docs/production-deploy.md. Not a kustomize-generated resource, so
           # its name here is the literal final name kubectl must create it
-          # with (no namePrefix rewriting applies to it).
+          # with (no namePrefix rewriting applies to it). The operator also
+          # polls this same Secret via the API (internal/convexclient's
+          # EnrollmentSecretWatcher) so a rotation takes effect without
+          # restarting the pod.
+          #
+          # GATEWAY_SIGNING_SECRET is intentionally absent here — it never
+          # needs to be shared with anything outside this operator instance,
+          # so the operator generates and persists it itself on first boot
+          # (see internal/gateway.KeyStore) instead of asking a human to mint
+          # one.
           - name: ENROLLMENT_SECRET
             valueFrom:
               secretKeyRef:
                 name: ai-cloud-operator-env
                 key: ENROLLMENT_SECRET
-          - name: GATEWAY_SIGNING_SECRET
-            valueFrom:
-              secretKeyRef:
-                name: ai-cloud-operator-env
-                key: GATEWAY_SIGNING_SECRET
         ports:
         - containerPort: 8081
           name: health
