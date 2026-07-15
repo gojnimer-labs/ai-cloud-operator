@@ -221,6 +221,17 @@ type Operation struct {
 	Run         func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) ([]AdditionalInfo, error) `json:"-"`
 }
 
+// Entrypoint is one web entrypoint a template's Service exposes — catalog
+// metadata only, independent of any specific Build() call's params. Name
+// must match a corev1.ServicePort.Name a template's Build() actually
+// produces for the gateway to route to it (enforced by
+// TestEntrypointsMatchRenderedServicePorts) — see internal/gateway/proxy.go,
+// which selects a Service port by this name.
+type Entrypoint struct {
+	Name  string `json:"name"`
+	Label string `json:"label"`
+}
+
 // Template is one entry in the catalog.
 type Template struct {
 	ID          string `json:"id"`
@@ -235,8 +246,13 @@ type Template struct {
 	// detect that the schema they were built against has since moved,
 	// entirely on the Convex side — the operator has no opinion on what a
 	// mismatch should mean.
-	Version    string                                        `json:"version"`
-	Parameters []Parameter                                   `json:"parameters"`
-	Operations []Operation                                   `json:"operations,omitempty"`
-	Build      func(params map[string]any) (Rendered, error) `json:"-"`
+	Version    string      `json:"version"`
+	Parameters []Parameter `json:"parameters"`
+	// Entrypoints lists every web entrypoint this template's Service
+	// exposes. Every template must declare at least one — the gateway's
+	// /gw/{namespace}/{name}/{entrypoint}/{subpath...} route always requires
+	// this segment.
+	Entrypoints []Entrypoint                                  `json:"entrypoints"`
+	Operations  []Operation                                   `json:"operations,omitempty"`
+	Build       func(params map[string]any) (Rendered, error) `json:"-"`
 }

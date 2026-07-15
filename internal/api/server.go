@@ -105,7 +105,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.Handle("POST /workloads", s.requireDeployToken(http.HandlerFunc(s.handleDeploy)))
 	mux.Handle("GET /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
 	mux.Handle("DELETE /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
-	mux.Handle("GET /gw/{namespace}/{name}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
+	mux.Handle("GET /gw/{namespace}/{name}/{entrypoint}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
 	mux.Handle("GET /catalog", s.requireDeployToken(http.HandlerFunc(s.handleCatalog)))
 	mux.Handle("POST /workloads/{namespace}/{name}/functions/{key}", s.requireDeployToken(http.HandlerFunc(s.handleRunFunction)))
 

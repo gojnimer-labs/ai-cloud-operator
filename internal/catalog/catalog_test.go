@@ -57,6 +57,39 @@ func TestGetReturnsKnownTemplates(t *testing.T) {
 	}
 }
 
+// TestEntrypointsMatchRenderedServicePorts guards against catalog/runtime
+// drift: every declared Entrypoint.Name must correspond to a real
+// ServicePort.Name the template's own Build() produces, since that's the
+// name internal/gateway/proxy.go looks up at request time.
+func TestEntrypointsMatchRenderedServicePorts(t *testing.T) {
+	for _, tmpl := range List() {
+		if len(tmpl.Entrypoints) == 0 {
+			t.Errorf("template %q declares no Entrypoints", tmpl.ID)
+			continue
+		}
+
+		rendered, err := tmpl.Build(map[string]any{})
+		if err != nil {
+			t.Errorf("template %q: Build failed: %v", tmpl.ID, err)
+			continue
+		}
+
+		portNames := make(map[string]bool, len(rendered.ServicePorts))
+		for _, sp := range rendered.ServicePorts {
+			if portNames[sp.Name] {
+				t.Errorf("template %q: duplicate ServicePort name %q", tmpl.ID, sp.Name)
+			}
+			portNames[sp.Name] = true
+		}
+
+		for _, ep := range tmpl.Entrypoints {
+			if !portNames[ep.Name] {
+				t.Errorf("template %q: Entrypoint %q has no matching ServicePort", tmpl.ID, ep.Name)
+			}
+		}
+	}
+}
+
 func TestResolveParamsAppliesDefaults(t *testing.T) {
 	tmpl, _ := Get(templateIDNginx)
 	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})

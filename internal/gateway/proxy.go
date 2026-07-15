@@ -56,15 +56,19 @@ func NewServiceProxy(k8sClient client.Client, cfg *rest.Config) (*ServiceProxy, 
 	return &ServiceProxy{k8sClient: k8sClient, transport: transport, apiURL: apiURL}, nil
 }
 
-// Handler proxies requests for {namespace}/{name}/{subpath} through the API
-// server's services/proxy subresource. The target Service's port is resolved
-// with a live Get (not from the Workload CR's spec) — this doubles as an
-// existence check (404 if the Service is gone) and avoids drift between the
-// CR spec and actual cluster state.
+// Handler proxies requests for {namespace}/{name}/{entrypoint}/{subpath}
+// through the API server's services/proxy subresource. The target Service's
+// port is resolved with a live Get (not from the Workload CR's spec) — this
+// doubles as an existence check (404 if the Service is gone) and avoids
+// drift between the CR spec and actual cluster state. entrypoint selects
+// which of the Service's (possibly several) named ports to route to — it
+// matches a catalog.Entrypoint.Name, which by construction equals a real
+// corev1.ServicePort.Name (see catalog.TestEntrypointsMatchRenderedServicePorts).
 func (p *ServiceProxy) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		namespace := r.PathValue("namespace")
 		name := r.PathValue("name")
+		entrypoint := r.PathValue("entrypoint")
 		subpath := r.PathValue("subpath")
 
 		log := logf.FromContext(r.Context()).WithName("gateway")
@@ -83,7 +87,18 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 			http.Error(w, "workload service exposes no ports", http.StatusBadGateway)
 			return
 		}
-		port := svc.Spec.Ports[0].Port
+		var port int32
+		var found bool
+		for _, sp := range svc.Spec.Ports {
+			if sp.Name == entrypoint {
+				port, found = sp.Port, true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, "unknown entrypoint", http.StatusNotFound)
+			return
+		}
 
 		targetPath := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%d/proxy/%s", namespace, name, port, subpath)
 

@@ -64,6 +64,7 @@ var Firefox = Template{
 	},
 	Operations:  []Operation{backupStateFunction(".mozilla/firefox", templateIDFirefox)},
 	Description: "Full Firefox browser accessible via web interface",
+	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDFirefox,
 	Icon:        "🦊",
 	Name:        "Firefox Browser",

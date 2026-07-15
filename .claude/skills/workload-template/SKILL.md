@@ -107,14 +107,37 @@ type Rendered struct {
 	ServicePorts   []corev1.ServicePort
 }
 
+type Entrypoint struct {
+	Name  string // must match a corev1.ServicePort.Name your Build() actually returns
+	Label string
+}
+
 type Template struct {
 	ID, Name, Description, Icon string
-	Version    string // manually bumped, e.g. "1.0.0" — see Versioning below
-	Parameters []Parameter
-	Operations []Operation // optional, see "Advanced" below
-	Build      func(params map[string]any) (Rendered, error)
+	Version     string // manually bumped, e.g. "1.0.0" — see Versioning below
+	Parameters  []Parameter
+	Entrypoints []Entrypoint // required, at least one — see below
+	Operations  []Operation  // optional, see "Advanced" below
+	Build       func(params map[string]any) (Rendered, error)
 }
 ```
+
+**`Entrypoints` is required, not optional** — every template needs at least
+one, even if it only has a single port. Each `Entrypoint.Name` must equal the
+`Name` of a `corev1.ServicePort` your `Build()` actually returns; this is
+checked by `TestEntrypointsMatchRenderedServicePorts` in
+`internal/catalog/catalog_test.go`, which runs against every template in the
+registry — forgetting to add an `Entrypoint`, or misspelling its `Name`
+relative to your `ServicePorts`, fails that test immediately. This is what
+lets the gateway route `/gw/{namespace}/{name}/{entrypoint}/{subpath...}`
+requests to the right port by name instead of always using the first one —
+see `internal/gateway/proxy.go`. Only declare an `Entrypoint` for a port that
+actually speaks HTTP; the gateway proxies over HTTP, so a non-HTTP port (a
+raw TCP protocol like Redis's) can still exist as a `ServicePort` without a
+corresponding `Entrypoint` meant for browser use — but note the current rule
+requires at least one `Entrypoint` on every template regardless, so a
+template with no genuinely browsable port still needs to declare one
+pointing at whichever port makes the most sense as its primary identifier.
 
 `ResolveParams` (`internal/catalog/registry.go`) turns raw request params into
 what `Build` receives, in two passes:
@@ -226,6 +249,7 @@ var Redis = Template{
 		}, nil
 	},
 	Description: "Single-node Redis in-memory data store",
+	Entrypoints: []Entrypoint{{Name: "redis", Label: "Redis"}},
 	ID:          templateIDRedis,
 	Icon:        "🟥",
 	Name:        "Redis",
@@ -263,6 +287,12 @@ var templates = []Template{
 	Redis,
 }
 ```
+
+No separate test is needed to check your new template's `Entrypoints` are
+consistent with its `Build()`'s `ServicePorts` —
+`TestEntrypointsMatchRenderedServicePorts` already iterates every template in
+`templates` and checks this for you; it'll fail immediately if you forget an
+`Entrypoint` or misspell its `Name`.
 
 Test additions to `internal/catalog/catalog_test.go` (follow the existing
 per-behavior-function style, not table tests):
@@ -363,11 +393,11 @@ Then: `go build ./... && go test ./internal/catalog/...`
   otherwise just write your own `corev1.Probe`/init container inline in your
   new file, the way `nginx.go` needs neither.
 - **Struct-literal field order**: existing `Template`/`Parameter` literals are
-  mostly alphabetical by field name (`Build, Description, ID, Icon, Name,
-  Operations, Parameters, Version`; `DataSource, Default, Description, Key,
-  Label, Required, Type, Validation, Visibility`) — not gofmt-enforced, just
-  house style; match it for reviewability, but don't worry if a comment forces
-  you to break it.
+  mostly alphabetical by field name (`Build, Description, Entrypoints, ID,
+  Icon, Name, Operations, Parameters, Version`; `DataSource, Default,
+  Description, Key, Label, Required, Type, Validation, Visibility`) — not
+  gofmt-enforced, just house style; match it for reviewability, but don't
+  worry if a comment forces you to break it.
 
 ## Advanced (optional): Operation
 

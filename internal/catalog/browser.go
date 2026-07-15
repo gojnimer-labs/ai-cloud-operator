@@ -33,8 +33,9 @@ const (
 	templateIDFirefox = "firefox"
 	templateIDChrome  = "chrome"
 
-	portNameHTTP    = "http"
-	browserHTTPPort = int32(3000)
+	portNameHTTP       = "http"
+	entrypointLabelWeb = "Web"
+	browserHTTPPort    = int32(3000)
 
 	browserConfigMountPath = "/config"
 	configVolumeName       = "config"
@@ -67,6 +68,11 @@ var browserParameters = []Parameter{
 		Type:       ParameterTypeSelect,
 		DataSource: DataSource{Kind: DataSourceDynamic, SourceKey: "profiles_browser"},
 		Required:   false,
+		// Only meaningful when a restore was actually requested — same
+		// condition as profileDownloadUrl below, so the picker doesn't invite
+		// a choice that deployWorkload will silently ignore because
+		// restoreProfile never got toggled on.
+		Visibility: &Visibility{DependsOn: "restoreProfile", Op: VisibilityEquals, Value: true},
 	},
 	{
 		Key:        "restoreProfile",

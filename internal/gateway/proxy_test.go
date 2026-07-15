@@ -51,7 +51,7 @@ func TestHandlerRewritesToServicesProxyPath(t *testing.T) {
 	}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: port}}},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: port}}},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
 
@@ -61,9 +61,9 @@ func TestHandlerRewritesToServicesProxyPath(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/gw/{namespace}/{name}/{subpath...}", proxy.Handler())
+	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/some/path?token=secret-should-be-stripped&foo=bar", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/http/some/path?token=secret-should-be-stripped&foo=bar", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -97,13 +97,44 @@ func TestHandlerReturns404WhenServiceMissing(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/gw/{namespace}/{name}/{subpath...}", proxy.Handler())
+	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/default/does-not-exist/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/default/does-not-exist/http/", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestHandlerReturns404WhenEntrypointUnknown(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{
+			{Name: "http", Port: 80},
+			{Name: "backoffice", Port: 8080},
+		}},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	if err != nil {
+		t.Fatalf("NewServiceProxy: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+
+	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/does-not-exist/", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

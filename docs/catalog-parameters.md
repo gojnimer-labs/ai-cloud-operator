@@ -11,6 +11,81 @@ this repo — that one's for Go authors, this one's for API consumers.
 from the old shape" at the bottom) — nothing was removed conceptually, but
 field names and a couple of value shapes are different.
 
+## Migration checklist for ai-cloud-v2
+
+Hand this section to whoever/whatever is doing the Convex-side work — it's
+the concrete task list; every item links to the detailed section below it
+for the exact shape/reasoning. Known reference points in ai-cloud-v2 (named
+in this operator's own doc comments — confirm these still exist/are named
+the same before assuming, this repo doesn't control that one):
+`convex/operators/actions.ts#resolveDynamicOptions` (resolves dynamic select
+options), `convex/workloads/actions.ts#deployWorkload` (builds deploy config,
+resolves `profileName`/system params), `convex/workloads/actions.ts#runCustomFunction`
+(invokes an operation — name and response-parsing both need updating, see #5).
+
+**1. `/catalog` response parsing**
+- [ ] Stop reading `parameters[].source` — read `parameters[].dataSource.kind`
+      instead (`"static"` | `"dynamic"` | `"system"`). See **DataSource**.
+- [ ] Stop parsing `type` for a `"select_<key>"` prefix — dynamic selects are
+      now always `type: "select"` plus `dataSource: {kind: "dynamic", sourceKey}`.
+- [ ] Read `templates[].version` and store it wherever presets end up saved
+      (see #4). See **Versioning**.
+- [ ] Rename any `customFunctions` reference to `operations`; each entry also
+      now carries `refreshable: boolean`. See **Operations**.
+
+**2. Form rendering**
+- [ ] Only render `static`/`dynamic`-sourced parameters as form fields; never
+      render `system`-sourced ones.
+- [ ] For `dynamic` parameters, call `resolveDynamicOptions` (or whatever
+      it's called now) keyed by `dataSource.sourceKey`, not a parsed-out
+      `type` string.
+- [ ] Implement `visibility` evaluation: hide a parameter unless its
+      `dependsOn` field's current value satisfies `op`/`value`/`values`. See
+      **Visibility**.
+- [ ] Optional/nice-to-have: client-side `validation` checks (min/max/regex/
+      maxLength) before submitting — the operator still enforces these
+      authoritatively either way. See **Validation**.
+
+**3. Deploy flow**
+- [ ] No breaking change to the `/deploy` request shape itself — same
+      `config` object as before.
+- [ ] Confirm error handling already treats `400`/etc. response bodies as
+      plain text, not JSON (this was already true, not new).
+
+**4. Presets (new capability, not yet built)**
+- [ ] Store the template's `version` alongside a preset when it's created.
+- [ ] When a preset is loaded/used later, compare its stored version against
+      the current `/catalog` response's `version` for that template ID —
+      decide the product behavior on a mismatch (warn/block/auto-migrate).
+      The operator has no opinion here. See **Versioning**.
+
+**5. Operations (renamed from CustomFunctions)**
+- [ ] Rename `customFunctions`-related code/types to `operations`.
+- [ ] Update the "invoke an operation" response parser: was a bare ad hoc
+      object (e.g. `{"stdout": "..."}`), now always
+      `{"additionalInfo": [{"name", "type", "value"}, ...]}`. See
+      **Operations** → "Invoking one."
+- [ ] Handle `type: "secret"` vs `"plain"` in the UI — mask secrets by
+      default, offer an explicit reveal/copy action rather than displaying
+      inline.
+- [ ] For an operation with `refreshable: true`, decide your own polling
+      interval if you want a live-updating value (e.g. a bearer token a
+      workload generated at runtime) — the operator does nothing special
+      here, it's the same invoke endpoint called again on whatever schedule
+      you choose.
+
+**6. Entrypoints (new field, breaking gateway URL change)**
+- [ ] Parse `templates[].entrypoints` (`Entrypoint[]`, always present, at
+      least one entry). See **Entrypoints**.
+- [ ] Build gateway URLs as
+      `/gw/{namespace}/{name}/{entrypoint}/{subpath...}` — the entrypoint
+      segment is now **mandatory** for every workload, including
+      single-entrypoint templates like `nginx` (use its one declared
+      `entrypoints[].name`, e.g. `"http"`).
+- [ ] When a template declares more than one entrypoint, decide how to
+      pick/display which one to open (e.g. a tab/dropdown keyed on
+      `entrypoints[].label`) — the operator has no opinion on UI here.
+
 ## The shape, field by field
 
 `GET /catalog` returns a JSON array of Templates. One Template:
@@ -23,6 +98,7 @@ field names and a couple of value shapes are different.
   "icon": "🦊",
   "version": "1.0.0",
   "parameters": [ /* Parameter[], see below */ ],
+  "entrypoints": [ /* Entrypoint[], see below — always at least one */ ],
   "operations": [ /* Operation[], see below — omitted if empty */ ]
 }
 ```
@@ -33,6 +109,7 @@ field names and a couple of value shapes are different.
 | `name`, `description`, `icon` | string | Display-only. |
 | `version` | string | See **Versioning** below. |
 | `parameters` | Parameter[] | Deploy-time config. |
+| `entrypoints` | Entrypoint[] | Web entrypoints this workload's Service exposes — always at least one. See **Entrypoints**. |
 | `operations` | Operation[] | Operations against an already-*running* workload (e.g. "back up now", "get current token") — separate from deploy-time parameters. Omitted entirely when a template has none. |
 
 One `Parameter`:
@@ -99,11 +176,12 @@ One `Parameter`:
 
 A parameter with a `visibility` block should be hidden in the UI unless the
 condition holds against whatever the user's currently entered for
-`dependsOn`. Concretely today: `profileDownloadUrl` (firefox/chrome) only
-has a `visibility` block dependent on `restoreProfile`, so only show/ask for
-it once the user's toggled "restore a saved profile" on — this used to be
-just a doc comment ("only meaningful when restoreProfile is true"); it's now
-a machine-checked rule the operator itself enforces (see next point).
+`dependsOn`. Concretely today: `profileName` and `profileDownloadUrl`
+(firefox/chrome) both carry a `visibility` block dependent on
+`restoreProfile`, so neither is shown/asked for until the user's toggled
+"restore a saved profile" on — this used to be just a doc comment ("only
+meaningful when restoreProfile is true"); it's now a machine-checked rule
+the operator itself enforces (see next point).
 
 **Important operator-side behavior**: when a parameter's visibility
 condition doesn't hold, the operator's validation (`ResolveParams`) skips
@@ -227,6 +305,38 @@ it. Errors here are plain text same as `/deploy` (see **Validation** above)
 required parameter missing), `409` if the workload has no running pod right
 now, `500` if the operation itself failed (e.g. the exec'd command errored).
 
+## Entrypoints — new, drives the gateway URL
+
+```jsonc
+"entrypoints": [
+  { "name": "http", "label": "Web" }
+]
+```
+
+Every template declares at least one entrypoint — a named web port its
+Service exposes. Most templates today have exactly one, but a template whose
+container serves more than one meaningful web UI (e.g. separate
+"backoffice"/"frontoffice" ports) can declare several — this is the "see"
+half: `entrypoints[].label` is what you'd show the user to pick one, when
+there's more than one to pick from.
+
+The "reach" half is the gateway URL shape, which now **requires** the
+entrypoint name as a path segment for every workload, single-entrypoint or
+not:
+
+```
+/gw/{namespace}/{name}/{entrypoint}/{subpath...}
+```
+
+`{entrypoint}` must be one of that workload's template's `entrypoints[].name`
+values (e.g. `"http"` for every template today). An unknown entrypoint name
+gets a `404`. This segment is purely a routing detail — it does **not**
+affect the gateway auth cookie/token scope, which stays scoped to
+`(namespace, name)` only: once you've authenticated against any one
+entrypoint of a workload, the resulting cookie authorizes every other
+entrypoint of that same workload too, with no separate token exchange per
+entrypoint.
+
 ## Full real examples
 
 **Nginx** (the simplest template — static select + validated number, no
@@ -263,6 +373,9 @@ system/dynamic parameters, no operations):
       "default": 1024,
       "validation": { "min": 0, "max": 65536 }
     }
+  ],
+  "entrypoints": [
+    { "name": "http", "label": "Web" }
   ]
 }
 ```
@@ -284,7 +397,8 @@ operation):
       "description": "Identifies which saved profile to restore, if any.",
       "type": "select",
       "dataSource": { "kind": "dynamic", "sourceKey": "profiles_browser" },
-      "required": false
+      "required": false,
+      "visibility": { "dependsOn": "restoreProfile", "op": "equals", "value": true }
     },
     {
       "key": "restoreProfile",
@@ -302,6 +416,9 @@ operation):
       "required": false,
       "visibility": { "dependsOn": "restoreProfile", "op": "equals", "value": true }
     }
+  ],
+  "entrypoints": [
+    { "name": "http", "label": "Web" }
   ],
   "operations": [
     {
@@ -384,6 +501,11 @@ If you're updating existing Convex code rather than starting fresh:
   `{"additionalInfo": [{"name", "type", "value"}, ...]}` — every value is
   now explicitly typed `secret`/`plain` instead of you having to know by
   convention which fields might be sensitive.
+- `templates[].entrypoints` → **new**, always present, at least one entry.
+  The gateway URL shape changed to require an entrypoint segment:
+  `/gw/{namespace}/{name}/{subpath...}` → 
+  `/gw/{namespace}/{name}/{entrypoint}/{subpath...}` — **breaking for every
+  workload**, not just multi-entrypoint ones. See **Entrypoints**.
 
 ## Ground truth, if you need to verify anything
 

@@ -115,7 +115,7 @@ func newTestServer(t *testing.T) (*Server, client.Client, *fakeGatewayVerifier, 
 	}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: testServiceNS},
-		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: testServicePort}}},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: testServicePort}}},
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -140,7 +140,7 @@ func (s *Server) testHandler() http.Handler {
 	mux.Handle("POST /workloads", s.requireDeployToken(http.HandlerFunc(s.handleDeploy)))
 	mux.Handle("GET /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
 	mux.Handle("DELETE /workloads/{namespace}/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
-	mux.Handle("GET /gw/{namespace}/{name}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
+	mux.Handle("GET /gw/{namespace}/{name}/{entrypoint}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
 	mux.Handle("GET /catalog", s.requireDeployToken(http.HandlerFunc(s.handleCatalog)))
 	mux.Handle("POST /workloads/{namespace}/{name}/functions/{key}", s.requireDeployToken(http.HandlerFunc(s.handleRunFunction)))
 	return mux
@@ -285,7 +285,7 @@ func mintTestCookie(t *testing.T, secret, namespace, name string, exp time.Time)
 func TestGatewayRequiresToken(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/", nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -299,7 +299,7 @@ func TestGatewayRejectsUnknownOrWrongScopeToken(t *testing.T) {
 
 	// Issued for a different workload name — must not authorize this one.
 	verifier.issue("some-other-workload")
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -311,7 +311,7 @@ func TestGatewayRejectsUnknownOrWrongScopeToken(t *testing.T) {
 func TestGatewayRejectsWhenVerifierFails(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token=bogus", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token=bogus", nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -328,7 +328,10 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 	}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: testServiceNS},
-		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: testServicePort}}},
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{
+			{Name: "http", Port: testServicePort},
+			{Name: "backoffice", Port: 9090},
+		}},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
 	proxy, err := gateway.NewServiceProxy(c, &rest.Config{Host: apiServerURL})
@@ -354,7 +357,7 @@ func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -384,7 +387,7 @@ func TestGatewayTokenIsSingleUse(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -393,7 +396,7 @@ func TestGatewayTokenIsSingleUse(t *testing.T) {
 
 	// Same token again, no cookie this time — the fake verifier already
 	// deleted it on first use, exactly like Convex's real single-use check.
-	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec2 := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusUnauthorized {
@@ -410,7 +413,7 @@ func TestGatewayCookieAuthorizesSubsequentRequestsWithoutToken(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/?token="+testOneTimeToken, nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -425,13 +428,51 @@ func TestGatewayCookieAuthorizesSubsequentRequestsWithoutToken(t *testing.T) {
 	// cookie but no ?token=. This must succeed purely from the cookie: the
 	// one-time token was already consumed above, so any accidental fallback
 	// to the verifier would fail this request.
-	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/assets/app.js", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/assets/app.js", nil)
 	req2.AddCookie(cookies[0])
 	rec2 := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("expected cookie-authenticated request to succeed, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// TestGatewayCookieAuthorizesDifferentEntrypointsOfSameWorkload is the
+// concrete "reach" proof for multi-entrypoint support: the gateway cookie is
+// scoped to the workload (namespace+name), not to a specific entrypoint, so
+// a cookie minted while exchanging a token against one entrypoint must also
+// authorize a request against a different entrypoint of the same workload,
+// with no second token exchange.
+func TestGatewayCookieAuthorizesDifferentEntrypointsOfSameWorkload(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer apiServer.Close()
+
+	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
+	verifier.issue(testServiceName)
+
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected exchange request against the http entrypoint to succeed, got %d", rec.Code)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected a cookie to be set")
+	}
+
+	// Same cookie, no token, but against the "backoffice" entrypoint of the
+	// same workload — must succeed purely from the workload-scoped cookie.
+	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/backoffice/", nil)
+	req2.AddCookie(cookies[0])
+	rec2 := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected cookie to authorize a different entrypoint of the same workload, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 }
 
@@ -442,7 +483,7 @@ func TestGatewayCookieRejectedForDifferentWorkload(t *testing.T) {
 	// authorize this workload's path — defense in depth alongside the
 	// cookie's own Path scoping, which a client could in principle ignore.
 	cookie := mintTestCookie(t, testGatewaySecret, testServiceNS, "some-other-workload", time.Now().Add(time.Minute))
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/", nil)
 	req.AddCookie(&http.Cookie{Name: gatewayCookieName, Value: cookie})
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
@@ -456,7 +497,7 @@ func TestGatewayCookieRejectedWhenExpired(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
 	cookie := mintTestCookie(t, testGatewaySecret, testServiceNS, testServiceName, time.Now().Add(-time.Hour))
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceNS+"/"+testServiceName+"/http/", nil)
 	req.AddCookie(&http.Cookie{Name: gatewayCookieName, Value: cookie})
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)

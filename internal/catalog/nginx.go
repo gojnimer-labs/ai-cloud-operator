@@ -46,6 +46,7 @@ var Nginx = Template{
 		}, nil
 	},
 	Description: "Simple nginx web server with hello world demo",
+	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDNginx,
 	Icon:        "🌐",
 	Name:        "Nginx",
