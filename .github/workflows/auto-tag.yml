@@ -35,6 +35,8 @@ jobs:
       # workflow after the first lands resolves it.
       - name: Compute and push the next patch tag
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch --tags --force
           latest="$(git tag -l 'v*' | sort -V | tail -1)"
           if [ -z "$latest" ]; then
