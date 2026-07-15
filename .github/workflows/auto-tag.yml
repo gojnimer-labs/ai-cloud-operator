@@ -1,0 +1,49 @@
+name: Auto Tag
+
+# Every merge to main gets its own vX.Y.Z release — pushing that tag is what
+# actually triggers publish.yml (image + install.yaml) and helm-release.yml
+# (chart), so this workflow's only job is deciding and pushing the next tag.
+# Tag pushes don't themselves match `branches: [main]` below, so this can't
+# trigger itself in a loop.
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  tag:
+    permissions:
+      contents: write
+    name: Push the next release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          # Deliberately NOT persist-credentials: false (unlike this repo's
+          # other workflows) — this job's whole purpose is `git push` a tag,
+          # which needs the checkout-configured GITHUB_TOKEN credential.
+
+      # Simple vX.Y.(Z+1) patch bump off the highest existing v* tag; starts
+      # at v0.1.0 if none exist yet. Assumes pushes to main land one at a
+      # time (true for this repo's current single-committer workflow) — two
+      # concurrent pushes computing the same "next" tag would have the
+      # second push fail rather than silently double-tag; re-running the
+      # workflow after the first lands resolves it.
+      - name: Compute and push the next patch tag
+        run: |
+          git fetch --tags --force
+          latest="$(git tag -l 'v*' | sort -V | tail -1)"
+          if [ -z "$latest" ]; then
+            next="v0.1.0"
+          else
+            base="${latest#v}"
+            IFS=. read -r major minor patch <<< "$base"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+          echo "Latest tag: ${latest:-<none>}; pushing $next"
+          git tag -a "$next" -m "Auto-tagged release $next"
+          git push origin "$next"

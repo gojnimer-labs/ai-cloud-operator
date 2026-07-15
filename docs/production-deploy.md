@@ -1,12 +1,12 @@
 # Deploying to a real cluster
 
-This walks through running the operator as an actual in-cluster Deployment (image pulled from GHCR, real Secrets, a real reachable URL) instead of as a local process — the setup used for everything up to this point.
+This walks through running the operator as an actual in-cluster Deployment (image pulled from GHCR, real Secrets, a real reachable URL) instead of as a local process — the setup used for everything up to this point, via plain `kubectl`. Deploying via Helm/ArgoCD instead? See [argocd-helm-deploy.md](./argocd-helm-deploy.md).
 
 ## Prerequisites
 
 - `kubectl` pointed at the target cluster.
 - A reachable Convex deployment (self-hosted or cloud) with `ENROLLMENT_SECRET` set on it (see `ai-cloud-v2/convex/operators/http.ts`'s `register` handler — it must match what you set here).
-- A pushed `v*` tag on this repo, so `.github/workflows/publish.yml`'s `release` job has produced a consolidated `install.yaml` release asset: `git tag v0.1.0 && git push origin v0.1.0`.
+- A `v*` tag already pushed to this repo, so `.github/workflows/publish.yml`'s `release` job has produced a consolidated `install.yaml` release asset. `.github/workflows/auto-tag.yml` pushes one automatically on every merge to `main` — check `git tag -l` or the repo's Releases page rather than tagging one yourself.
 - If you plan to enable the ingress overlay: an ingress controller (k3s ships Traefik by default) and, optionally, cert-manager with a `ClusterIssuer` for automatic TLS.
 
 ## Option A — no source checkout needed (recommended)

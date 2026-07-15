@@ -12,9 +12,9 @@ reached via Ingress → Service → pod.
 
 **Prerequisite:** a `v*` tag must have been pushed to the repo already, so
 `.github/workflows/publish.yml`'s `release` job has produced the
-`install.yaml` asset this guide applies (`git tag v0.1.0 && git push origin
-v0.1.0`, from wherever you have the repo cloned for development — not the
-VM).
+`install.yaml` asset this guide applies. `.github/workflows/auto-tag.yml`
+pushes one automatically on every merge to `main`, so this is usually
+already true — check the repo's Releases page if unsure.
 
 ## 1. DNS + firewall
 

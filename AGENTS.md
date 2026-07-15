@@ -266,41 +266,39 @@ make build-installer IMG=<registry>/<project>:tag
 ```
 
 **Key points:**
-- The `dist/install.yaml` is generated from Kustomize manifests (CRDs, RBAC, Deployment)
-- Commit this file to your repository for easy distribution
+- `dist/install.yaml` is generated from Kustomize manifests (CRDs, RBAC, Deployment) — `.github/workflows/publish.yml`'s `release` job builds it fresh and attaches it to the GitHub Release for every `v*` tag. It's `.gitignore`d, not committed — always regenerate rather than hand-edit.
 - Users only need `kubectl` to install (no additional tools required)
 
 **Example:** Users install with a single command:
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/<org>/<repo>/<tag>/dist/install.yaml
+kubectl apply -f https://github.com/gojnimer-labs/ai-cloud-operator/releases/latest/download/install.yaml
 ```
 
 ### Option 2: Helm Chart
 
+**Not the kubebuilder `helm/v2-alpha` plugin** — this project's chart
+(`charts/ai-cloud-operator`) is generated from the same Kustomize manifests
+above via [helmify](https://github.com/arttor/helmify), so `config/*` stays
+the one source of truth for both distribution options instead of drifting
+into two hand-maintained copies:
+
 ```bash
-kubebuilder edit --plugins=helm/v2-alpha                      # Generates dist/chart/ (default)
-kubebuilder edit --plugins=helm/v2-alpha --output-dir=charts  # Generates charts/chart/
+make helm-chart   # kustomize build config/default | helmify → charts/ai-cloud-operator
 ```
 
-**For development:**
-```bash
-make helm-deploy IMG=<registry>/<project>:<tag>          # Deploy manager via Helm
-make helm-deploy IMG=$IMG HELM_EXTRA_ARGS="--set ..."    # Deploy with custom values
-make helm-status                                         # Show release status
-make helm-uninstall                                      # Remove release
-make helm-history                                        # View release history
-make helm-rollback                                       # Rollback to previous version
-```
+Run this after *any* change under `config/*` and commit the result — CI
+(`lint.yml`'s `helm` job, and `.github/workflows/helm-release.yml` on every
+tag) regenerates the chart and fails the build if it doesn't exactly match
+what's committed. See `hack/render-helm-chart.sh` for exactly what's
+regenerated vs. hand-maintained (`templates/deployment.yaml` and
+`values.yaml` need re-applying customizations helmify has no flag for on
+every run; `templates/ingress.yaml` and `templates/secret.yaml` are fully
+hand-authored one-time additions, since neither resource exists in
+`config/*`'s kustomize output).
 
-**For end users/production:**
-```bash
-helm install my-release ./<output-dir>/chart/ --namespace <ns> --create-namespace
-```
-
-**Important:** If you add webhooks or modify manifests after initial chart generation:
-1. Backup any customizations in `<output-dir>/chart/values.yaml` and `<output-dir>/chart/manager/manager.yaml`
-2. Re-run: `kubebuilder edit --plugins=helm/v2-alpha --force` (use same `--output-dir` if customized)
-3. Manually restore your custom values from the backup
+`helm-release.yml` packages and pushes it to `oci://ghcr.io/gojnimer-labs/charts`
+on every `v*` tag. See `docs/argocd-helm-deploy.md` for the ArgoCD
+Application example and values reference.
 
 ### Publish Container Image
 
