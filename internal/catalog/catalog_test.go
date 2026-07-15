@@ -25,6 +25,11 @@ import (
 const (
 	testNamespace  = "default"
 	testFirefoxPod = "firefox-abc"
+
+	// Parameter keys reused across the synthetic Templates below.
+	paramKeyName  = "name"
+	paramKeyMode  = "mode"
+	paramKeyCount = "count"
 )
 
 // fakePodExecutor is a minimal in-package stand-in for a real client-go SPDY
@@ -81,11 +86,73 @@ func TestResolveParamsRejectsMissingRequired(t *testing.T) {
 	tmpl := Template{
 		ID: "test",
 		Parameters: []Parameter{
-			{Key: "name", Required: true, Type: ParameterTypeString},
+			{Key: paramKeyName, Required: true, Type: ParameterTypeString},
 		},
 	}
 	if _, err := ResolveParams(tmpl.Parameters, map[string]any{}); err == nil {
 		t.Fatalf("expected an error for missing required parameter")
+	}
+}
+
+// TestResolveParamsSkipsRequiredAndValidationWhenHidden covers the core new
+// rule: a parameter whose Visibility condition doesn't hold is exempt from
+// both Required and Validation — nothing rendered a form field for it, so
+// enforcing either would be unsatisfiable by construction.
+func TestResolveParamsSkipsRequiredAndValidationWhenHidden(t *testing.T) {
+	maxLen := 3
+	params := []Parameter{
+		{Key: paramKeyMode, Type: ParameterTypeString, DataSource: DataSource{Kind: DataSourceStatic}},
+		{
+			Key:        "advancedOption",
+			Type:       ParameterTypeString,
+			Required:   true,
+			Validation: &Validation{MaxLength: &maxLen},
+			Visibility: &Visibility{DependsOn: paramKeyMode, Op: VisibilityEquals, Value: "advanced"},
+		},
+	}
+
+	// mode != "advanced", so advancedOption is hidden: missing + required +
+	// would-be-too-long-if-checked must still resolve cleanly.
+	if _, err := ResolveParams(params, map[string]any{paramKeyMode: "simple"}); err != nil {
+		t.Fatalf("expected hidden required parameter to be exempt, got error: %v", err)
+	}
+
+	// mode == "advanced" now makes it visible, so the same missing value
+	// must be rejected.
+	if _, err := ResolveParams(params, map[string]any{paramKeyMode: "advanced"}); err == nil {
+		t.Fatalf("expected an error once the dependency makes the parameter visible")
+	}
+}
+
+func TestResolveParamsRejectsValidationViolations(t *testing.T) {
+	minV, maxV := 0.0, 10.0
+	numeric := []Parameter{
+		{Key: paramKeyCount, Type: ParameterTypeNumber, DataSource: DataSource{Kind: DataSourceStatic}, Validation: &Validation{Min: &minV, Max: &maxV}},
+	}
+	if _, err := ResolveParams(numeric, map[string]any{paramKeyCount: float64(50)}); err == nil {
+		t.Fatalf("expected an error for a value above Max")
+	}
+	if _, err := ResolveParams(numeric, map[string]any{paramKeyCount: float64(5)}); err != nil {
+		t.Fatalf("expected an in-range value to pass, got %v", err)
+	}
+
+	pattern := []Parameter{
+		{Key: paramKeyName, Type: ParameterTypeString, DataSource: DataSource{Kind: DataSourceStatic}, Validation: &Validation{Regex: "^[a-z]+$"}},
+	}
+	if _, err := ResolveParams(pattern, map[string]any{paramKeyName: "Not Valid!"}); err == nil {
+		t.Fatalf("expected an error for a regex mismatch")
+	}
+	if _, err := ResolveParams(pattern, map[string]any{paramKeyName: "validname"}); err != nil {
+		t.Fatalf("expected a matching value to pass, got %v", err)
+	}
+}
+
+// TestNginxRejectsOutOfRangeWorkerConnections exercises Validation on a real
+// template's real field, not just a synthetic one.
+func TestNginxRejectsOutOfRangeWorkerConnections(t *testing.T) {
+	tmpl, _ := Get(templateIDNginx)
+	if _, err := ResolveParams(tmpl.Parameters, map[string]any{"workerConnections": float64(999999)}); err == nil {
+		t.Fatalf("expected an error for workerConnections exceeding its declared Max")
 	}
 }
 
@@ -143,11 +210,11 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 		if len(fn.Parameters) != 2 || fn.Parameters[0].Key != "label" || fn.Parameters[1].Key != paramKeyUploadURL {
 			t.Fatalf("%s: expected label and uploadUrl parameters, got %+v", id, fn.Parameters)
 		}
-		if fn.Parameters[0].Source != ParameterSourceUser {
-			t.Fatalf("%s: expected label to be user-sourced", id)
+		if fn.Parameters[0].DataSource.Kind != DataSourceStatic {
+			t.Fatalf("%s: expected label to be a static data source", id)
 		}
-		if fn.Parameters[1].Source != ParameterSourceSystem {
-			t.Fatalf("%s: expected uploadUrl to be system-sourced", id)
+		if fn.Parameters[1].DataSource.Kind != DataSourceSystem {
+			t.Fatalf("%s: expected uploadUrl to be a system data source", id)
 		}
 	}
 	if _, ok := GetCustomFunction(Template{}, "backup_state"); ok {

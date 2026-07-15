@@ -76,5 +76,6 @@ var Chrome = Template{
 	ID:              templateIDChrome,
 	Icon:            "🌐",
 	Name:            "Chrome Browser",
+	Version:         initialTemplateVersion,
 	Parameters:      browserParameters,
 }

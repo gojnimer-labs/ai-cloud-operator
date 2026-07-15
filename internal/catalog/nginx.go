@@ -49,6 +49,7 @@ var Nginx = Template{
 	ID:          templateIDNginx,
 	Icon:        "🌐",
 	Name:        "Nginx",
+	Version:     initialTemplateVersion,
 	Parameters: []Parameter{
 		{
 			Default: logLevelInfo,
@@ -59,9 +60,9 @@ var Nginx = Template{
 				{Label: "Warn", Value: logLevelWarn},
 				{Label: "Error", Value: logLevelError},
 			},
-			Required: false,
-			Source:   ParameterSourceUser,
-			Type:     ParameterTypeSelect,
+			Required:   false,
+			DataSource: DataSource{Kind: DataSourceStatic},
+			Type:       ParameterTypeSelect,
 		},
 		{
 			Default:     float64(1024),
@@ -69,8 +70,11 @@ var Nginx = Template{
 			Key:         "workerConnections",
 			Label:       "Worker connections",
 			Required:    false,
-			Source:      ParameterSourceUser,
+			DataSource:  DataSource{Kind: DataSourceStatic},
 			Type:        ParameterTypeNumber,
+			// Demonstrates the new Validation field — an out-of-range worker
+			// connection count is rejected rather than silently accepted.
+			Validation: &Validation{Min: ptrFloat64(0), Max: ptrFloat64(65536)},
 		},
 	},
 }

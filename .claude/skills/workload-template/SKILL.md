@@ -24,8 +24,9 @@ A "template" is a pre-built container spec a user can pick via
    (not an error — every param falls back to its default). Otherwise it's a
    plain `json.Unmarshal` into `map[string]any`, so **numbers arrive as
    `float64`**, not `int`.
-4. `catalog.ResolveParams(tmpl.Parameters, rawParams)` — applies defaults,
-   errors on missing required values.
+4. `catalog.ResolveParams(tmpl.Parameters, rawParams)` — applies defaults, then
+   evaluates `Visibility`, then checks `Required`/`Validation` on whatever's
+   still visible (see below).
 5. `tmpl.Build(resolvedParams)` → `catalog.Rendered{Containers, InitContainers,
    Volumes, ServicePorts}`.
 6. The reconciler does a **direct, unconditional assignment** — no merging, no
@@ -40,6 +41,12 @@ mirrored in `charts/ai-cloud-operator/templates/workload-crd.yaml`) is a plain
 `type: string` with no enum restricting values. Adding a template is a pure Go
 change: a new file in `internal/catalog/` plus one line in
 `internal/catalog/registry.go`.
+
+`catalog.ResolveParams` is also called from `internal/api/server.go`'s
+`handleDeploy` (validates before creating the Workload CR, 400s on error, but
+discards the resolved map — only raw `Config` gets stored) and
+`handleRunFunction` (same validation, for `CustomFunction.Parameters`) — three
+call sites total, all sharing this one function.
 
 ## Walkthrough
 
@@ -57,15 +64,40 @@ change: a new file in `internal/catalog/` plus one line in
 ## The struct shapes (from `internal/catalog/types.go`)
 
 ```go
+type DataSourceKind string
+const (
+	DataSourceStatic  DataSourceKind = "static"  // inline Options (or none); user fills the form — default
+	DataSourceDynamic DataSourceKind = "dynamic" // Convex resolves Options by SourceKey at request time
+	DataSourceSystem  DataSourceKind = "system"  // Convex computes the value and injects it directly; never a form field
+)
+type DataSource struct {
+	Kind      DataSourceKind
+	SourceKey string // only meaningful when Kind == DataSourceDynamic
+}
+
+type VisibilityOp string // "equals" | "notEquals" | "oneOf"
+type Visibility struct {
+	DependsOn string       // another Parameter.Key in the same list
+	Op        VisibilityOp
+	Value     any   // equals/notEquals
+	Values    []any // oneOf
+}
+
+type Validation struct {
+	Min, Max  *float64 // numeric range
+	Regex     string   // string pattern
+	MaxLength *int     // string length
+}
+
 type Parameter struct {
-	Key         string
-	Label       string
-	Description string          // optional
-	Type        ParameterType   // ParameterTypeString | Number | Boolean | Select | DynamicSelectType("source")
-	Source      ParameterSource // ParameterSourceUser | ParameterSourceSystem
+	Key, Label, Description string
+	Type        ParameterType // ParameterTypeString | Number | Boolean | Select
+	DataSource  DataSource
 	Required    bool
-	Default     any             // omitted if nil; applied only when caller didn't supply the key
-	Options     []SelectOption  // only for ParameterTypeSelect
+	Default     any            // omitted if nil; applied only when caller didn't supply the key
+	Options     []SelectOption // only for ParameterTypeSelect
+	Visibility  *Visibility    // nil = always visible/enforced
+	Validation  *Validation    // nil = no constraint beyond Required
 }
 
 type Rendered struct {
@@ -76,43 +108,39 @@ type Rendered struct {
 }
 
 type Template struct {
-	ID              string
-	Name            string
-	Description     string
-	Icon            string
+	ID, Name, Description, Icon string
+	Version         string // manually bumped, e.g. "1.0.0" — see Versioning below
 	Parameters      []Parameter
 	CustomFunctions []CustomFunction // optional, see "Advanced" below
 	Build           func(params map[string]any) (Rendered, error)
 }
 ```
 
-`ResolveParams` (`internal/catalog/registry.go`) is what turns raw request
-params into what `Build` receives:
+`ResolveParams` (`internal/catalog/registry.go`) turns raw request params into
+what `Build` receives, in two passes:
 
-```go
-func ResolveParams(params []Parameter, raw map[string]any) (map[string]any, error) {
-	resolved := make(map[string]any, len(params))
-	maps.Copy(resolved, raw) // raw itself is never mutated
-	for _, p := range params {
-		if _, ok := resolved[p.Key]; !ok && p.Default != nil {
-			resolved[p.Key] = p.Default
-		}
-		if p.Required {
-			if v, ok := resolved[p.Key]; !ok || v == nil || v == "" {
-				return nil, fmt.Errorf("missing required parameter %q", p.Key)
-			}
-		}
-	}
-	return resolved, nil
-}
+```
+pass 1 (defaults): resolved = copy(raw); for each p where resolved[p.Key] is
+  absent and p.Default != nil: resolved[p.Key] = p.Default
+
+pass 2 (visibility, then required, then validation) — needs pass 1's full map
+  since Visibility can depend on another parameter's resolved/defaulted value:
+  for each p:
+    if p.Visibility != nil and it evaluates to "not visible": skip Required
+      and Validation entirely for this p (its value, if any, is left in the
+      map untouched — not stripped)
+    if p.Required and resolved[p.Key] is missing/nil/"": error
+    if p.Validation != nil and a value is present: check Min/Max (numeric) or
+      Regex/MaxLength (string), error on violation
 ```
 
-**Gotcha**: the required-check treats `""` as "missing" too (not just absent/nil).
-Don't mark a parameter `Required: true` unless a real value is guaranteed to
-exist by the time `Build` runs — that's why `profileDownloadUrl` (system,
-optional — restore may not be requested) and `uploadUrl` (system, but always
-required for that specific custom function call) differ in `Required` even
-though both are `ParameterSourceSystem`.
+**Gotcha**: a hidden parameter (its `Visibility` condition doesn't hold) is
+never enforced as required or validated — nothing rendered a form field for
+it, so demanding a value would be unsatisfiable. A *visible* required
+parameter still treats `""`/`nil` as "missing" (not just absent) — don't mark
+a parameter `Required: true` unless a real value is guaranteed by the time
+`Build` runs (see `profileDownloadUrl` below: not required, because a restore
+may not even be requested).
 
 Helpers already in `internal/catalog/registry.go`, available package-wide —
 use them instead of re-deriving:
@@ -121,6 +149,20 @@ use them instead of re-deriving:
   (the JSON-decoded case), `int32`, and `int` (the case when a test constructs
   params directly).
 - `int32ToString(v int32) string`
+- `ptrFloat64(v float64) *float64` — for populating `Validation.Min`/`Max`
+  struct literals from a bare number.
+
+## Versioning
+
+`Template.Version` is a plain string (semver-shaped by convention, e.g.
+`"1.0.0"`), bumped by hand whenever *that template's* `Parameters` change.
+It's purely informational — the operator never reads or enforces it, and
+there's no version field on the deploy request. It exists so Convex-side
+presets (a saved parameter set built against a template at some point) can
+detect that the schema has since moved, entirely on the Convex side. When you
+change an existing template's `Parameters` (add/remove/rename a key, change a
+`Required`/`Type`/`Visibility` in a way that could break a saved preset),
+bump `Version`. Adding a brand-new template starts at `"1.0.0"`.
 
 ## Worked example: a "redis" template
 
@@ -187,6 +229,7 @@ var Redis = Template{
 	ID:          templateIDRedis,
 	Icon:        "🟥",
 	Name:        "Redis",
+	Version:     "1.0.0",
 	Parameters: []Parameter{
 		{
 			Default:     "256mb",
@@ -194,15 +237,16 @@ var Redis = Template{
 			Key:         "maxMemory",
 			Label:       "Max memory",
 			Required:    false,
-			Source:      ParameterSourceUser,
+			DataSource:  DataSource{Kind: DataSourceStatic},
 			Type:        ParameterTypeString,
+			Validation:  &Validation{Regex: `^\d+(kb|mb|gb)$`},
 		},
 		{
 			Description: "Optional; passed as --requirepass. Leave blank for no auth (acceptable for a private in-cluster instance).",
 			Key:         "password",
 			Label:       "Password",
 			Required:    false,
-			Source:      ParameterSourceUser,
+			DataSource:  DataSource{Kind: DataSourceStatic},
 			Type:        ParameterTypeString,
 		},
 	},
@@ -259,6 +303,13 @@ func TestRedisBuildDefaultsMaxMemoryWithoutPassword(t *testing.T) {
 		}
 	}
 }
+
+func TestRedisRejectsInvalidMaxMemory(t *testing.T) {
+	tmpl, _ := Get(templateIDRedis)
+	if _, err := ResolveParams(tmpl.Parameters, map[string]any{"maxMemory": "lots"}); err == nil {
+		t.Fatalf("expected an error for a maxMemory value that doesn't match the regex")
+	}
+}
 ```
 
 Also add `templateIDRedis` to the id list in `TestGetReturnsKnownTemplates`.
@@ -285,14 +336,24 @@ Then: `go build ./... && go test ./internal/catalog/...`
   `workerConnections` example.
 - **`Required: true` + `""`/`nil` are both treated as "missing"** by
   `ResolveParams` — don't require a field that's legitimately optional at
-  Build time.
-- **System- vs user-sourced parameters**: `ParameterSourceSystem` means Convex
+  Build time. Combine with `Visibility` when a field is only ever relevant
+  conditionally (see `profileDownloadUrl` below) rather than leaving it
+  optional-in-name-only.
+- **System-sourced parameters** (`DataSource{Kind: DataSourceSystem}`): Convex
   computes and injects the value server-side (e.g. a presigned URL) — it must
   never be rendered as an editable form field, and your `Build`/init-container
   script must treat it as untrusted-ish data (pass via env var / positional
   arg, never string-interpolate into a shell script — see
   `restoreProfileInitContainer` and `backupStateFunction` in
   `internal/catalog/browser.go` for the reasoning and the pattern to copy).
+  `profileDownloadUrl` also demonstrates pairing a system parameter with
+  `Visibility` — it's only meaningful (and only enforced/validated) when
+  `restoreProfile == true`.
+- **Dynamic-select parameters** (`DataSource{Kind: DataSourceDynamic,
+  SourceKey: "..."}`): leave `Options` empty — Convex resolves the actual
+  choices per-request from its own database keyed by `SourceKey` (see
+  `profileName` in `browser.go`). The operator declares *that* a dynamic
+  select is needed and *which* source backs it, never the options themselves.
 - **Reuse `internal/catalog/browser.go` helpers when they fit, don't force
   it**: `browserResources(cpu, memRequest, memLimit string)` is generic enough
   for any container despite the name (used above for redis). `browserProbe`
@@ -303,10 +364,10 @@ Then: `go build ./... && go test ./internal/catalog/...`
   new file, the way `nginx.go` needs neither.
 - **Struct-literal field order**: existing `Template`/`Parameter` literals are
   mostly alphabetical by field name (`Build, CustomFunctions, Description, ID,
-  Icon, Name, Parameters`; `Default, Description, Key, Label, Required,
-  Source, Type`) — not gofmt-enforced, just house style; match it for
-  reviewability, but don't worry if a comment forces you to break it (see
-  `profileName`'s `Parameter` in `browser.go`, which doesn't).
+  Icon, Name, Parameters, Version`; `DataSource, Default, Description, Key,
+  Label, Required, Type, Validation, Visibility`) — not gofmt-enforced, just
+  house style; match it for reviewability, but don't worry if a comment forces
+  you to break it.
 
 ## Advanced (optional): CustomFunction
 

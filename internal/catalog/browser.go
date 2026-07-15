@@ -45,6 +45,10 @@ const (
 	logLevelWarn      = "warn"
 	logLevelError     = "error"
 	paramKeyUploadURL = "uploadUrl"
+
+	// initialTemplateVersion is every template's Version until its
+	// Parameters change for the first time — see Template.Version.
+	initialTemplateVersion = "1.0.0"
 )
 
 // browserParameters is the parameter set shared by firefox/chrome: a
@@ -60,24 +64,27 @@ var browserParameters = []Parameter{
 		// The value is a selectOptions row id, not a literal profile name —
 		// Convex resolves it back to an actual R2 object when restoring (see
 		// convex/workloads/actions.ts#deployWorkload).
-		Type:     DynamicSelectType("profiles_browser"),
-		Source:   ParameterSourceUser,
-		Required: false,
+		Type:       ParameterTypeSelect,
+		DataSource: DataSource{Kind: DataSourceDynamic, SourceKey: "profiles_browser"},
+		Required:   false,
 	},
 	{
-		Key:      "restoreProfile",
-		Label:    "Restore saved profile",
-		Type:     ParameterTypeBoolean,
-		Source:   ParameterSourceUser,
-		Required: false,
-		Default:  false,
+		Key:        "restoreProfile",
+		Label:      "Restore saved profile",
+		Type:       ParameterTypeBoolean,
+		DataSource: DataSource{Kind: DataSourceStatic},
+		Required:   false,
+		Default:    false,
 	},
 	{
-		Key:      "profileDownloadUrl",
-		Label:    "Profile download URL (system)",
-		Type:     ParameterTypeString,
-		Source:   ParameterSourceSystem,
-		Required: false,
+		Key:        "profileDownloadUrl",
+		Label:      "Profile download URL (system)",
+		Type:       ParameterTypeString,
+		DataSource: DataSource{Kind: DataSourceSystem},
+		Required:   false,
+		// Only meaningful when a restore was actually requested — machine
+		// enforcement of what used to be just this doc comment's say-so.
+		Visibility: &Visibility{DependsOn: "restoreProfile", Op: VisibilityEquals, Value: true},
 	},
 }
 
@@ -150,15 +157,15 @@ func backupStateFunction(profilePath, containerName string) CustomFunction {
 				Label:       "Backup name",
 				Description: "A name to identify this saved profile later, when restoring it into a future deploy.",
 				Type:        ParameterTypeString,
-				Source:      ParameterSourceUser,
+				DataSource:  DataSource{Kind: DataSourceStatic},
 				Required:    false,
 			},
 			{
-				Key:      paramKeyUploadURL,
-				Label:    "Upload URL (system)",
-				Type:     ParameterTypeString,
-				Source:   ParameterSourceSystem,
-				Required: true,
+				Key:        paramKeyUploadURL,
+				Label:      "Upload URL (system)",
+				Type:       ParameterTypeString,
+				DataSource: DataSource{Kind: DataSourceSystem},
+				Required:   true,
 			},
 		},
 		// Run never reads "label" — it exists only so the frontend knows to

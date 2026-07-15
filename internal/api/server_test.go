@@ -491,9 +491,12 @@ func TestCatalogListsKnownTemplates(t *testing.T) {
 
 	var templates []struct {
 		ID         string `json:"id"`
+		Version    string `json:"version"`
 		Parameters []struct {
-			Key    string `json:"key"`
-			Source string `json:"source"`
+			Key        string `json:"key"`
+			DataSource struct {
+				Kind string `json:"kind"`
+			} `json:"dataSource"`
 		} `json:"parameters"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &templates); err != nil {
@@ -504,15 +507,18 @@ func TestCatalogListsKnownTemplates(t *testing.T) {
 	}
 
 	for _, tmpl := range templates {
+		if tmpl.Version == "" {
+			t.Fatalf("expected template %q to carry a non-empty version", tmpl.ID)
+		}
 		if tmpl.ID == testFirefoxTemplateID {
 			foundSystem := false
 			for _, p := range tmpl.Parameters {
-				if p.Key == "profileDownloadUrl" && p.Source == "system" {
+				if p.Key == "profileDownloadUrl" && p.DataSource.Kind == "system" {
 					foundSystem = true
 				}
 			}
 			if !foundSystem {
-				t.Fatalf("expected firefox template to expose profileDownloadUrl as a system parameter")
+				t.Fatalf("expected firefox template to expose profileDownloadUrl as a system-sourced parameter")
 			}
 		}
 	}
