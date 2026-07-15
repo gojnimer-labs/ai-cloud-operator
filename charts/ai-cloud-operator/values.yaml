@@ -1,0 +1,96 @@
+api:
+  ports:
+    - name: http
+      port: 9443
+      protocol: TCP
+      targetPort: 9443
+  type: ClusterIP
+# Merged on top of whatever hack/render-helm-chart.sh's helmify run just
+# (re)generated into charts/ai-cloud-operator/values.yaml — see that
+# script's comments for why this can't just be a one-time hand-edit.
+controllerManager:
+  manager:
+    args:
+      - --metrics-bind-address=:8443
+      - --leader-elect
+      - --health-probe-bind-address=:8081
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      readOnlyRootFilesystem: true
+    env:
+      apiListenAddr: :9443
+    image:
+      repository: ghcr.io/gojnimer-labs/ai-cloud-operator
+      # Empty on purpose — templates/deployment.yaml falls back to
+      # .Chart.AppVersion, and .github/workflows/helm-release.yml packages
+      # each release with --app-version set to the same tag it publishes
+      # the image under, so the two stay in sync without extra plumbing.
+      # Only set this to pin an instance to an older image than the chart
+      # version it's running.
+      tag: ""
+    resources:
+      limits:
+        cpu: 500m
+        memory: 128Mi
+      requests:
+        cpu: 10m
+        memory: 64Mi
+  nodeSelector: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  replicas: 1
+  tolerations: []
+  topologySpreadConstraints: []
+crds:
+  enabled: true
+metricsService:
+  ports:
+    - name: https
+      port: 8443
+      protocol: TCP
+      targetPort: 8443
+  type: ClusterIP
+params:
+  convexBaseUrl: ""
+  operatorExternalUrl: ""
+  operatorName: ""
+serviceAccount:
+  annotations: {}
+  automount: true
+  create: true
+  name: ""
+# ENROLLMENT_SECRET must be set for the operator to register with Convex
+# (see docs/production-deploy.md) but this chart never wants to be the
+# thing holding it in cleartext in your Git repo. Two ways to provide it:
+enrollmentSecret:
+  # Preferred: point at a Secret you already manage outside this chart
+  # (SealedSecret, External Secrets Operator, manual kubectl apply — however
+  # you already handle secrets with ArgoCD). Takes precedence over `value`
+  # below whenever set.
+  existingSecretName: ""
+  existingSecretKey: ENROLLMENT_SECRET
+  # Fallback for a quick/test install: the chart templates this straight
+  # into a Secret itself. Only used when existingSecretName is empty —
+  # don't commit a real value here to git.
+  value: ""
+# Optional — mirrors config/ingress/ingress.yaml, which is an opt-in
+# kustomize overlay for the same reason: most instances front this with
+# whatever ingress/gateway setup the cluster already has, not a
+# chart-specific one.
+ingress:
+  enabled: false
+  className: traefik
+  annotations: {}
+  # Public hostname this operator will be reachable at — must match
+  # OPERATOR_EXTERNAL_URL in .Values.controllerManager (params.operatorExternalUrl).
+  host: ""
+  tls:
+    enabled: true
+    # Defaults to "<release name>-api-tls" (see templates/ingress.yaml) when
+    # left empty.
+    secretName: ""

@@ -1,0 +1,19 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ai-cloud-operator.fullname" . }}-workload-admin-role
+  labels:
+  {{- include "ai-cloud-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - apps.aicloud.dev
+  resources:
+  - workloads
+  verbs:
+  - '*'
+- apiGroups:
+  - apps.aicloud.dev
+  resources:
+  - workloads/status
+  verbs:
+  - get

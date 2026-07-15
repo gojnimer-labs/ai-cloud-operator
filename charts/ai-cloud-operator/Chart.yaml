@@ -1,0 +1,13 @@
+apiVersion: v2
+name: ai-cloud-operator
+description: Kubernetes operator that deploys and manages AI Cloud Workload custom resources on behalf of Convex.
+home: https://github.com/gojnimer-labs/ai-cloud-operator
+sources:
+  - https://github.com/gojnimer-labs/ai-cloud-operator
+type: application
+# Both version and appVersion below are placeholders kept for local `helm
+# lint`/`helm template`/`helm install` use — .github/workflows/helm-release.yml
+# overrides both with the real released tag at `helm package` time (see
+# that workflow), so bumping these by hand isn't part of the release flow.
+version: 0.1.3
+appVersion: "0.1.3"

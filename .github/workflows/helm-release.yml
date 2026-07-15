@@ -1,0 +1,70 @@
+name: Helm Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  release:
+    permissions:
+      contents: read
+      packages: write
+    name: Package and push chart to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      # Regenerates charts/ai-cloud-operator from config/* (see
+      # hack/render-helm-chart.sh) and fails the release if that doesn't
+      # exactly match what's committed — the same drift check lint.yml runs
+      # on every push, repeated here so a release can never ship a chart
+      # that's silently out of sync with config/*.
+      - name: Regenerate chart and check for drift
+        run: |
+          make helm-chart
+          git diff --exit-code -- charts hack/helm-overrides || {
+            echo "::error::charts/ai-cloud-operator is out of sync with config/*. Run 'make helm-chart' and commit the result." >&2
+            exit 1
+          }
+
+      # IMG must match the tag docker/metadata-action actually publishes in
+      # publish.yml's job (strips the leading "v"), same reasoning as that
+      # workflow's build-installer step — the chart's image tag and the
+      # image GHCR actually has for this release must agree.
+      - name: Package chart
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          helm package charts/ai-cloud-operator \
+            --version "$version" \
+            --app-version "$version" \
+            --destination dist/
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push chart
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          helm push "dist/ai-cloud-operator-${version}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+
+# First run only: same one-time visibility step publish.yml's image job
+# needs — go to https://github.com/orgs/gojnimer-labs/packages (or the
+# repo's "Packages" sidebar) -> ai-cloud-operator (chart) -> Package
+# settings -> visibility -> Public. GITHUB_TOKEN can't change package
+# visibility itself, so a chart pushed for the first time here will be
+# private until that's done by hand, and `helm pull`/ArgoCD will get a 404
+# from an anonymous pull until then.

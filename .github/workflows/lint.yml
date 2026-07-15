@@ -27,3 +27,38 @@ jobs:
         run: make lint-config
       - name: Run linter
         run: make lint
+
+  helm:
+    permissions:
+      contents: read
+    name: Chart is in sync with config/*
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      # Regenerating here and diffing catches the case someone changed
+      # config/* (a new RBAC rule, a new env var) without also running
+      # `make helm-chart` and committing the result — see
+      # hack/render-helm-chart.sh for why this can't just be a one-time
+      # hand-edit of charts/ai-cloud-operator.
+      - name: Regenerate chart and check for drift
+        run: |
+          make helm-chart
+          git diff --exit-code -- charts hack/helm-overrides || {
+            echo "::error::charts/ai-cloud-operator is out of sync with config/*. Run 'make helm-chart' and commit the result." >&2
+            exit 1
+          }
+
+      - name: Lint chart
+        run: helm lint charts/ai-cloud-operator --set enrollmentSecret.value=lint-placeholder
