@@ -25,6 +25,11 @@ const (
 	testSecret = "test-gateway-signing-secret"
 	namespace  = "default"
 	name       = "demo"
+	// testInvalidAPIServerHost stands in for a *rest.Config.Host in
+	// proxy_test.go cases that never actually reach the API server (the
+	// Service/Workload lookup fails first) — shared here since it's used
+	// across several tests in that file.
+	testInvalidAPIServerHost = "http://example.invalid"
 )
 
 func mintTestToken(t *testing.T, p Payload) string {

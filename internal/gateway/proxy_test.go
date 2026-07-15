@@ -118,7 +118,7 @@ func TestHandlerReturns404WhenServiceMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestHandlerReturns404WhenEntrypointUnknown(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, readyWorkload()).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestHandlerReturns404WhenWorkloadMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestHandlerServesWaitingPageWhenWorkloadNotReady(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestHandlerServesFailedPageWhenWorkloadFailed(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
 
-	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost})
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
