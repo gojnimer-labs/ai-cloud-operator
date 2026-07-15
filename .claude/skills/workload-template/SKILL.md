@@ -69,6 +69,7 @@ const (
 	DataSourceStatic  DataSourceKind = "static"  // inline Options (or none); user fills the form — default
 	DataSourceDynamic DataSourceKind = "dynamic" // Convex resolves Options by SourceKey at request time
 	DataSourceSystem  DataSourceKind = "system"  // Convex computes the value and injects it directly; never a form field
+	DataSourceFile    DataSourceKind = "file"    // same rules as System, specifically for a file to fetch/upload (presigned URL)
 )
 type DataSource struct {
 	Kind      DataSourceKind
@@ -369,13 +370,17 @@ Then: `go build ./... && go test ./internal/catalog/...`
   Build time. Combine with `Visibility` when a field is only ever relevant
   conditionally (see `profileDownloadUrl` below) rather than leaving it
   optional-in-name-only.
-- **System-sourced parameters** (`DataSource{Kind: DataSourceSystem}`): Convex
-  computes and injects the value server-side (e.g. a presigned URL) — it must
-  never be rendered as an editable form field, and your `Build`/init-container
-  script must treat it as untrusted-ish data (pass via env var / positional
-  arg, never string-interpolate into a shell script — see
-  `restoreProfileInitContainer` and `backupStateFunction` in
+- **System/file-sourced parameters** (`DataSource{Kind: DataSourceSystem}` or
+  `DataSource{Kind: DataSourceFile}`): Convex computes and injects the value
+  server-side — it must never be rendered as an editable form field, and
+  your `Build`/init-container script must treat it as untrusted-ish data
+  (pass via env var / positional arg, never string-interpolate into a shell
+  script — see `restoreProfileInitContainer` and `backupStateFunction` in
   `internal/catalog/browser.go` for the reasoning and the pattern to copy).
+  Prefer `DataSourceFile` specifically when the value is a file to fetch or
+  upload (a presigned S3/R2 URL, like `profileDownloadUrl`/`uploadUrl`) —
+  it's the same rules as `DataSourceSystem`, just a clearer label; fall
+  back to `DataSourceSystem` for anything else Convex computes.
   `profileDownloadUrl` also demonstrates pairing a system parameter with
   `Visibility` — it's only meaningful (and only enforced/validated) when
   `restoreProfile == true`.
@@ -440,9 +445,15 @@ The only current example is `backupStateFunction` in
 — it execs a `tar` + `curl PUT` inside the running container via the injected
 `PodExecutor` (decoupled from client-go's exec/SPDY machinery so the catalog
 package stays test-friendly; see `fakePodExecutor` in `catalog_test.go`),
-returning `[]AdditionalInfo{{Name: "stdout", Type: AdditionalInfoPlain, Value: stdout}}`.
-It sets `Refreshable: false` since it has a real side effect (uploads to R2)
-— re-invoking it isn't something a caller should do just to check a value.
+returning `[]AdditionalInfo{{Name: "result", Type: AdditionalInfoPlain, Value: "backup_state.success"}}`
+on success — a stable, namespaced message key for the caller to run through
+its own i18n/translation lookup, not raw shell stdout (which tar/curl never
+produced anything useful in anyway, since both run silently) or literal
+English text (which can't be localized). Follow this same
+`"<operation_key>.success"`-style key convention for any new Operation's
+plain-text success result. It sets `Refreshable: false` since it has a real
+side effect (uploads to R2) — re-invoking it isn't something a caller
+should do just to check a value.
 An operation that only *reads* something already computed (e.g. `cat`-ing a
 token file the container generated at boot) should set `Refreshable: true`
 and return that value with `Type: AdditionalInfoSecret` — the caller (Convex)

@@ -68,6 +68,13 @@ const (
 	// why (an editable URL field there would let the operator's init
 	// container curl an arbitrary user-supplied URL, an SSRF risk).
 	DataSourceSystem DataSourceKind = "system"
+	// DataSourceFile is DataSourceSystem's value shape and every rule above
+	// applies identically — same server-injected, never-editable string —
+	// but specifically for a file to fetch or upload (a presigned S3/R2
+	// URL), so template authors and the frontend have a clearer, more
+	// specific label than the generic "system" for this common case.
+	// Prefer this over DataSourceSystem whenever the value is a file URL.
+	DataSourceFile DataSourceKind = "file"
 )
 
 // DataSource describes where a Parameter's value comes from. The zero value

@@ -246,8 +246,8 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 		if fn.Parameters[0].DataSource.Kind != DataSourceStatic {
 			t.Fatalf("%s: expected label to be a static data source", id)
 		}
-		if fn.Parameters[1].DataSource.Kind != DataSourceSystem {
-			t.Fatalf("%s: expected uploadUrl to be a system data source", id)
+		if fn.Parameters[1].DataSource.Kind != DataSourceFile {
+			t.Fatalf("%s: expected uploadUrl to be a file data source", id)
 		}
 		if fn.Refreshable {
 			t.Fatalf("%s: expected backup_state to not be Refreshable — it has a real side effect", id)
@@ -256,6 +256,36 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 	if _, ok := GetOperation(Template{}, "backup_state"); ok {
 		t.Fatalf("expected no operations on an empty template")
 	}
+}
+
+// TestFirefoxAndChromeUseDistinctProfileSourceKeys guards against the
+// two templates ever sharing one dynamic-select catalog for saved
+// profiles — Firefox and Chrome profile tarballs aren't interchangeable,
+// so restoring one into the other would silently produce a broken profile.
+func TestFirefoxAndChromeUseDistinctProfileSourceKeys(t *testing.T) {
+	firefox, _ := Get(templateIDFirefox)
+	chrome, _ := Get(templateIDChrome)
+
+	firefoxKey := findParameter(t, firefox.Parameters, "profileName").DataSource.SourceKey
+	chromeKey := findParameter(t, chrome.Parameters, "profileName").DataSource.SourceKey
+
+	if firefoxKey == "" || chromeKey == "" {
+		t.Fatalf("expected both templates to declare a profileName sourceKey, got firefox=%q chrome=%q", firefoxKey, chromeKey)
+	}
+	if firefoxKey == chromeKey {
+		t.Fatalf("expected distinct profileName sourceKeys, both were %q", firefoxKey)
+	}
+}
+
+func findParameter(t *testing.T, params []Parameter, key string) Parameter {
+	t.Helper()
+	for _, p := range params {
+		if p.Key == key {
+			return p
+		}
+	}
+	t.Fatalf("parameter %q not found", key)
+	return Parameter{}
 }
 
 func TestBackupStateFunctionRequiresUploadURL(t *testing.T) {
@@ -275,15 +305,15 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 	tmpl, _ := Get(templateIDFirefox)
 	fn, _ := GetOperation(tmpl, "backup_state")
 
-	exec := &fakePodExecutor{stdout: "Backup completed successfully"}
+	exec := &fakePodExecutor{stdout: "irrelevant — the response no longer surfaces raw stdout"}
 	result, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: testFirefoxPod}, map[string]any{
 		paramKeyUploadURL: "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result) != 1 || result[0].Name != "stdout" || result[0].Type != AdditionalInfoPlain || result[0].Value != "Backup completed successfully" {
-		t.Fatalf("expected a single plain stdout AdditionalInfo, got %+v", result)
+	if len(result) != 1 || result[0].Name != "result" || result[0].Type != AdditionalInfoPlain || result[0].Value != "backup_state.success" {
+		t.Fatalf("expected a single plain result AdditionalInfo with a stable message key, got %+v", result)
 	}
 
 	if exec.namespace != testNamespace || exec.podName != testFirefoxPod || exec.container != templateIDFirefox {

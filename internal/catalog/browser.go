@@ -53,46 +53,54 @@ const (
 	initialTemplateVersion = "1.0.0"
 )
 
-// browserParameters is the parameter set shared by firefox/chrome: a
+// browserParameters returns the parameter set shared by firefox/chrome: a
 // user-facing choice of whether/what profile to restore, and a
 // system-computed presigned download URL Convex fills in when restore is
 // requested — never an editable field, since an editable URL here would let
 // the operator's init container curl an arbitrary user-supplied address.
-var browserParameters = []Parameter{
-	{
-		Key:         "profileName",
-		Label:       "Profile name",
-		Description: "Identifies which saved profile to restore, if any.",
-		// The value is a selectOptions row id, not a literal profile name —
-		// Convex resolves it back to an actual R2 object when restoring (see
-		// convex/workloads/actions.ts#deployWorkload).
-		Type:       ParameterTypeSelect,
-		DataSource: DataSource{Kind: DataSourceDynamic, SourceKey: "profiles_browser"},
-		Required:   false,
-		// Only meaningful when a restore was actually requested — same
-		// condition as profileDownloadUrl below, so the picker doesn't invite
-		// a choice that deployWorkload will silently ignore because
-		// restoreProfile never got toggled on.
-		Visibility: &Visibility{DependsOn: paramKeyRestoreProfile, Op: VisibilityEquals, Value: true},
-	},
-	{
-		Key:        paramKeyRestoreProfile,
-		Label:      "Restore saved profile",
-		Type:       ParameterTypeBoolean,
-		DataSource: DataSource{Kind: DataSourceStatic},
-		Required:   false,
-		Default:    false,
-	},
-	{
-		Key:        "profileDownloadUrl",
-		Label:      "Profile download URL (system)",
-		Type:       ParameterTypeString,
-		DataSource: DataSource{Kind: DataSourceSystem},
-		Required:   false,
-		// Only meaningful when a restore was actually requested — machine
-		// enforcement of what used to be just this doc comment's say-so.
-		Visibility: &Visibility{DependsOn: paramKeyRestoreProfile, Op: VisibilityEquals, Value: true},
-	},
+//
+// profileSourceKey scopes the profile picker (and, on the Convex side,
+// wherever backed-up profiles get recorded) to one specific browser —
+// Firefox and Chrome profile tarballs aren't interchangeable, so they must
+// never share one dynamic-select catalog. Callers pass a distinct key per
+// template (see firefox.go/chrome.go).
+func browserParameters(profileSourceKey string) []Parameter {
+	return []Parameter{
+		{
+			Key:         "profileName",
+			Label:       "Profile name",
+			Description: "Identifies which saved profile to restore, if any.",
+			// The value is a selectOptions row id, not a literal profile name —
+			// Convex resolves it back to an actual R2 object when restoring (see
+			// convex/workloads/actions.ts#deployWorkload).
+			Type:       ParameterTypeSelect,
+			DataSource: DataSource{Kind: DataSourceDynamic, SourceKey: profileSourceKey},
+			Required:   false,
+			// Only meaningful when a restore was actually requested — same
+			// condition as profileDownloadUrl below, so the picker doesn't invite
+			// a choice that deployWorkload will silently ignore because
+			// restoreProfile never got toggled on.
+			Visibility: &Visibility{DependsOn: paramKeyRestoreProfile, Op: VisibilityEquals, Value: true},
+		},
+		{
+			Key:        paramKeyRestoreProfile,
+			Label:      "Restore saved profile",
+			Type:       ParameterTypeBoolean,
+			DataSource: DataSource{Kind: DataSourceStatic},
+			Required:   false,
+			Default:    false,
+		},
+		{
+			Key:        "profileDownloadUrl",
+			Label:      "Profile download URL (system)",
+			Type:       ParameterTypeString,
+			DataSource: DataSource{Kind: DataSourceFile},
+			Required:   false,
+			// Only meaningful when a restore was actually requested — machine
+			// enforcement of what used to be just this doc comment's say-so.
+			Visibility: &Visibility{DependsOn: paramKeyRestoreProfile, Op: VisibilityEquals, Value: true},
+		},
+	}
 }
 
 // restoreProfileInitContainer builds the init container that restores a
@@ -146,8 +154,8 @@ chmod -R 755 /config
 // catalog.Operation) — a named operation against an already-running
 // workload, discovered by the frontend through the same catalog response as
 // deploy-time parameters, with its own Parameters (including a
-// system-sourced uploadUrl Convex computes, mirroring how
-// profileDownloadUrl works for deploy-time restore).
+// file-sourced uploadUrl Convex computes, mirroring how profileDownloadUrl
+// works for deploy-time restore).
 //
 // profilePath and uploadUrl are passed as sh positional parameters ($1, $2)
 // rather than interpolated into the script string, so a URL containing
@@ -174,7 +182,7 @@ func backupStateFunction(profilePath, containerName string) Operation {
 				Key:        paramKeyUploadURL,
 				Label:      "Upload URL (system)",
 				Type:       ParameterTypeString,
-				DataSource: DataSource{Kind: DataSourceSystem},
+				DataSource: DataSource{Kind: DataSourceFile},
 				Required:   true,
 			},
 		},
@@ -182,6 +190,15 @@ func backupStateFunction(profilePath, containerName string) Operation {
 		// prompt for it; Convex reads it back from the request to name the
 		// selectOptions row it records after a successful backup (see
 		// ai-cloud-v2's workloads/actions.ts#runCustomFunction).
+		//
+		// The success result is a stable, namespaced message key
+		// ("backup_state.success"), not raw shell stdout — tar/curl both run
+		// silently (no -v/-s output to surface), so stdout was never
+		// meaningfully informative anyway, and a literal English string
+		// can't be localized. The frontend looks this key up in its own
+		// translation table; failures instead surface as a real Go error
+		// below (wrapping stderr), which the API layer returns as a plain
+		// error string, not a translatable AdditionalInfo.
 		Run: func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) ([]AdditionalInfo, error) {
 			uploadURL := paramString(params, paramKeyUploadURL, "")
 			if uploadURL == "" {
@@ -193,11 +210,11 @@ curl -sf -X PUT --upload-file /tmp/backup.tar.gz "$2"
 rm -f /tmp/backup.tar.gz
 `
 			command := []string{"/bin/sh", "-c", script, "sh", profilePath, uploadURL}
-			stdout, stderr, err := exec.Exec(ctx, pod.Namespace, pod.PodName, containerName, command)
+			_, stderr, err := exec.Exec(ctx, pod.Namespace, pod.PodName, containerName, command)
 			if err != nil {
 				return nil, fmt.Errorf("backup exec failed: %w (stderr: %s)", err, stderr)
 			}
-			return []AdditionalInfo{{Name: "stdout", Type: AdditionalInfoPlain, Value: stdout}}, nil
+			return []AdditionalInfo{{Name: "result", Type: AdditionalInfoPlain, Value: "backup_state.success"}}, nil
 		},
 	}
 }

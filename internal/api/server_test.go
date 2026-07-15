@@ -565,14 +565,14 @@ func TestCatalogListsKnownTemplates(t *testing.T) {
 			t.Fatalf("expected template %q to carry a non-empty version", tmpl.ID)
 		}
 		if tmpl.ID == testFirefoxTemplateID {
-			foundSystem := false
+			foundFile := false
 			for _, p := range tmpl.Parameters {
-				if p.Key == "profileDownloadUrl" && p.DataSource.Kind == "system" {
-					foundSystem = true
+				if p.Key == "profileDownloadUrl" && p.DataSource.Kind == "file" {
+					foundFile = true
 				}
 			}
-			if !foundSystem {
-				t.Fatalf("expected firefox template to expose profileDownloadUrl as a system-sourced parameter")
+			if !foundFile {
+				t.Fatalf("expected firefox template to expose profileDownloadUrl as a file-sourced parameter")
 			}
 		}
 	}
@@ -746,7 +746,7 @@ func seedRunningPod(t *testing.T, c client.Client, namespace, workloadName, podN
 
 func TestRunFunctionExecutesAgainstRunningPod(t *testing.T) {
 	s, c, _, executor := newTestServer(t)
-	executor.stdout = "Backup completed successfully"
+	executor.stdout = "irrelevant — the response no longer surfaces raw stdout"
 
 	workload := &appsv1alpha1.Workload{}
 	workload.Name = testFirefoxWorkloadName
@@ -770,9 +770,9 @@ func TestRunFunctionExecutesAgainstRunningPod(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if len(result.AdditionalInfo) != 1 || result.AdditionalInfo[0].Name != "stdout" ||
+	if len(result.AdditionalInfo) != 1 || result.AdditionalInfo[0].Name != "result" ||
 		result.AdditionalInfo[0].Type != catalog.AdditionalInfoPlain ||
-		result.AdditionalInfo[0].Value != "Backup completed successfully" {
+		result.AdditionalInfo[0].Value != "backup_state.success" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	if len(executor.calls) != 1 {

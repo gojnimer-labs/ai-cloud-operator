@@ -109,6 +109,23 @@ resolves `profileName`/system params), `convex/workloads/actions.ts#runCustomFun
       want to log/display it — it just always reflects the same
       operator-configured value now.
 
+**8. Browser templates: distinct profile catalogs, new `file` DataSource, i18n backup response**
+- [ ] Stop treating Firefox and Chrome as sharing one saved-profiles
+      catalog — `profileName`'s `dataSource.sourceKey` is now
+      `"profiles_firefox"` / `"profiles_chrome"` (previously both used
+      `"profiles_browser"`). If you have any saved-profile records keyed by
+      the old shared key, they need re-keying/backfilling per browser.
+- [ ] Handle the new `dataSource.kind: "file"` the same way you already
+      handle `"system"` — it's the same value shape (Convex-injected,
+      never editable), just a more specific label. See **DataSource**.
+- [ ] `backup_state`'s response changed from `{"name": "stdout", ...}`
+      (raw, usually-empty shell output) to `{"name": "result", "type":
+      "plain", "value": "backup_state.success"}` — a stable message key
+      for you to map through your own i18n/translation table, not literal
+      display text. See **Operations** → "Invoking one."
+- [ ] Both templates' `version` bumped to `1.1.0` — update any stored
+      preset comparisons accordingly. See **Versioning**.
+
 ## The shape, field by field
 
 `GET /catalog` returns a JSON array of Templates. One Template:
@@ -143,7 +160,7 @@ One `Parameter`:
   "label": "Profile download URL (system)",
   "description": "...",              // optional, omitted if empty
   "type": "string",
-  "dataSource": { "kind": "system" },
+  "dataSource": { "kind": "file" },
   "required": false,
   "default": "...",                  // optional, any JSON type, omitted if unset
   "options": [ { "value": "...", "label": "..." } ], // only for type "select", omitted otherwise
@@ -173,18 +190,28 @@ One `Parameter`:
   dynamic).
 - **`"dynamic"`** — this is a `select`, but the operator deliberately left
   `options` empty. `dataSource.sourceKey` names which Convex-side source
-  resolves the actual choices per-request (e.g. `"profiles_browser"` →
-  query the user's saved browser profiles and populate the dropdown
+  resolves the actual choices per-request (e.g. `"profiles_firefox"` →
+  query the user's saved Firefox profiles and populate the dropdown
   yourselves). This is what `select_<key>`-prefixed `type` strings used to
   mean — the prefix is gone; the same information now lives in
-  `dataSource.sourceKey` with `type` staying plain `"select"`.
-- **`"system"`** — Convex computes this value itself (e.g. an R2 presigned
-  URL) and injects it directly into the `config` object sent to `deploy`.
-  **Never render this as an editable form field** — the operator's own doc
-  comments call out why for `profileDownloadUrl` specifically: an editable
-  URL there would let the operator's init container fetch an
-  attacker-controlled address (SSRF). Treat any `system`-sourced key the same
-  way regardless of which template it's on.
+  `dataSource.sourceKey` with `type` staying plain `"select"`. **Firefox and
+  Chrome use distinct sourceKeys** (`"profiles_firefox"` /
+  `"profiles_chrome"`) for their `profileName` parameter — the two
+  templates' saved profiles are never interchangeable, so never merge these
+  into one dropdown/catalog on your side either.
+- **`"system"`** — Convex computes this value itself and injects it
+  directly into the `config` object sent to `deploy`. **Never render this
+  as an editable form field** — an editable field here could let the
+  operator's init container fetch an attacker-controlled address (SSRF).
+  Treat any `system`-sourced key the same way regardless of which template
+  it's on.
+- **`"file"`** — new. Identical rules to `"system"` (Convex-computed,
+  injected server-side, never editable) — this is `"system"` specifically
+  for a value that's a file to fetch or upload (a presigned S3/R2 URL,
+  e.g. `profileDownloadUrl`/`uploadUrl`), so the schema is more
+  self-documenting than the generic `"system"` for this common case.
+  Handle it identically to `"system"` if your code doesn't need the extra
+  specificity yet.
 
 ## Visibility — new, wasn't expressible before
 
@@ -307,7 +334,7 @@ operation with no parameters). Response body:
 ```jsonc
 {
   "additionalInfo": [
-    { "name": "stdout", "type": "plain", "value": "Backup completed successfully" }
+    { "name": "result", "type": "plain", "value": "backup_state.success" }
   ]
 }
 ```
@@ -316,10 +343,20 @@ Each entry's `type` is `"secret"` or `"plain"`:
 - **`secret`** — sensitive (e.g. a bearer token). Mask by default in any UI,
   avoid logging or persisting it in plaintext, offer an explicit
   reveal/copy action rather than displaying it inline.
-- **`plain`** — informational, no special handling (e.g. `backup_state`'s
-  `stdout`). (Not called `opaque` — this operator's Go code already uses
-  that word for real Kubernetes Secrets with a different meaning:
-  "unstructured secret data.")
+- **`plain`** — informational, no special handling. (Not called `opaque` —
+  this operator's Go code already uses that word for real Kubernetes
+  Secrets with a different meaning: "unstructured secret data.")
+
+`backup_state` specifically returns a **stable, namespaced message key**
+(`"backup_state.success"`) as its `plain` value, not literal English text —
+this is deliberately i18n-friendly: look it up in your own translation
+table rather than displaying it inline. There's nothing in the shape
+(`type: "plain"`) that distinguishes "a message key to translate" from
+"text to display verbatim" — that's a per-operation convention you need to
+know about ahead of time (documented here, and in this operation's own
+`description`), not something machine-detectable from the response alone.
+A failed backup surfaces as a real HTTP error instead (see below), not as
+an AdditionalInfo entry.
 
 There's no separate static schema declaring what an operation's outputs
 *will* be ahead of time — `type`/`value` only exist once you actually invoke
@@ -412,14 +449,14 @@ operation):
   "name": "Firefox Browser",
   "description": "Full Firefox browser accessible via web interface",
   "icon": "🦊",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "parameters": [
     {
       "key": "profileName",
       "label": "Profile name",
       "description": "Identifies which saved profile to restore, if any.",
       "type": "select",
-      "dataSource": { "kind": "dynamic", "sourceKey": "profiles_browser" },
+      "dataSource": { "kind": "dynamic", "sourceKey": "profiles_firefox" },
       "required": false,
       "visibility": { "dependsOn": "restoreProfile", "op": "equals", "value": true }
     },
@@ -435,7 +472,7 @@ operation):
       "key": "profileDownloadUrl",
       "label": "Profile download URL (system)",
       "type": "string",
-      "dataSource": { "kind": "system" },
+      "dataSource": { "kind": "file" },
       "required": false,
       "visibility": { "dependsOn": "restoreProfile", "op": "equals", "value": true }
     }
@@ -461,7 +498,7 @@ operation):
           "key": "uploadUrl",
           "label": "Upload URL (system)",
           "type": "string",
-          "dataSource": { "kind": "system" },
+          "dataSource": { "kind": "file" },
           "required": true
         }
       ],
@@ -571,6 +608,20 @@ If you're updating existing Convex code rather than starting fresh:
   without the caller picking or tracking anything. Store the
   response's `name` to address a specific instance later. Unchanged for
   the legacy non-template/raw-`image` path.
+- `dataSource.kind: "file"` → **new**, additive. Same value shape/rules as
+  `"system"`, just a more specific label for a file-to-fetch-or-upload
+  value. `profileDownloadUrl`/`uploadUrl` on firefox/chrome now use it
+  instead of `"system"`.
+- Firefox/chrome's `profileName.dataSource.sourceKey` → **changed**, from
+  the shared `"profiles_browser"` to distinct `"profiles_firefox"` /
+  `"profiles_chrome"` — the two templates' saved profiles were never
+  actually interchangeable, so they must never share one dynamic-select
+  catalog. Both templates' `version` bumped to `1.1.0` accordingly.
+- `backup_state`'s response → **changed value**, same shape. Was
+  `{"name": "stdout", "type": "plain", "value": <raw, usually-empty shell
+  output>}`; now `{"name": "result", "type": "plain", "value":
+  "backup_state.success"}` — a stable, namespaced message key meant for
+  your own i18n/translation lookup, not literal display text.
 
 ## Ground truth, if you need to verify anything
 
