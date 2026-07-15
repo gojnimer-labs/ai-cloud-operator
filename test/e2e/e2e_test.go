@@ -63,14 +63,47 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
 
+		// ai-cloud-operator-env is deliberately not a kustomize-generated
+		// resource (see config/manager/manager.yaml) — real clusters create it
+		// out-of-band. The e2e cluster needs the same Secret to exist so the
+		// controller-manager pod can start; a placeholder value is fine since
+		// these tests never exercise real Convex enrollment.
+		By("creating the ai-cloud-operator-env secret")
+		cmd = exec.Command("kubectl", "create", "secret", "generic", "ai-cloud-operator-env",
+			"-n", namespace, "--from-literal=ENROLLMENT_SECRET=e2e-test-enrollment-secret")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create ai-cloud-operator-env secret")
+
 		By("installing CRDs")
 		cmd = exec.Command("make", "install")
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
+		// config/manager/params.env ships with these blank on purpose (a real
+		// deployer fills them in before `make deploy` — see
+		// docs/production-deploy.md); main.go treats any of them being empty
+		// as fatal (os.Exit(1)). Fill in placeholders for just this deploy —
+		// kustomize reads the file at build time, so the values only need to
+		// be in place for the `make deploy` call below — then restore the
+		// tracked file immediately so the repo checkout is left clean.
+		By("setting placeholder Convex integration values for the e2e deploy")
+		cmd = exec.Command("sed", "-i",
+			"-e", "s#^CONVEX_BASE_URL=.*#CONVEX_BASE_URL=http://e2e-test.invalid#",
+			"-e", "s#^OPERATOR_NAME=.*#OPERATOR_NAME=e2e-test#",
+			"-e", "s#^OPERATOR_EXTERNAL_URL=.*#OPERATOR_EXTERNAL_URL=http://e2e-test.invalid#",
+			"config/manager/params.env")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to set placeholder params.env values")
+
 		By("deploying the controller-manager")
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
 		_, err = utils.Run(cmd)
+
+		By("restoring config/manager/params.env")
+		restoreCmd := exec.Command("git", "checkout", "--", "config/manager/params.env")
+		_, restoreErr := utils.Run(restoreCmd)
+		Expect(restoreErr).NotTo(HaveOccurred(), "Failed to restore params.env")
+
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 	})
 
