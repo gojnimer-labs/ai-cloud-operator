@@ -25,6 +25,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/labels"
 )
 
 // KeySecretName is the Secret the operator uses to persist the key it
@@ -36,9 +38,6 @@ const KeySecretName = "ai-cloud-operator-gateway-key"
 
 const (
 	keySigningKey = "signingKey"
-
-	keyLabelManagedBy = "app.kubernetes.io/managed-by"
-	keyManagedByValue = "ai-cloud-operator"
 
 	signingKeyBytes = 32
 )
@@ -86,7 +85,7 @@ func (s *KeyStore) LoadOrGenerate(ctx context.Context) ([]byte, error) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      KeySecretName,
 			Namespace: s.namespace,
-			Labels:    map[string]string{keyLabelManagedBy: keyManagedByValue},
+			Labels:    map[string]string{labels.ManagedBy: labels.ManagedByValue},
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{keySigningKey: key},

@@ -27,6 +27,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/labels"
 )
 
 // SecretName is the name of the Secret the operator uses to persist its
@@ -36,9 +38,6 @@ const SecretName = "ai-cloud-operator-token"
 const (
 	keyHeartbeatToken = "heartbeatToken"
 	keyDeployToken    = "deployToken"
-
-	labelManagedBy = "app.kubernetes.io/managed-by"
-	managedByValue = "ai-cloud-operator"
 )
 
 // Tokens holds the pair of bearer tokens minted at registration time.
@@ -106,7 +105,7 @@ func (s *Store) Save(ctx context.Context, tokens Tokens) error {
 	err := s.client.Get(ctx, client.ObjectKey{Name: SecretName, Namespace: s.namespace}, secret)
 	switch {
 	case apierrors.IsNotFound(err):
-		secret.Labels = map[string]string{labelManagedBy: managedByValue}
+		secret.Labels = map[string]string{labels.ManagedBy: labels.ManagedByValue}
 		secret.Type = corev1.SecretTypeOpaque
 		secret.Data = map[string][]byte{
 			keyHeartbeatToken: []byte(tokens.HeartbeatToken),

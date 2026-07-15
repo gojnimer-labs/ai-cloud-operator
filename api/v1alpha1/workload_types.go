@@ -96,6 +96,8 @@ type WorkloadStatus struct {
 	// - "Ready": the backing Deployment has its desired ready replicas
 	// - "Progressing": the resource is being created or updated
 	// - "Degraded": the resource failed to reach or maintain its desired state
+	// - "ConvexSynced": Convex's ownership records reflect this workload's
+	//   current generation (best-effort; retried until it succeeds)
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map

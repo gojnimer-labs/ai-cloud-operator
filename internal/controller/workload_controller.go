@@ -35,12 +35,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/convexclient"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/labels"
 )
 
 // WorkloadNotifier lets the reconciler tell Convex about workload lifecycle
@@ -66,13 +68,12 @@ type WorkloadReconciler struct {
 }
 
 const (
-	labelName      = "app.kubernetes.io/name"
-	labelManagedBy = "app.kubernetes.io/managed-by"
-	labelInstance  = "app.kubernetes.io/instance"
-	labelUserID    = "apps.aicloud.dev/user-id"
-	managedByValue = "ai-cloud-operator"
+	labelName     = "app.kubernetes.io/name"
+	labelInstance = "app.kubernetes.io/instance"
+	labelUserID   = "apps.aicloud.dev/user-id"
 
-	conditionTypeReady = "Ready"
+	conditionTypeReady        = "Ready"
+	conditionTypeConvexSynced = "ConvexSynced"
 
 	phaseDeploying = "Deploying"
 	phaseRunning   = "Running"
@@ -82,6 +83,18 @@ const (
 	defaultContainerPort = int32(8080)
 
 	statusRequeueInterval = 10 * time.Second
+
+	// convexNotifyTimeout bounds how long a single Convex notify call inside
+	// Reconcile can hold up the reconciler — shorter than the shared HTTP
+	// client's 10s timeout (internal/convexclient.Client) on purpose, since
+	// this one runs inline in the hot path rather than in a background
+	// heartbeat loop.
+	convexNotifyTimeout = 3 * time.Second
+
+	// maxConcurrentReconciles bumped from controller-runtime's default of 1
+	// so a slow/unreachable Convex during syncConvex doesn't serialize
+	// reconciliation of every other Workload in the cluster behind it.
+	maxConcurrentReconciles = 5
 )
 
 // +kubebuilder:rbac:groups=apps.aicloud.dev,resources=workloads,verbs=get;list;watch;create;update;patch;delete
@@ -105,21 +118,15 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, fmt.Errorf("getting Workload: %w", err)
 	}
 
-	// Captured before render/status update overwrite ObservedGeneration below
-	// — true only on the reconcile immediately following a spec create/change,
-	// so the Convex upsert callback fires once per spec version rather than on
-	// every periodic status-polling pass.
-	specChanged := workload.Status.ObservedGeneration != workload.Generation
-
 	// selectorLabels stays exactly what it's always been — Deployment/Service
 	// selectors are immutable after creation, so this set must never change
 	// for a given workload. objectLabels is selectorLabels plus a UserID
 	// label applied to object metadata only (never the selector), so adding
 	// it can't ever collide with selector-immutability rules.
 	selectorLabels := map[string]string{
-		labelName:      workload.Name,
-		labelManagedBy: managedByValue,
-		labelInstance:  string(workload.UID),
+		labelName:        workload.Name,
+		labels.ManagedBy: labels.ManagedByValue,
+		labelInstance:    string(workload.UID),
 	}
 	objectLabels := make(map[string]string, len(selectorLabels)+1)
 	maps.Copy(objectLabels, selectorLabels)
@@ -140,9 +147,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.setFailed(ctx, &workload, fmt.Errorf("reconciling service: %w", err))
 	}
 
-	if specChanged {
-		r.notifyUpserted(ctx, &workload)
-	}
+	convexSynced := r.syncConvex(ctx, &workload)
 
 	var deployment appsv1.Deployment
 	if err := r.Get(ctx, req.NamespacedName, &deployment); err != nil {
@@ -180,22 +185,58 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, fmt.Errorf("updating workload status: %w", err)
 	}
 
-	if workload.Status.Phase != phaseRunning {
-		log.Info("workload not yet running, requeueing", "phase", workload.Status.Phase)
+	if workload.Status.Phase != phaseRunning || !convexSynced {
+		log.Info("workload not yet ready to stop requeueing", "phase", workload.Status.Phase, "convexSynced", convexSynced)
 		return ctrl.Result{RequeueAfter: statusRequeueInterval}, nil
 	}
 
 	return ctrl.Result{}, nil
 }
 
-// notifyUpserted tells Convex this workload's ownership info is current.
-// Best-effort: a failure here is logged but never fails reconciliation —
-// the Deployment/Service must not depend on Convex being reachable, and the
-// next spec-changing reconcile (or a future retry policy) can catch up.
-func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, workload *appsv1alpha1.Workload) {
-	if r.ConvexClient == nil {
-		return
+// syncConvex tells Convex about workload's current ownership info when
+// needed, and reports whether Convex is now up to date for this generation.
+// "Needed" is: no successful attempt yet recorded for the current
+// generation — tracked via the ConvexSynced condition's own
+// ObservedGeneration, the same idiom already used for Ready, rather than a
+// separate bespoke status field.
+//
+// Best-effort in the sense that a failure here must never fail
+// Deployment/Service reconciliation or gate the Ready condition — but unlike
+// a fire-and-forget log line, the caller retries a failed attempt on every
+// subsequent reconcile (via the RequeueAfter this method's false return
+// triggers in Reconcile) until it succeeds, so a Convex outage delays
+// delivery of the ownership update rather than silently dropping it.
+func (r *WorkloadReconciler) syncConvex(ctx context.Context, workload *appsv1alpha1.Workload) bool {
+	if existing := apimeta.FindStatusCondition(workload.Status.Conditions, conditionTypeConvexSynced); existing != nil &&
+		existing.Status == metav1.ConditionTrue && existing.ObservedGeneration == workload.Generation {
+		return true
 	}
+
+	condition := metav1.Condition{
+		Type:               conditionTypeConvexSynced,
+		ObservedGeneration: workload.Generation,
+	}
+	if err := r.notifyUpserted(ctx, workload); err != nil {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = "NotifyFailed"
+		condition.Message = err.Error()
+	} else {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "Notified"
+		condition.Message = "Convex has this workload's current ownership info"
+	}
+	apimeta.SetStatusCondition(&workload.Status.Conditions, condition)
+	return condition.Status == metav1.ConditionTrue
+}
+
+// notifyUpserted tells Convex this workload's ownership info is current.
+// See syncConvex for how a failure here gets retried.
+func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, workload *appsv1alpha1.Workload) error {
+	if r.ConvexClient == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, convexNotifyTimeout)
+	defer cancel()
 	err := r.ConvexClient.UpsertWorkload(ctx, convexclient.WorkloadInfo{
 		Name:         workload.Name,
 		Namespace:    workload.Namespace,
@@ -204,16 +245,23 @@ func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, workload *appsv
 		UserID:       workload.Spec.UserID,
 	})
 	if err != nil {
-		logf.FromContext(ctx).Error(err, "failed to notify convex of workload upsert (best-effort)")
+		logf.FromContext(ctx).Error(err, "failed to notify convex of workload upsert")
 	}
+	return err
 }
 
 // notifyRemoved tells Convex this workload no longer exists. Best-effort,
-// same reasoning as notifyUpserted.
+// same reasoning as notifyUpserted — but the Workload CR (and so its status,
+// where a retry would otherwise be tracked) is already gone by the time this
+// runs, so unlike notifyUpserted this stays a single fire-and-forget
+// attempt: there's nothing left to record a pending retry against without a
+// finalizer, which is a bigger behavior change than this fix is scoped to.
 func (r *WorkloadReconciler) notifyRemoved(ctx context.Context, key types.NamespacedName) {
 	if r.ConvexClient == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, convexNotifyTimeout)
+	defer cancel()
 	if err := r.ConvexClient.RemoveWorkload(ctx, key.Name, key.Namespace); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to notify convex of workload removal (best-effort)")
 	}
@@ -364,6 +412,7 @@ func (r *WorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Named("workload").
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Complete(r)
 }
 
