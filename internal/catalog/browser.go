@@ -41,11 +41,12 @@ const (
 	configVolumeName       = "config"
 	envProfileDownloadURL  = "PROFILE_DOWNLOAD_URL"
 
-	paramKeyLogLevel  = "logLevel"
-	logLevelInfo      = "info"
-	logLevelWarn      = "warn"
-	logLevelError     = "error"
-	paramKeyUploadURL = "uploadUrl"
+	paramKeyLogLevel       = "logLevel"
+	logLevelInfo           = "info"
+	logLevelWarn           = "warn"
+	logLevelError          = "error"
+	paramKeyUploadURL      = "uploadUrl"
+	paramKeyRestoreProfile = "restoreProfile"
 
 	// initialTemplateVersion is every template's Version until its
 	// Parameters change for the first time — see Template.Version.
@@ -72,10 +73,10 @@ var browserParameters = []Parameter{
 		// condition as profileDownloadUrl below, so the picker doesn't invite
 		// a choice that deployWorkload will silently ignore because
 		// restoreProfile never got toggled on.
-		Visibility: &Visibility{DependsOn: "restoreProfile", Op: VisibilityEquals, Value: true},
+		Visibility: &Visibility{DependsOn: paramKeyRestoreProfile, Op: VisibilityEquals, Value: true},
 	},
 	{
-		Key:        "restoreProfile",
+		Key:        paramKeyRestoreProfile,
 		Label:      "Restore saved profile",
 		Type:       ParameterTypeBoolean,
 		DataSource: DataSource{Kind: DataSourceStatic},
@@ -90,7 +91,7 @@ var browserParameters = []Parameter{
 		Required:   false,
 		// Only meaningful when a restore was actually requested — machine
 		// enforcement of what used to be just this doc comment's say-so.
-		Visibility: &Visibility{DependsOn: "restoreProfile", Op: VisibilityEquals, Value: true},
+		Visibility: &Visibility{DependsOn: paramKeyRestoreProfile, Op: VisibilityEquals, Value: true},
 	},
 }
 

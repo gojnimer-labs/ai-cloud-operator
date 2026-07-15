@@ -15,58 +15,66 @@ doesn't control that one): `convex/operators/actions.ts#resolveDynamicOptions`,
 
 ## 3. Entrypoints + breaking gateway URL change (current)
 
-- [ ] Parse the new `templates[].entrypoints` field (`Entrypoint[]`, always
+- [x] Parse the new `templates[].entrypoints` field (`Entrypoint[]`, always
       present, at least one entry: `{ name, label }`).
-- [ ] Update every gateway URL you build from
+- [x] Update every gateway URL you build from
       `/gw/{namespace}/{name}/{subpath...}` to
       `/gw/{namespace}/{name}/{entrypoint}/{subpath...}` — **this breaks
       every existing workload**, not just multi-entrypoint ones. Use the
       template's one declared `entrypoints[].name` (e.g. `"http"`) for
       today's single-entrypoint templates (nginx/firefox/chrome).
-- [ ] When a template declares more than one entrypoint, decide your own UI
+- [x] When a template declares more than one entrypoint, decide your own UI
       for picking which one to open (tabs, a dropdown, etc., keyed on
-      `entrypoints[].label`) — the operator has no opinion here.
-- [ ] No change to the one-time-token exchange or gateway auth cookie: a
+      `entrypoints[].label`) — the operator has no opinion here. (ai-cloud-v2:
+      one row-action button per entrypoint, labeled by `entrypoints[].label`
+      once there's more than one.)
+- [x] No change to the one-time-token exchange or gateway auth cookie: a
       token still authorizes "this workload" generically, and one cookie
       authorizes every entrypoint of that workload — you don't need a
-      separate token per entrypoint.
+      separate token per entrypoint. (Confirmed — no Convex-side change
+      needed here.)
 
 See `docs/catalog-parameters.md` → **Entrypoints**.
 
 ## 2. CustomFunction → Operation, typed AdditionalInfo output, Refreshable
 
-- [ ] Rename any `customFunctions`-related code/types to `operations`.
-- [ ] Update the "invoke an operation" response parser: was a bare ad hoc
+- [x] Rename any `customFunctions`-related code/types to `operations`.
+- [x] Update the "invoke an operation" response parser: was a bare ad hoc
       object (e.g. `{"stdout": "..."}`), now always
       `{"additionalInfo": [{"name", "type", "value"}, ...]}`.
-- [ ] Handle `type: "secret"` vs `"plain"` in the UI — mask secrets by
+- [x] Handle `type: "secret"` vs `"plain"` in the UI — mask secrets by
       default, offer an explicit reveal/copy action rather than displaying
       inline.
-- [ ] For an operation with `refreshable: true`, decide your own polling
+- [x] For an operation with `refreshable: true`, decide your own polling
       interval if you want a live-updating value — the operator does
       nothing special here, it's the same invoke endpoint called again on
-      whatever schedule you choose.
+      whatever schedule you choose. (ai-cloud-v2: decided not to poll for
+      now — `refreshable` is plumbed through but unused, left for a future
+      caller that wants it.)
 
 See `docs/catalog-parameters.md` → **Operations**.
 
 ## 1. DataSource / Visibility / Validation / per-template Version
 
-- [ ] Stop reading `parameters[].source` — read `parameters[].dataSource.kind`
+- [x] Stop reading `parameters[].source` — read `parameters[].dataSource.kind`
       instead (`"static"` | `"dynamic"` | `"system"`).
-- [ ] Stop parsing `type` for a `"select_<key>"` prefix — dynamic selects are
+- [x] Stop parsing `type` for a `"select_<key>"` prefix — dynamic selects are
       now always `type: "select"` plus `dataSource: {kind: "dynamic", sourceKey}`.
-- [ ] Only render `static`/`dynamic`-sourced parameters as form fields; never
+- [x] Only render `static`/`dynamic`-sourced parameters as form fields; never
       render `system`-sourced ones.
-- [ ] For `dynamic` parameters, call `resolveDynamicOptions` keyed by
+- [x] For `dynamic` parameters, call `resolveDynamicOptions` keyed by
       `dataSource.sourceKey`.
-- [ ] Implement `visibility` evaluation: hide a parameter unless its
+- [x] Implement `visibility` evaluation: hide a parameter unless its
       `dependsOn` field's current value satisfies `op`/`value`/`values`.
-- [ ] Optional: client-side `validation` checks (min/max/regex/maxLength) —
+- [x] Optional: client-side `validation` checks (min/max/regex/maxLength) —
       the operator still enforces these authoritatively either way.
 - [ ] Read `templates[].version` and store it alongside any preset you save;
       compare on load and decide mismatch behavior yourself (warn/block/
-      auto-migrate) — the operator has no opinion here.
-- [ ] No breaking change to the `/deploy` request shape itself. Error
+      auto-migrate) — the operator has no opinion here. (Presets aren't
+      built in ai-cloud-v2 yet — `version` is parsed and typed through
+      end-to-end so it's ready when that feature exists, but there's
+      nothing to store it against yet.)
+- [x] No breaking change to the `/deploy` request shape itself. Error
       responses are plain text, not JSON — don't `JSON.parse` a 400 body.
 
 See `docs/catalog-parameters.md` → **DataSource**, **Visibility**,
