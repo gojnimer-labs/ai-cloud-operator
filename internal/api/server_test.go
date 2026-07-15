@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
 )
 
@@ -612,11 +613,13 @@ func TestRunFunctionExecutesAgainstRunningPod(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]any
+	var result runFunctionResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if result["stdout"] != "Backup completed successfully" {
+	if len(result.AdditionalInfo) != 1 || result.AdditionalInfo[0].Name != "stdout" ||
+		result.AdditionalInfo[0].Type != catalog.AdditionalInfoPlain ||
+		result.AdditionalInfo[0].Value != "Backup completed successfully" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	if len(executor.calls) != 1 {

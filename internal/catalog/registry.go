@@ -46,21 +46,21 @@ func Get(id string) (Template, bool) {
 	return Template{}, false
 }
 
-// GetCustomFunction looks up a named CustomFunction on a template.
-func GetCustomFunction(t Template, key string) (CustomFunction, bool) {
-	for _, fn := range t.CustomFunctions {
-		if fn.Key == key {
-			return fn, true
+// GetOperation looks up a named Operation on a template.
+func GetOperation(t Template, key string) (Operation, bool) {
+	for _, op := range t.Operations {
+		if op.Key == key {
+			return op, true
 		}
 	}
-	return CustomFunction{}, false
+	return Operation{}, false
 }
 
 // ResolveParams applies each parameter's default (when the caller didn't
 // supply a value), then checks Required/Validation on every parameter that's
 // currently visible. It returns a new map — raw is never mutated. Takes a
 // bare parameter list rather than a Template so it's equally usable for a
-// Template's own Parameters and a CustomFunction's Parameters.
+// Template's own Parameters and an Operation's Parameters.
 //
 // Two passes, deliberately: a Visibility condition can depend on another
 // parameter's *resolved* value (including one that only got a value from its

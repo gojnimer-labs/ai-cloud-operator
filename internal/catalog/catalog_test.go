@@ -203,9 +203,9 @@ func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 	for _, id := range []string{templateIDFirefox, templateIDChrome} {
 		tmpl, _ := Get(id)
-		fn, ok := GetCustomFunction(tmpl, "backup_state")
+		fn, ok := GetOperation(tmpl, "backup_state")
 		if !ok {
-			t.Fatalf("%s: expected a backup_state custom function", id)
+			t.Fatalf("%s: expected a backup_state operation", id)
 		}
 		if len(fn.Parameters) != 2 || fn.Parameters[0].Key != "label" || fn.Parameters[1].Key != paramKeyUploadURL {
 			t.Fatalf("%s: expected label and uploadUrl parameters, got %+v", id, fn.Parameters)
@@ -216,15 +216,18 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 		if fn.Parameters[1].DataSource.Kind != DataSourceSystem {
 			t.Fatalf("%s: expected uploadUrl to be a system data source", id)
 		}
+		if fn.Refreshable {
+			t.Fatalf("%s: expected backup_state to not be Refreshable — it has a real side effect", id)
+		}
 	}
-	if _, ok := GetCustomFunction(Template{}, "backup_state"); ok {
-		t.Fatalf("expected no functions on an empty template")
+	if _, ok := GetOperation(Template{}, "backup_state"); ok {
+		t.Fatalf("expected no operations on an empty template")
 	}
 }
 
 func TestBackupStateFunctionRequiresUploadURL(t *testing.T) {
 	tmpl, _ := Get(templateIDFirefox)
-	fn, _ := GetCustomFunction(tmpl, "backup_state")
+	fn, _ := GetOperation(tmpl, "backup_state")
 
 	exec := &fakePodExecutor{}
 	if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: testFirefoxPod}, map[string]any{}); err == nil {
@@ -237,7 +240,7 @@ func TestBackupStateFunctionRequiresUploadURL(t *testing.T) {
 
 func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 	tmpl, _ := Get(templateIDFirefox)
-	fn, _ := GetCustomFunction(tmpl, "backup_state")
+	fn, _ := GetOperation(tmpl, "backup_state")
 
 	exec := &fakePodExecutor{stdout: "Backup completed successfully"}
 	result, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: testFirefoxPod}, map[string]any{
@@ -246,8 +249,8 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result["stdout"] != "Backup completed successfully" {
-		t.Fatalf("expected stdout to be returned, got %+v", result)
+	if len(result) != 1 || result[0].Name != "stdout" || result[0].Type != AdditionalInfoPlain || result[0].Value != "Backup completed successfully" {
+		t.Fatalf("expected a single plain stdout AdditionalInfo, got %+v", result)
 	}
 
 	if exec.namespace != testNamespace || exec.podName != testFirefoxPod || exec.container != templateIDFirefox {
@@ -270,7 +273,7 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 
 func TestBackupStateFunctionWrapsExecutorError(t *testing.T) {
 	tmpl, _ := Get(templateIDChrome)
-	fn, _ := GetCustomFunction(tmpl, "backup_state")
+	fn, _ := GetOperation(tmpl, "backup_state")
 
 	exec := &fakePodExecutor{stderr: "tar: /config/.config/google-chrome: No such file", err: errors.New("command terminated with exit code 1")}
 	if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: "chrome-abc"}, map[string]any{

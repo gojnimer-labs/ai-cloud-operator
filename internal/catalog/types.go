@@ -72,7 +72,7 @@ const (
 
 // DataSource describes where a Parameter's value comes from. The zero value
 // (Kind == "") is treated as DataSourceStatic by callers that care — but
-// Template/CustomFunction literals should set Kind explicitly for clarity.
+// Template/Operation literals should set Kind explicitly for clarity.
 type DataSource struct {
 	Kind DataSourceKind `json:"kind"`
 	// SourceKey names which Convex-side source resolves this parameter's
@@ -150,41 +150,75 @@ type Rendered struct {
 }
 
 // PodExecutor runs a command inside a specific container of a running pod
-// and captures its combined stdout/stderr. CustomFunction.Run depends on
-// this interface rather than a concrete Kubernetes client so the catalog
-// package stays decoupled from client-go's exec/SPDY machinery — see
+// and captures its combined stdout/stderr. Operation.Run depends on this
+// interface rather than a concrete Kubernetes client so the catalog package
+// stays decoupled from client-go's exec/SPDY machinery — see
 // internal/podexec for the real implementation and internal/api/server.go
 // for how it's wired in.
 type PodExecutor interface {
 	Exec(ctx context.Context, namespace, podName, container string, command []string) (stdout, stderr string, err error)
 }
 
-// PodRef identifies which pod a CustomFunction should run against —
-// resolved by the caller (see internal/podexec.FindPod) before Run is
-// invoked, since finding "the" pod for a workload is a live cluster lookup,
-// not something the catalog package itself should own. Container isn't part
-// of this: each CustomFunction already knows which of its template's
-// containers it targets (see backupStateFunction's containerName closure).
+// PodRef identifies which pod an Operation should run against — resolved by
+// the caller (see internal/podexec.FindPod) before Run is invoked, since
+// finding "the" pod for a workload is a live cluster lookup, not something
+// the catalog package itself should own. Container isn't part of this: each
+// Operation already knows which of its template's containers it targets
+// (see backupStateFunction's containerName closure).
 type PodRef struct {
 	Namespace string
 	PodName   string
 }
 
-// CustomFunction is a named operation a template exposes against an
+// AdditionalInfoType says how a piece of an Operation's result should be
+// handled/displayed downstream — currently just the secret/not-secret axis.
+// Not named "opaque" for the non-secret case: this codebase already uses
+// corev1.SecretTypeOpaque for real Kubernetes Secrets, where "Opaque" means
+// "unstructured secret data" — the opposite of what we'd mean by it here.
+type AdditionalInfoType string
+
+const (
+	// AdditionalInfoSecret is sensitive — mask by default, avoid logging or
+	// persisting it in plaintext, etc.
+	AdditionalInfoSecret AdditionalInfoType = "secret"
+	// AdditionalInfoPlain is informational — display as-is, no special
+	// handling.
+	AdditionalInfoPlain AdditionalInfoType = "plain"
+)
+
+// AdditionalInfo is one named value an Operation's Run produces. Unlike
+// Parameter (an input schema), there's no separate static declaration of
+// what an Operation's Outputs will be — the type travels with the value at
+// the moment Run actually returns it, so there's no schema/instance drift
+// to keep in sync.
+type AdditionalInfo struct {
+	Name  string             `json:"name"`
+	Type  AdditionalInfoType `json:"type"`
+	Value any                `json:"value"`
+}
+
+// Operation is a named operation a template exposes against an
 // already-running workload — distinct from Template.Parameters, which only
-// apply at deploy time. This is the reusable pattern any future custom
-// function (not just backup_state) follows: declare Parameters the same way
-// a template does (including system-sourced ones Convex computes, e.g. an R2
-// upload URL — see the firefox/chrome backup_state function), and implement
-// Run to do the actual work via the injected PodExecutor. The frontend
-// discovers these the same way it discovers deploy-time parameters: they're
-// part of the catalog response (see internal/api/server.go#handleCatalog).
-type CustomFunction struct {
-	Key         string                                                                                                 `json:"key"`
-	Label       string                                                                                                 `json:"label"`
-	Description string                                                                                                 `json:"description,omitempty"`
-	Parameters  []Parameter                                                                                            `json:"parameters"`
-	Run         func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) (map[string]any, error) `json:"-"`
+// apply at deploy time. This is the reusable pattern any future operation
+// (not just backup_state) follows: declare Parameters the same way a
+// template does (including system-sourced ones Convex computes, e.g. an R2
+// upload URL — see the firefox/chrome backup_state operation), and
+// implement Run to do the actual work via the injected PodExecutor. The
+// frontend discovers these the same way it discovers deploy-time
+// parameters: they're part of the catalog response (see
+// internal/api/server.go#handleCatalog).
+type Operation struct {
+	Key         string      `json:"key"`
+	Label       string      `json:"label"`
+	Description string      `json:"description,omitempty"`
+	Parameters  []Parameter `json:"parameters"`
+	// Refreshable marks this operation as side-effect-free — safe for a
+	// caller to re-invoke on its own interval just to get a current
+	// reading (e.g. reading a token file), as opposed to one like
+	// backup_state that does real work and should only run when a user
+	// deliberately triggers it.
+	Refreshable bool                                                                                                     `json:"refreshable"`
+	Run         func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) ([]AdditionalInfo, error) `json:"-"`
 }
 
 // Template is one entry in the catalog.
@@ -201,8 +235,8 @@ type Template struct {
 	// detect that the schema they were built against has since moved,
 	// entirely on the Convex side — the operator has no opinion on what a
 	// mismatch should mean.
-	Version         string                                        `json:"version"`
-	Parameters      []Parameter                                   `json:"parameters"`
-	CustomFunctions []CustomFunction                              `json:"customFunctions,omitempty"`
-	Build           func(params map[string]any) (Rendered, error) `json:"-"`
+	Version    string                                        `json:"version"`
+	Parameters []Parameter                                   `json:"parameters"`
+	Operations []Operation                                   `json:"operations,omitempty"`
+	Build      func(params map[string]any) (Rendered, error) `json:"-"`
 }

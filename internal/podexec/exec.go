@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 // Package podexec runs commands inside already-running pods on behalf of
-// catalog.CustomFunction implementations (see internal/catalog.PodExecutor)
-// — the operator's own equivalent of `kubectl exec`, using client-go's SPDY
+// catalog.Operation implementations (see internal/catalog.PodExecutor) —
+// the operator's own equivalent of `kubectl exec`, using client-go's SPDY
 // executor directly rather than shelling out to a kubectl binary.
 package podexec
 

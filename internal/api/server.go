@@ -89,8 +89,8 @@ type Server struct {
 // New builds a Server listening on listenAddr, using c to read/write
 // Workload custom resources, token to authenticate Convex's management
 // calls, gatewaySecret/verifier/proxy to authenticate and serve end-user
-// gateway requests, and podExecutor to run a workload's CustomFunctions
-// (see handleRunFunction).
+// gateway requests, and podExecutor to run a workload's Operations (see
+// handleRunFunction).
 func New(c client.Client, listenAddr string, token TokenGetter, gatewaySecret []byte, verifier GatewayVerifier, proxy *gateway.ServiceProxy, podExecutor catalog.PodExecutor) *Server {
 	return &Server{client: c, listenAddr: listenAddr, token: token, gatewaySecret: gatewaySecret, gatewayVerifier: verifier, proxy: proxy, podExecutor: podExecutor}
 }
@@ -228,7 +228,8 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 // handleCatalog returns the full template registry, including
 // system-sourced parameters (e.g. profileDownloadUrl) — Convex needs to know
 // those keys exist so it can compute and inject them, and the frontend is
-// expected to only render source:"user" parameters as form fields.
+// expected to only render dataSource.kind:"static"/"dynamic" parameters as
+// form fields, never "system" ones.
 func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(catalog.List())
@@ -238,12 +239,16 @@ type runFunctionRequest struct {
 	Params map[string]any `json:"params,omitempty"`
 }
 
-// handleRunFunction invokes a named CustomFunction (see catalog.Template's
-// CustomFunctions) against a workload's currently-running pod — the generic
-// invocation path any custom function reuses, not just backup_state: look
-// up the workload's template, find the function by key, resolve its
-// parameters the same way deploy-time parameters are resolved, find a
-// running pod, and hand off to the function's own Run implementation.
+type runFunctionResponse struct {
+	AdditionalInfo []catalog.AdditionalInfo `json:"additionalInfo"`
+}
+
+// handleRunFunction invokes a named Operation (see catalog.Template's
+// Operations) against a workload's currently-running pod — the generic
+// invocation path any operation reuses, not just backup_state: look up the
+// workload's template, find the operation by key, resolve its parameters
+// the same way deploy-time parameters are resolved, find a running pod, and
+// hand off to the operation's own Run implementation.
 func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 	log := logf.FromContext(r.Context())
 	namespace := r.PathValue("namespace")
@@ -272,7 +277,7 @@ func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("unknown template %q", workload.Spec.TemplateName), http.StatusBadRequest)
 		return
 	}
-	fn, ok := catalog.GetCustomFunction(tmpl, key)
+	fn, ok := catalog.GetOperation(tmpl, key)
 	if !ok {
 		http.Error(w, fmt.Sprintf("unknown function %q for template %q", key, tmpl.ID), http.StatusNotFound)
 		return
@@ -299,7 +304,7 @@ func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(result)
+	_ = json.NewEncoder(w).Encode(runFunctionResponse{AdditionalInfo: result})
 }
 
 type deployRequest struct {
@@ -330,9 +335,12 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
+	// Deliberately not logging req.Config: a system-sourced parameter (e.g.
+	// profileDownloadUrl) can be a presigned URL with an auth signature
+	// baked into its query string — logging it in plaintext would leak
+	// that credential into the operator's own logs.
 	log.Info("handleDeploy: received request",
-		"name", req.Name, "namespace", req.Namespace,
-		"templateName", req.TemplateName, "config", req.Config)
+		"name", req.Name, "namespace", req.Namespace, "templateName", req.TemplateName)
 
 	if req.Name == "" || req.Namespace == "" {
 		http.Error(w, "name and namespace are required", http.StatusBadRequest)

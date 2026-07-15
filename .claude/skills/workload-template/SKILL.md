@@ -45,7 +45,7 @@ change: a new file in `internal/catalog/` plus one line in
 `catalog.ResolveParams` is also called from `internal/api/server.go`'s
 `handleDeploy` (validates before creating the Workload CR, 400s on error, but
 discards the resolved map — only raw `Config` gets stored) and
-`handleRunFunction` (same validation, for `CustomFunction.Parameters`) — three
+`handleRunFunction` (same validation, for `Operation.Parameters`) — three
 call sites total, all sharing this one function.
 
 ## Walkthrough
@@ -109,10 +109,10 @@ type Rendered struct {
 
 type Template struct {
 	ID, Name, Description, Icon string
-	Version         string // manually bumped, e.g. "1.0.0" — see Versioning below
-	Parameters      []Parameter
-	CustomFunctions []CustomFunction // optional, see "Advanced" below
-	Build           func(params map[string]any) (Rendered, error)
+	Version    string // manually bumped, e.g. "1.0.0" — see Versioning below
+	Parameters []Parameter
+	Operations []Operation // optional, see "Advanced" below
+	Build      func(params map[string]any) (Rendered, error)
 }
 ```
 
@@ -320,9 +320,9 @@ Then: `go build ./... && go test ./internal/catalog/...`
 
 - **Container naming convention**: every existing template names its primary
   container after the template ID (`nginx`, `firefox`, `chrome`). Keep doing
-  this — a `CustomFunction.Run` (see Advanced below) targets a container by a
+  this — an `Operation.Run` (see Advanced below) targets a container by a
   hardcoded name closed over at registration time, so drifting the container
-  name from the template ID makes wiring a future custom function for this
+  name from the template ID makes wiring a future operation for this
   template error-prone. There is no automatic normalization; the reconciler
   copies `rendered.Containers` verbatim.
 - **Port/service wiring is entirely manual**: nothing auto-derives
@@ -363,33 +363,63 @@ Then: `go build ./... && go test ./internal/catalog/...`
   otherwise just write your own `corev1.Probe`/init container inline in your
   new file, the way `nginx.go` needs neither.
 - **Struct-literal field order**: existing `Template`/`Parameter` literals are
-  mostly alphabetical by field name (`Build, CustomFunctions, Description, ID,
-  Icon, Name, Parameters, Version`; `DataSource, Default, Description, Key,
+  mostly alphabetical by field name (`Build, Description, ID, Icon, Name,
+  Operations, Parameters, Version`; `DataSource, Default, Description, Key,
   Label, Required, Type, Validation, Visibility`) — not gofmt-enforced, just
   house style; match it for reviewability, but don't worry if a comment forces
   you to break it.
 
-## Advanced (optional): CustomFunction
+## Advanced (optional): Operation
 
 Beyond deploy-time `Parameters`, a `Template` can expose named operations
-against an **already-running** workload via `CustomFunctions
-[]CustomFunction`:
+against an **already-running** workload via `Operations []Operation`:
 
 ```go
-type CustomFunction struct {
+type Operation struct {
 	Key         string
 	Label       string
 	Description string
 	Parameters  []Parameter // same shape/rules as Template.Parameters
-	Run         func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) (map[string]any, error)
+	// Refreshable marks this operation as side-effect-free — safe to
+	// re-invoke on an interval for a fresh reading (e.g. reading a token
+	// file), as opposed to one that does real work and should only run
+	// when a user deliberately triggers it.
+	Refreshable bool
+	Run         func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) ([]AdditionalInfo, error)
+}
+
+type AdditionalInfoType string // "secret" | "plain"
+type AdditionalInfo struct {
+	Name  string
+	Type  AdditionalInfoType
+	Value any
 }
 ```
+
+`Run` returns `[]AdditionalInfo` rather than a bare map — each named value
+says whether it's `secret` (sensitive, e.g. a bearer token — should be
+masked/handled carefully downstream) or `plain` (display as-is, no special
+handling; not called `opaque` — this codebase already uses
+`corev1.SecretTypeOpaque` for real Kubernetes Secrets, a different meaning).
+There's deliberately no separate static schema declaring what an operation's
+outputs *will* be — the type travels with the value at the moment `Run`
+actually returns it, so there's nothing to drift out of sync.
 
 The only current example is `backupStateFunction` in
 `internal/catalog/browser.go`, shared by firefox and chrome as `"backup_state"`
 — it execs a `tar` + `curl PUT` inside the running container via the injected
 `PodExecutor` (decoupled from client-go's exec/SPDY machinery so the catalog
-package stays test-friendly; see `fakePodExecutor` in `catalog_test.go`).
-Reach for this only when a template needs an operation against a *live* pod
-(backup/restore/reset-style actions), not for anything expressible as deploy
-time config — that belongs in `Template.Parameters` + `Build` instead.
+package stays test-friendly; see `fakePodExecutor` in `catalog_test.go`),
+returning `[]AdditionalInfo{{Name: "stdout", Type: AdditionalInfoPlain, Value: stdout}}`.
+It sets `Refreshable: false` since it has a real side effect (uploads to R2)
+— re-invoking it isn't something a caller should do just to check a value.
+An operation that only *reads* something already computed (e.g. `cat`-ing a
+token file the container generated at boot) should set `Refreshable: true`
+and return that value with `Type: AdditionalInfoSecret` — the caller (Convex)
+decides its own polling interval for refreshable operations; nothing on the
+operator side enforces or rate-limits this.
+
+Reach for an Operation only when a template needs to do something against a
+*live* pod (backup/restore/reset-style actions, or reading a runtime-generated
+value like a bearer token), not for anything expressible as deploy time
+config — that belongs in `Template.Parameters` + `Build` instead.

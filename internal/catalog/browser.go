@@ -134,23 +134,26 @@ chmod -R 755 /config
 	}
 }
 
-// backupStateFunction builds the "backup_state" CustomFunction shared by
-// firefox/chrome: the first instance of the reusable custom-function
-// pattern (see catalog.CustomFunction) — a named operation against an
-// already-running workload, discovered by the frontend through the same
-// catalog response as deploy-time parameters, with its own Parameters
-// (including a system-sourced uploadUrl Convex computes, mirroring how
+// backupStateFunction builds the "backup_state" Operation shared by
+// firefox/chrome: the first instance of the reusable operation pattern (see
+// catalog.Operation) — a named operation against an already-running
+// workload, discovered by the frontend through the same catalog response as
+// deploy-time parameters, with its own Parameters (including a
+// system-sourced uploadUrl Convex computes, mirroring how
 // profileDownloadUrl works for deploy-time restore).
 //
 // profilePath and uploadUrl are passed as sh positional parameters ($1, $2)
 // rather than interpolated into the script string, so a URL containing
 // shell-meaningful characters (S3 presigned URLs are full of & and % in
 // their query string) can never be misparsed as script syntax.
-func backupStateFunction(profilePath, containerName string) CustomFunction {
-	return CustomFunction{
+func backupStateFunction(profilePath, containerName string) Operation {
+	return Operation{
 		Key:         "backup_state",
 		Label:       "Backup profile",
 		Description: "Tars the current browser profile and uploads it to R2 so it can be restored into a future deploy.",
+		// Real side effect (tar + upload) — a deliberate user action, not
+		// something safe to silently re-invoke just to check a value.
+		Refreshable: false,
 		Parameters: []Parameter{
 			{
 				Key:         "label",
@@ -172,7 +175,7 @@ func backupStateFunction(profilePath, containerName string) CustomFunction {
 		// prompt for it; Convex reads it back from the request to name the
 		// selectOptions row it records after a successful backup (see
 		// ai-cloud-v2's workloads/actions.ts#runCustomFunction).
-		Run: func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) (map[string]any, error) {
+		Run: func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) ([]AdditionalInfo, error) {
 			uploadURL := paramString(params, paramKeyUploadURL, "")
 			if uploadURL == "" {
 				return nil, fmt.Errorf("uploadUrl is required")
@@ -187,7 +190,7 @@ rm -f /tmp/backup.tar.gz
 			if err != nil {
 				return nil, fmt.Errorf("backup exec failed: %w (stderr: %s)", err, stderr)
 			}
-			return map[string]any{"stdout": stdout}, nil
+			return []AdditionalInfo{{Name: "stdout", Type: AdditionalInfoPlain, Value: stdout}}, nil
 		},
 	}
 }
