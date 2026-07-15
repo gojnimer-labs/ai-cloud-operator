@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -314,10 +313,16 @@ func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 }
 
 type deployRequest struct {
-	// Name is only used for a non-template (raw image) deploy. For a
-	// template deploy, this is ignored entirely — the operator derives the
-	// Workload's name itself from UserID+TemplateName (see workloadSlug) so
-	// the caller never has to pick or track a Kubernetes-safe identifier.
+	// Name is only used for a non-template (raw image) deploy, where it's
+	// used verbatim as the Workload's actual name and must already be a
+	// valid DNS-1123 label. For a template deploy, this is ignored entirely
+	// — every template deploy creates a brand-new Workload named via
+	// Kubernetes' own ObjectMeta.GenerateName (see handleDeploy), so the
+	// caller never has to pick, track, or pass any identifier to run
+	// multiple instances of the same template for the same user. UserID is
+	// still recorded on the Workload's own Spec (and propagated as a label
+	// onto its Deployment/Service — see workload_controller.go), so nothing
+	// is lost by not also folding it into the name.
 	Name          string          `json:"name,omitempty"`
 	TemplateName  string          `json:"templateName,omitempty"`
 	Image         string          `json:"image,omitempty"`
@@ -349,7 +354,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "image is required when templateName is unset", http.StatusBadRequest)
 		return
 	}
-	if req.TemplateName != "" {
+	isTemplateDeploy := req.TemplateName != ""
+	if isTemplateDeploy {
 		tmpl, ok := catalog.Get(req.TemplateName)
 		if !ok {
 			log.Info("handleDeploy: unknown template", "templateName", req.TemplateName)
@@ -360,29 +366,28 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "userId is required for a template deploy", http.StatusBadRequest)
 			return
 		}
-		// The caller never picks a name for a template deploy — deriving it
-		// from (userId, templateName) means one workload per user per
-		// template, addressed consistently without Convex having to mint or
-		// track a Kubernetes-safe identifier. Any client-supplied req.Name is
-		// ignored.
-		req.Name = workloadSlug(req.UserID, req.TemplateName)
 		if _, err := catalog.ResolveParams(tmpl.Parameters, req.Config); err != nil {
 			log.Error(err, "handleDeploy: resolving template parameters failed", "templateName", req.TemplateName)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-	} else if req.Name == "" {
-		http.Error(w, "name is required for a non-template deploy", http.StatusBadRequest)
-		return
-	}
-	// Service.Name mirrors Workload.Name exactly (see
-	// workload_controller.go's reconcileService), so this must satisfy the
-	// stricter DNS-1123 label rules (<=63 chars, no dots) rather than the
-	// more permissive subdomain form.
-	if errs := validation.IsDNS1123Label(req.Name); len(errs) > 0 {
-		log.Info("handleDeploy: invalid name", "name", req.Name, "errors", errs)
-		http.Error(w, fmt.Sprintf("invalid name %q: %s", req.Name, strings.Join(errs, "; ")), http.StatusBadRequest)
-		return
+	} else {
+		if req.Name == "" {
+			http.Error(w, "name is required for a non-template deploy", http.StatusBadRequest)
+			return
+		}
+		// Service.Name mirrors Workload.Name exactly (see
+		// workload_controller.go's reconcileService), so this must satisfy
+		// the stricter DNS-1123 label rules (<=63 chars, no dots) rather
+		// than the more permissive subdomain form. A template deploy's
+		// generated name is always valid by construction (a known-safe
+		// catalog ID plus Kubernetes' own GenerateName suffix), so this
+		// check only applies here.
+		if errs := validation.IsDNS1123Label(req.Name); len(errs) > 0 {
+			log.Info("handleDeploy: invalid name", "name", req.Name, "errors", errs)
+			http.Error(w, fmt.Sprintf("invalid name %q: %s", req.Name, strings.Join(errs, "; ")), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Deliberately not logging req.Config: a system-sourced parameter (e.g.
@@ -393,34 +398,67 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		"name", req.Name, "namespace", s.namespace, "templateName", req.TemplateName)
 
 	ctx := r.Context()
-	workload := &appsv1alpha1.Workload{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      req.Name,
-			Namespace: s.namespace,
-		},
+	var configRaw *apiextensionsv1.JSON
+	if req.Config != nil {
+		raw, err := json.Marshal(req.Config)
+		if err != nil {
+			http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		configRaw = &apiextensionsv1.JSON{Raw: raw}
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, s.client, workload, func() error {
-		workload.Spec.TemplateName = req.TemplateName
-		workload.Spec.Image = req.Image
-		workload.Spec.Replicas = req.Replicas
-		workload.Spec.ContainerPort = req.ContainerPort
-		workload.Spec.Env = req.Env
-		workload.Spec.Subdomain = req.Subdomain
-		workload.Spec.UserID = req.UserID
-		if req.Config != nil {
-			raw, marshalErr := json.Marshal(req.Config)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			workload.Spec.Config = &apiextensionsv1.JSON{Raw: raw}
+	var workload *appsv1alpha1.Workload
+	if isTemplateDeploy {
+		// Every template deploy creates a brand-new Workload — Kubernetes'
+		// own GenerateName mechanism appends a unique random suffix to the
+		// template ID (already known-safe: catalog.Get above only accepted
+		// a hardcoded, pre-vetted template ID), so the operator never needs
+		// the caller to pick, track, or pass any identifier to run multiple
+		// instances of the same template for the same user. UserID doesn't
+		// need to be part of the name either — it's already on the
+		// Workload's own Spec.UserID. Unlike the raw-image path below, this
+		// is always Create, never an update-in-place: two deploys with
+		// identical (userId, templateName) always produce two separate
+		// Workloads.
+		workload = &appsv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: req.TemplateName + "-",
+				Namespace:    s.namespace,
+			},
+			Spec: appsv1alpha1.WorkloadSpec{
+				TemplateName: req.TemplateName,
+				UserID:       req.UserID,
+				Config:       configRaw,
+			},
 		}
-		return nil
-	})
-	if err != nil {
-		log.Error(err, "handleDeploy: failed to apply workload", "name", req.Name, "namespace", s.namespace)
-		http.Error(w, "failed to apply workload: "+err.Error(), http.StatusInternalServerError)
-		return
+		if err := s.client.Create(ctx, workload); err != nil {
+			log.Error(err, "handleDeploy: failed to create workload", "templateName", req.TemplateName)
+			http.Error(w, "failed to create workload: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		workload = &appsv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      req.Name,
+				Namespace: s.namespace,
+			},
+		}
+		_, err := controllerutil.CreateOrUpdate(ctx, s.client, workload, func() error {
+			workload.Spec.Image = req.Image
+			workload.Spec.Replicas = req.Replicas
+			workload.Spec.ContainerPort = req.ContainerPort
+			workload.Spec.Env = req.Env
+			workload.Spec.Subdomain = req.Subdomain
+			workload.Spec.UserID = req.UserID
+			workload.Spec.Config = configRaw
+			return nil
+		})
+		if err != nil {
+			log.Error(err, "handleDeploy: failed to apply workload", "name", req.Name, "namespace", s.namespace)
+			http.Error(w, "failed to apply workload: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	log.Info("handleDeploy: workload applied", "name", workload.Name, "namespace", workload.Namespace)
 
@@ -431,26 +469,6 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Namespace: workload.Namespace,
 		Status:    workload.Status,
 	})
-}
-
-// workloadSlugInvalidChars matches every run of characters a DNS-1123 label
-// can't contain, once userID/templateName have already been lowercased.
-var workloadSlugInvalidChars = regexp.MustCompile(`[^a-z0-9-]+`)
-
-// workloadSlug derives a Workload's Kubernetes name from its owning user and
-// template — one workload per (userId, templateName) pair, so a template
-// deploy never needs the caller to pick or track a Kubernetes-safe
-// identifier. Must satisfy DNS-1123 label rules (<=63 chars, lowercase
-// alphanumeric/hyphen, since Service.Name mirrors this exactly — see
-// workload_controller.go's reconcileService), so this lowercases, replaces
-// every invalid run with a single hyphen, and truncates to fit.
-func workloadSlug(userID, templateName string) string {
-	raw := strings.ToLower(templateName + "-" + userID)
-	slug := strings.Trim(workloadSlugInvalidChars.ReplaceAllString(raw, "-"), "-")
-	if len(slug) > validation.DNS1123LabelMaxLength {
-		slug = strings.TrimRight(slug[:validation.DNS1123LabelMaxLength], "-")
-	}
-	return slug
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {

@@ -87,10 +87,21 @@ resolves `profileName`/system params), `convex/workloads/actions.ts#runCustomFun
 
 **7. Identity (name and namespace are now operator-owned)**
 - [ ] Stop sending `name`/`namespace` on `POST /workloads` for a template
-      deploy — the operator derives the workload's name itself from
-      `userId`+`templateName`, and deploys into a single fixed namespace
-      configured for this operator instance. `userId` becomes **required**
-      for a template deploy (400 if missing).
+      deploy — the operator deploys into a single fixed namespace
+      configured for this operator instance, and always generates a
+      unique, brand-new Kubernetes name itself (`templateName` plus a
+      random suffix). `userId` is still recorded on the created Workload,
+      just not part of its name.
+- [ ] `userId` becomes **required** for a template deploy (400 if missing).
+- [ ] **Every template deploy call now creates a new instance** — it's no
+      longer an upsert. Calling deploy twice with the same
+      `templateName`+`userId` produces two separate workloads. If you need
+      retry-safety, handle it on your side (debounce, disable the button
+      while in flight) — the operator has no way to tell "retry of the
+      same intent" from "deliberately deploy a second instance" apart.
+- [ ] **Store the deploy response's `name`** — it's the only handle you get
+      for a specific instance; you'll need it for every later
+      get/delete/functions/gateway call against that instance.
 - [ ] Drop the namespace segment from every URL you build:
       `GET`/`DELETE /workloads/{name}`, `POST /workloads/{name}/functions/
       {key}`, and the gateway's `/gw/{name}/{entrypoint}/{subpath...}`.
@@ -479,12 +490,27 @@ different image/id/name/icon).
 }
 ```
 
-No `name` or `namespace` field for a template deploy: the operator derives
-the workload's name itself from `userId`+`templateName` (one workload per
-user per template), and deploys into a single namespace fixed for this
-operator instance at install time. `userId` is **required** — 400 if
-missing. (`name` still exists for the legacy non-template/raw-`image` deploy
-path, which you shouldn't need.)
+No `name` or `namespace` field for a template deploy. The operator deploys
+into a single namespace fixed for this operator instance at install time,
+and always creates a **brand-new** Workload with a unique, auto-generated
+name (`templateName` plus a random suffix Kubernetes itself appends) —
+there's nothing to pick, track, or pass to run more than one instance of
+the same template for the same user; just call deploy again. `userId` is
+**required** — 400 if missing — and is still recorded on the created
+Workload; it just isn't part of the generated name (no need to duplicate
+it there when it's already on the object).
+
+**Every template deploy call creates a new instance** — this is not an
+upsert. Calling deploy twice with identical `templateName`+`userId`+
+`config` produces two separate, independently-addressable workloads, not
+one workload updated twice. If you need retry-safety (e.g. a network retry
+shouldn't create a duplicate), that's on your side — debounce the user
+action, disable the button while a deploy is in flight, or otherwise avoid
+firing the same logical deploy twice.
+
+(`name` still exists on the request purely for the legacy non-template/
+raw-`image` deploy path, where it's used verbatim as the literal Kubernetes
+name — you shouldn't need that path.)
 
 `config` only needs `static`/`dynamic` (user-facing) keys the user actually
 set plus whatever `system` keys apply — the operator resolves defaults for
@@ -492,6 +518,10 @@ anything else. Response is `202 Accepted` with
 `{ "name", "namespace", "status" }` (the Workload's current `.status`, likely
 still `"Deploying"` at this point — poll `GET /workloads/{name}`
 or watch for the Convex-side upsert notification for the real end state).
+**Store the response's `name`** — it's the actual generated Kubernetes name,
+the only handle you have for this specific instance, needed for every later
+`GET`/`DELETE /workloads/{name}`, `/workloads/{name}/functions/{key}`, and
+`/gw/{name}/...` call against it.
 
 ## What changed from the old shape
 
@@ -523,17 +553,24 @@ If you're updating existing Convex code rather than starting fresh:
   `/gw/{namespace}/{name}/{subpath...}` →
   `/gw/{namespace}/{name}/{entrypoint}/{subpath...}` — **breaking for every
   workload**, not just multi-entrypoint ones. See **Entrypoints**.
-- `deployRequest.name`/`.namespace` → **removed** for a template deploy. The
-  operator derives the workload's name itself from `userId`+`templateName`
-  and deploys into a single namespace fixed for this operator instance —
-  `userId` is now **required** (400 if missing) for a template deploy. Every
-  namespace-taking URL lost its `{namespace}` segment as a result:
-  `/workloads/{namespace}/{name}` → `/workloads/{name}`,
+- `deployRequest.namespace` → **removed** for a template deploy. The
+  operator deploys into a single namespace fixed for this operator
+  instance — `userId` is now **required** (400 if missing) for a template
+  deploy. Every namespace-taking URL lost its `{namespace}` segment as a
+  result: `/workloads/{namespace}/{name}` → `/workloads/{name}`,
   `/workloads/{namespace}/{name}/functions/{key}` →
   `/workloads/{name}/functions/{key}`, and
   `/gw/{namespace}/{name}/{entrypoint}/{subpath...}` →
   `/gw/{name}/{entrypoint}/{subpath...}`. `workloadResponse.namespace` is
   unchanged shape-wise, just always the same operator-configured value now.
+- `deployRequest.name` → **ignored entirely** for a template deploy. The
+  operator always generates a brand-new, unique Kubernetes name from
+  `templateName` plus a random suffix — **every template deploy call now
+  creates a new instance rather than updating an existing one**, which is
+  what lets one user run more than one instance of the same template
+  without the caller picking or tracking anything. Store the
+  response's `name` to address a specific instance later. Unchanged for
+  the legacy non-template/raw-`image` path.
 
 ## Ground truth, if you need to verify anything
 

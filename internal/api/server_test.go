@@ -611,10 +611,18 @@ func TestDeployWithTemplateNameSkipsImageRequirement(t *testing.T) {
 		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	wantName := workloadSlug(testUserID, testNginxTemplateID)
+	var resp workloadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	wantPrefix := testNginxTemplateID + "-"
+	if !strings.HasPrefix(resp.Name, wantPrefix) {
+		t.Fatalf("expected generated name with prefix %q, got %q", wantPrefix, resp.Name)
+	}
+
 	var workload appsv1alpha1.Workload
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: wantName}, &workload); err != nil {
-		t.Fatalf("expected workload CR to be created at derived name %q: %v", wantName, err)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: resp.Name}, &workload); err != nil {
+		t.Fatalf("expected workload CR to be created at generated name %q: %v", resp.Name, err)
 	}
 	if workload.Spec.TemplateName != testNginxTemplateID {
 		t.Fatalf("expected templateName=nginx, got %q", workload.Spec.TemplateName)
@@ -622,10 +630,11 @@ func TestDeployWithTemplateNameSkipsImageRequirement(t *testing.T) {
 }
 
 // TestDeployIgnoresClientSuppliedNameForTemplateDeploy is the concrete proof
-// that a template deploy's name is never taken from the caller — even a
-// well-formed, distinct req.Name must be overridden by the derived slug.
+// that a template deploy's name always comes from the operator's own
+// GenerateName mechanism — even a well-formed, distinct req.Name never
+// becomes the Workload's actual name.
 func TestDeployIgnoresClientSuppliedNameForTemplateDeploy(t *testing.T) {
-	s, c, _, _ := newTestServer(t)
+	s, _, _, _ := newTestServer(t)
 
 	body, _ := json.Marshal(deployRequest{
 		Name:         "whatever-the-caller-sent",
@@ -641,10 +650,59 @@ func TestDeployIgnoresClientSuppliedNameForTemplateDeploy(t *testing.T) {
 		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	wantName := workloadSlug(testUserID, testNginxTemplateID)
-	var workload appsv1alpha1.Workload
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: wantName}, &workload); err != nil {
-		t.Fatalf("expected workload CR to be created at derived name %q (ignoring client-supplied name): %v", wantName, err)
+	var resp workloadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Name == "whatever-the-caller-sent" {
+		t.Fatalf("expected the client-supplied name to be ignored, got %q", resp.Name)
+	}
+	wantPrefix := testNginxTemplateID + "-"
+	if !strings.HasPrefix(resp.Name, wantPrefix) {
+		t.Fatalf("expected generated name with prefix %q, got %q", wantPrefix, resp.Name)
+	}
+}
+
+// TestDeployAllowsMultipleInstancesOfSameTemplateForSameUser is the
+// end-to-end proof that repeat deploys of the same (userId, templateName)
+// always create a new, distinctly-named Workload rather than the second
+// call silently overwriting the first.
+func TestDeployAllowsMultipleInstancesOfSameTemplateForSameUser(t *testing.T) {
+	s, c, _, _ := newTestServer(t)
+
+	deploy := func() string {
+		t.Helper()
+		body, _ := json.Marshal(deployRequest{
+			TemplateName: testNginxTemplateID,
+			UserID:       testUserID,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/workloads", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+testDeployToken)
+		rec := httptest.NewRecorder()
+		s.testHandler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp workloadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		return resp.Name
+	}
+
+	first := deploy()
+	second := deploy()
+
+	if first == second {
+		t.Fatalf("expected two deploys to produce distinct names, both resolved to %q", first)
+	}
+
+	var firstWorkload, secondWorkload appsv1alpha1.Workload
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: first}, &firstWorkload); err != nil {
+		t.Fatalf("expected first workload to exist: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testServiceNS, Name: second}, &secondWorkload); err != nil {
+		t.Fatalf("expected second workload to exist: %v", err)
 	}
 }
 
@@ -661,28 +719,6 @@ func TestDeployRequiresUserIDForTemplateDeploy(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 when userId is missing, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestWorkloadSlugSanitizesAndTruncates(t *testing.T) {
-	cases := []struct {
-		name, userID, templateName, want string
-	}{
-		{"lowercases and joins", "User_123", "Nginx", "nginx-user-123"},
-		{"strips invalid characters", "user!!123", "firefox", "firefox-user-123"},
-		{"truncates to 63 chars and trims trailing hyphen", strings.Repeat("a", 100),
-			"firefox", "firefox-" + strings.Repeat("a", 55)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := workloadSlug(tc.userID, tc.templateName)
-			if got != tc.want {
-				t.Fatalf("workloadSlug(%q, %q) = %q, want %q", tc.userID, tc.templateName, got, tc.want)
-			}
-			if len(got) > 63 {
-				t.Fatalf("slug exceeds 63 chars: %q", got)
-			}
-		})
 	}
 }
 
