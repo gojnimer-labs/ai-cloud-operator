@@ -326,6 +326,9 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding scheme: %v", err)
 	}
+	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: testServiceNS},
 		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{
@@ -333,7 +336,15 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 			{Name: "backoffice", Port: 9090},
 		}},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+	// Handler() now gates on workload readiness before resolving the
+	// Service — these gateway-token tests are exercising auth/proxy
+	// behavior, not readiness, so the workload just needs to already be
+	// Running.
+	wl := &appsv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: testServiceNS},
+		Status:     appsv1alpha1.WorkloadStatus{Phase: "Running"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, wl).Build()
 	proxy, err := gateway.NewServiceProxy(c, &rest.Config{Host: apiServerURL})
 	if err != nil {
 		t.Fatalf("NewServiceProxy: %v", err)

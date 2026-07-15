@@ -26,9 +26,25 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
+)
+
+// Phase/condition values mirror internal/controller/workload_controller.go's
+// own unexported consts. Duplicated rather than imported: that package
+// already keeps them local instead of exporting them, and importing it from
+// here would invert the controller -> gateway dependency direction wired in
+// cmd/main.go.
+const (
+	phaseRunning              = "Running"
+	phaseFailed               = "Failed"
+	conditionTypeReady        = "Ready"
+	defaultReplicas           = int32(1)
+	waitingPageRefreshSeconds = 3
 )
 
 // ServiceProxy relays HTTP requests into a cluster-internal Service via the
@@ -72,6 +88,45 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 		subpath := r.PathValue("subpath")
 
 		log := logf.FromContext(r.Context()).WithName("gateway")
+
+		var workload appsv1alpha1.Workload
+		if err := p.k8sClient.Get(r.Context(), client.ObjectKey{Namespace: namespace, Name: name}, &workload); err != nil {
+			if apierrors.IsNotFound(err) {
+				http.Error(w, "workload not found", http.StatusNotFound)
+				return
+			}
+			log.Error(err, "resolving workload")
+			http.Error(w, "failed to resolve workload", http.StatusBadGateway)
+			return
+		}
+
+		if workload.Status.Phase != phaseRunning {
+			desired := defaultReplicas
+			if workload.Spec.Replicas != nil {
+				desired = *workload.Spec.Replicas
+			}
+			var message string
+			if cond := apimeta.FindStatusCondition(workload.Status.Conditions, conditionTypeReady); cond != nil {
+				message = cond.Message
+			}
+			failed := workload.Status.Phase == phaseFailed
+			status := http.StatusOK
+			if failed {
+				status = http.StatusServiceUnavailable
+			}
+			renderWaitingPage(w, r, status, waitingPageData{
+				Namespace:       namespace,
+				Name:            name,
+				Phase:           workload.Status.Phase,
+				Message:         message,
+				ReadyReplicas:   workload.Status.ReadyReplicas,
+				DesiredReplicas: desired,
+				RefreshSeconds:  waitingPageRefreshSeconds,
+				ShowRefresh:     true, // keep refreshing even on Failed — see plan notes
+				Failed:          failed,
+			})
+			return
+		}
 
 		var svc corev1.Service
 		if err := p.k8sClient.Get(r.Context(), client.ObjectKey{Namespace: namespace, Name: name}, &svc); err != nil {

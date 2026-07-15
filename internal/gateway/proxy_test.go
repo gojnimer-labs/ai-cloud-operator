@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +29,20 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 )
+
+// readyWorkload is the Workload every pre-existing test needs seeded now
+// that Handler() gates on workload readiness before ever resolving the
+// Service — these tests are exercising the Service-lookup/proxy behavior,
+// so they want a Workload that's simply already Running.
+func readyWorkload() *appsv1alpha1.Workload {
+	return &appsv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Status:     appsv1alpha1.WorkloadStatus{Phase: "Running"},
+	}
+}
 
 func TestHandlerRewritesToServicesProxyPath(t *testing.T) {
 	const port = int32(8080)
@@ -49,11 +63,14 @@ func TestHandlerRewritesToServicesProxyPath(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding scheme: %v", err)
 	}
+	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: port}}},
 	}
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, readyWorkload()).Build()
 
 	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: apiServer.URL})
 	if err != nil {
@@ -89,7 +106,17 @@ func TestHandlerReturns404WhenServiceMissing(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding scheme: %v", err)
 	}
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	// A ready Workload with the requested name/namespace but no backing
+	// Service — this test exercises the Service-not-found path specifically,
+	// which only fires once the Workload is already Running.
+	wl := &appsv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "does-not-exist", Namespace: namespace},
+		Status:     appsv1alpha1.WorkloadStatus{Phase: "Running"},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
 
 	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
 	if err != nil {
@@ -113,6 +140,9 @@ func TestHandlerReturns404WhenEntrypointUnknown(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding scheme: %v", err)
 	}
+	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{
@@ -120,7 +150,7 @@ func TestHandlerReturns404WhenEntrypointUnknown(t *testing.T) {
 			{Name: "backoffice", Port: 8080},
 		}},
 	}
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, readyWorkload()).Build()
 
 	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
 	if err != nil {
@@ -136,5 +166,128 @@ func TestHandlerReturns404WhenEntrypointUnknown(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandlerReturns404WhenWorkloadMissing(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	if err != nil {
+		t.Fatalf("NewServiceProxy: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+
+	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/http/", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "text/html") {
+		t.Fatalf("expected plain-text 404 (not the HTML waiting page), got Content-Type %q", ct)
+	}
+}
+
+func TestHandlerServesWaitingPageWhenWorkloadNotReady(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	// Spec.Replicas left nil deliberately, to exercise the defaultReplicas
+	// fallback in the "X/Y replicas ready" copy.
+	wl := &appsv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Status:     appsv1alpha1.WorkloadStatus{Phase: "Deploying", ReadyReplicas: 0},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
+
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	if err != nil {
+		t.Fatalf("NewServiceProxy: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+
+	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/http/", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("expected text/html Content-Type, got %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<meta http-equiv="refresh"`) {
+		t.Fatalf("expected self-refreshing meta tag in waiting page, got: %s", body)
+	}
+	if !strings.Contains(body, name) {
+		t.Fatalf("expected workload name %q in waiting page, got: %s", name, body)
+	}
+}
+
+func TestHandlerServesFailedPageWhenWorkloadFailed(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	const failureMessage = "reconciling deployment: some underlying error"
+	wl := &appsv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Status: appsv1alpha1.WorkloadStatus{
+			Phase: "Failed",
+			Conditions: []metav1.Condition{{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				Reason:             "Error",
+				Message:            failureMessage,
+				LastTransitionTime: metav1.Now(),
+			}},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
+
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: "http://example.invalid"})
+	if err != nil {
+		t.Fatalf("NewServiceProxy: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/gw/{namespace}/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+
+	req := httptest.NewRequest(http.MethodGet, "/gw/default/demo/http/", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, failureMessage) {
+		t.Fatalf("expected failure message %q in error page, got: %s", failureMessage, body)
+	}
+	// Still self-refreshing: setFailed's requeue means Failed isn't terminal,
+	// so a transient failure can recover on its own — see plan notes.
+	if !strings.Contains(body, `<meta http-equiv="refresh"`) {
+		t.Fatalf("expected self-refreshing meta tag even on the failed page, got: %s", body)
 	}
 }
