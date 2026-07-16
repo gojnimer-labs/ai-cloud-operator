@@ -47,7 +47,7 @@ func (f *fakePodExecutor) Exec(_ context.Context, namespace, podName, container 
 }
 
 func TestGetReturnsKnownTemplates(t *testing.T) {
-	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome} {
+	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome, templateIDCodeServer} {
 		if _, ok := Get(id); !ok {
 			t.Fatalf("expected template %q to be registered", id)
 		}
@@ -389,5 +389,58 @@ func TestFirefoxBuildWithoutProfileURLStartsFresh(t *testing.T) {
 		if env.Name == envProfileDownloadURL && env.Value != "" {
 			t.Fatalf("expected empty PROFILE_DOWNLOAD_URL when not provided, got %q", env.Value)
 		}
+	}
+}
+
+func TestCodeServerBuildDefaultsWithoutPasswords(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved["defaultWorkspace"] != "/config/workspace" {
+		t.Fatalf("expected default defaultWorkspace, got %v", resolved["defaultWorkspace"])
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	container := rendered.Containers[0]
+	if container.Name != templateIDCodeServer || container.Image != "lscr.io/linuxserver/code-server:latest" {
+		t.Fatalf("unexpected container name/image: %+v", container)
+	}
+	for _, env := range container.Env {
+		if env.Name == "PASSWORD" || env.Name == "SUDO_PASSWORD" {
+			t.Fatalf("did not expect %s to be set when left blank, got %+v", env.Name, container.Env)
+		}
+	}
+	if len(container.Ports) != 1 || container.Ports[0].ContainerPort != codeServerPort || container.Ports[0].Name != portNameHTTP {
+		t.Fatalf("unexpected container ports: %+v", container.Ports)
+	}
+	if len(rendered.ServicePorts) != 1 || rendered.ServicePorts[0].TargetPort.IntVal != codeServerPort {
+		t.Fatalf("unexpected service ports: %+v", rendered.ServicePorts)
+	}
+}
+
+func TestCodeServerBuildAppliesPasswordsAndWorkspace(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{
+		"defaultWorkspace": "/config/project",
+		"password":         "hunter2",
+		"sudoPassword":     "sudopw",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range rendered.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["PASSWORD"] != "hunter2" || env["SUDO_PASSWORD"] != "sudopw" || env["DEFAULT_WORKSPACE"] != "/config/project" {
+		t.Fatalf("unexpected env: %+v", env)
 	}
 }
