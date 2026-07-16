@@ -246,8 +246,9 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 		if fn.Parameters[0].DataSource.Kind != DataSourceStatic {
 			t.Fatalf("%s: expected label to be a static data source", id)
 		}
-		if fn.Parameters[1].DataSource.Kind != DataSourceFile {
-			t.Fatalf("%s: expected uploadUrl to be a file data source", id)
+		uploadSource := fn.Parameters[1].DataSource
+		if uploadSource.Kind != DataSourceFile || uploadSource.Direction != DirectionUpload || uploadSource.Handler != selectOptionsHandlerR2 {
+			t.Fatalf("%s: expected uploadUrl to be an upload-direction r2_helper file data source, got %+v", id, uploadSource)
 		}
 		if fn.Refreshable {
 			t.Fatalf("%s: expected backup_state to not be Refreshable — it has a real side effect", id)
@@ -255,6 +256,23 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 	}
 	if _, ok := GetOperation(Template{}, "backup_state"); ok {
 		t.Fatalf("expected no operations on an empty template")
+	}
+}
+
+// TestBrowserProfileDownloadURLDeclaresDownloadDirection guards the other
+// half of the file-param contract: profileDownloadUrl must declare it
+// resolves from profileName's selected row via r2_helper, not just that
+// it's file-sourced — deployWorkload dispatches on these fields generically
+// (see workloads/actions.ts#deployWorkload), so a missing/wrong value here
+// would silently break restore.
+func TestBrowserProfileDownloadURLDeclaresDownloadDirection(t *testing.T) {
+	for _, id := range []string{templateIDFirefox, templateIDChrome} {
+		tmpl, _ := Get(id)
+		source := findParameter(t, tmpl.Parameters, "profileDownloadUrl").DataSource
+		if source.Kind != DataSourceFile || source.Direction != DirectionDownload ||
+			source.Handler != selectOptionsHandlerR2 || source.SourceParam != "profileName" {
+			t.Fatalf("%s: unexpected profileDownloadUrl data source: %+v", id, source)
+		}
 	}
 }
 
@@ -307,13 +325,28 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 
 	exec := &fakePodExecutor{stdout: "irrelevant — the response no longer surfaces raw stdout"}
 	result, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: testFirefoxPod}, map[string]any{
+		paramKeyLabel:     "test backup",
 		paramKeyUploadURL: "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result) != 1 || result[0].Name != "result" || result[0].Type != AdditionalInfoPlain || result[0].Value != "backup_state.success" {
-		t.Fatalf("expected a single plain result AdditionalInfo with a stable message key, got %+v", result)
+	if len(result) != 2 || result[0].Name != "result" || result[0].Type != AdditionalInfoPlain || result[0].Value != "backup_state.success" {
+		t.Fatalf("expected a plain result AdditionalInfo with a stable message key, got %+v", result)
+	}
+	insertRow, ok := result[1].Value.(InsertRowValue)
+	if result[1].Name != "profile" || result[1].Type != AdditionalInfoInsertRow || !ok {
+		t.Fatalf("expected an insert_row AdditionalInfo, got %+v", result[1])
+	}
+	if insertRow.Table != "selectOptions" {
+		t.Fatalf("expected insert_row to target the selectOptions table, got %+v", insertRow)
+	}
+	fields, ok := insertRow.Fields.(selectOptionsInsertFields)
+	if !ok {
+		t.Fatalf("expected selectOptionsInsertFields, got %+v", insertRow.Fields)
+	}
+	if fields.SourceKey != profileSourceKeyFirefox || fields.Label != "test backup" || fields.Handler != selectOptionsHandlerR2 {
+		t.Fatalf("unexpected insert_row fields: %+v", fields)
 	}
 
 	if exec.namespace != testNamespace || exec.podName != testFirefoxPod || exec.container != templateIDFirefox {

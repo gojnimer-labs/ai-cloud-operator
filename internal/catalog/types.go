@@ -77,6 +77,18 @@ const (
 	DataSourceFile DataSourceKind = "file"
 )
 
+// FileDirection distinguishes the two things a DataSourceFile parameter can
+// mean for Convex: a target Convex mints fresh right before calling the
+// operator (DirectionUpload, e.g. backup_state's uploadUrl) or a value
+// Convex resolves from another parameter's already-selected row
+// (DirectionDownload, e.g. profileDownloadUrl, resolved from profileName).
+type FileDirection string
+
+const (
+	DirectionUpload   FileDirection = "upload"
+	DirectionDownload FileDirection = "download"
+)
+
 // DataSource describes where a Parameter's value comes from. The zero value
 // (Kind == "") is treated as DataSourceStatic by callers that care — but
 // Template/Operation literals should set Kind explicitly for clarity.
@@ -85,6 +97,19 @@ type DataSource struct {
 	// SourceKey names which Convex-side source resolves this parameter's
 	// options. Only meaningful when Kind == DataSourceDynamic.
 	SourceKey string `json:"sourceKey,omitempty"`
+
+	// Handler names the Convex-side handler (see ai-cloud-v2's
+	// convex/selectOptions/handlers.ts) responsible for this file
+	// parameter — minting an upload target (Direction == DirectionUpload)
+	// or resolving a selected row's stored payload into a URL (Direction
+	// == DirectionDownload). Only meaningful when Kind == DataSourceFile.
+	Handler string `json:"handler,omitempty"`
+	// Direction — see FileDirection. Only meaningful when Kind == DataSourceFile.
+	Direction FileDirection `json:"direction,omitempty"`
+	// SourceParam names another Parameter.Key in the same Parameters list
+	// whose resolved value is a selectOptions row id to resolve via
+	// Handler. Only meaningful when Direction == DirectionDownload.
+	SourceParam string `json:"sourceParam,omitempty"`
 }
 
 // VisibilityOp is the comparison a Visibility condition applies to the
@@ -191,7 +216,52 @@ const (
 	// AdditionalInfoPlain is informational — display as-is, no special
 	// handling.
 	AdditionalInfoPlain AdditionalInfoType = "plain"
+	// AdditionalInfoInsertRow, AdditionalInfoUpdateRow, and
+	// AdditionalInfoRemoveRow are processing directives, not display
+	// values: Convex consumes them server-side against a named
+	// row-directive target (see ai-cloud-v2's
+	// convex/rowDirectives/registry.ts) and strips them before returning a
+	// result to the frontend. See InsertRowValue, UpdateRowValue,
+	// RemoveRowValue for each one's Value payload shape.
+	AdditionalInfoInsertRow AdditionalInfoType = "insert_row"
+	AdditionalInfoUpdateRow AdditionalInfoType = "update_row"
+	AdditionalInfoRemoveRow AdditionalInfoType = "remove_row"
 )
+
+// InsertRowValue is the Value payload for an AdditionalInfo entry of Type
+// AdditionalInfoInsertRow — a request for Convex to create a row via a
+// named row-directive target (see ai-cloud-v2's
+// convex/rowDirectives/registry.ts). This directive system is not specific
+// to any one table or feature — Table names which registered target
+// handles it; selectOptions is just its first target. Fields is opaque at
+// this layer (any JSON value) — only the named target's own implementation
+// knows how to interpret it, and Convex validates it there, not here.
+// Convex supplies everything it alone holds (the owning userId, any
+// credential-derived data like an R2 key) itself and is never asked to
+// trust operator-supplied identity for those.
+type InsertRowValue struct {
+	Table  string `json:"table"`
+	Fields any    `json:"fields"`
+}
+
+// UpdateRowValue is the Value payload for AdditionalInfoUpdateRow. RowID
+// must be a row id the operation itself received back as one of its own
+// params (the same row-id-as-param-value pattern profileName already uses
+// for restore, see browserParameters) — the operator never invents one,
+// and the target's own mutation re-checks ownership before touching
+// anything regardless.
+type UpdateRowValue struct {
+	Table  string `json:"table"`
+	RowID  string `json:"rowId"`
+	Fields any    `json:"fields"`
+}
+
+// RemoveRowValue is the Value payload for AdditionalInfoRemoveRow — same
+// RowID sourcing/ownership rules as UpdateRowValue.
+type RemoveRowValue struct {
+	Table string `json:"table"`
+	RowID string `json:"rowId"`
+}
 
 // AdditionalInfo is one named value an Operation's Run produces. Unlike
 // Parameter (an input schema), there's no separate static declaration of

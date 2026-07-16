@@ -62,12 +62,12 @@ var Firefox = Template{
 			},
 		}, nil
 	},
-	Operations:  []Operation{backupStateFunction(".mozilla/firefox", templateIDFirefox)},
+	Operations:  []Operation{backupStateFunction(".mozilla/firefox", templateIDFirefox, profileSourceKeyFirefox)},
 	Description: "Full Firefox browser accessible via web interface",
 	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDFirefox,
 	Icon:        "🦊",
 	Name:        "Firefox Browser",
 	Version:     "1.1.0",
-	Parameters:  browserParameters("profiles_" + templateIDFirefox),
+	Parameters:  browserParameters(profileSourceKeyFirefox),
 }

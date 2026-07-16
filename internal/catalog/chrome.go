@@ -71,12 +71,12 @@ var Chrome = Template{
 			},
 		}, nil
 	},
-	Operations:  []Operation{backupStateFunction(".config/google-chrome", templateIDChrome)},
+	Operations:  []Operation{backupStateFunction(".config/google-chrome", templateIDChrome, profileSourceKeyChrome)},
 	Description: "Full Chrome browser accessible via web interface",
 	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDChrome,
 	Icon:        "🌐",
 	Name:        "Chrome Browser",
 	Version:     "1.1.0",
-	Parameters:  browserParameters("profiles_" + templateIDChrome),
+	Parameters:  browserParameters(profileSourceKeyChrome),
 }
