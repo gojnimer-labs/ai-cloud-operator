@@ -64,7 +64,16 @@ func TestVerifyRejectsTamperedSignature(t *testing.T) {
 		Name:      name,
 		Exp:       time.Now().Add(time.Minute).Unix(),
 	})
-	tampered := token[:len(token)-1] + "x"
+	// Flipping to a fixed replacement char is a no-op ~1/64 of the time (the
+	// real last byte, from base64.RawURLEncoding's 64-char alphabet, already
+	// happens to be that char) — flaky rather than a real assertion. Pick
+	// whichever of two candidates actually differs from the real last byte,
+	// so the tamper is guaranteed to change the signature every run.
+	replacement := byte('x')
+	if token[len(token)-1] == replacement {
+		replacement = 'y'
+	}
+	tampered := token[:len(token)-1] + string(replacement)
 
 	if _, err := Verify([]byte(testSecret), namespace, name, tampered); err != ErrInvalidSignature {
 		t.Fatalf("expected ErrInvalidSignature, got %v", err)
