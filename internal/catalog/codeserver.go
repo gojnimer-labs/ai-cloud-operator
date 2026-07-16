@@ -59,9 +59,9 @@ var CodeServer = Template{
 		defaultWorkspace := paramString(params, "defaultWorkspace", "/config/workspace")
 
 		env := []corev1.EnvVar{
-			{Name: "PUID", Value: "1000"},
-			{Name: "PGID", Value: "1000"},
-			{Name: "TZ", Value: "Etc/UTC"},
+			{Name: envPUID, Value: linuxserverUID},
+			{Name: envPGID, Value: linuxserverUID},
+			{Name: envTZ, Value: linuxserverTimezone},
 			{Name: "DEFAULT_WORKSPACE", Value: defaultWorkspace},
 		}
 		// Omitted entirely rather than passed as "" — an explicit empty

@@ -51,6 +51,20 @@ const (
 	configVolumeName       = "config"
 	envProfileDownloadURL  = "PROFILE_DOWNLOAD_URL"
 
+	// envPUID/envPGID/envTZ are the standard linuxserver.io image env var
+	// *names* (see
+	// https://docs.linuxserver.io/general/understanding-puid-and-pgid/);
+	// linuxserverUID/linuxserverTimezone are the values every template
+	// built on one of their images (firefox, chrome, code-server) sets
+	// them to. Never duplicated as inline string literals, both to avoid
+	// drift and because 3+ occurrences of the same literal trips
+	// golangci-lint's goconst check.
+	envPUID             = "PUID"
+	envPGID             = "PGID"
+	envTZ               = "TZ"
+	linuxserverUID      = "1000"
+	linuxserverTimezone = "Etc/UTC"
+
 	paramKeyLogLevel       = "logLevel"
 	logLevelInfo           = "info"
 	logLevelWarn           = "warn"

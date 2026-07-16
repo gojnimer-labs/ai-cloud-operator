@@ -33,9 +33,9 @@ var Firefox = Template{
 			Containers: []corev1.Container{
 				{
 					Env: []corev1.EnvVar{
-						{Name: "PUID", Value: "1000"},
-						{Name: "PGID", Value: "1000"},
-						{Name: "TZ", Value: "Etc/UTC"},
+						{Name: envPUID, Value: linuxserverUID},
+						{Name: envPGID, Value: linuxserverUID},
+						{Name: envTZ, Value: linuxserverTimezone},
 					},
 					Image:         "linuxserver/firefox:latest",
 					LivenessProbe: browserProbe(30),
