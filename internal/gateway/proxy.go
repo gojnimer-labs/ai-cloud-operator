@@ -63,8 +63,21 @@ type ServiceProxy struct {
 
 // NewServiceProxy builds a ServiceProxy that authenticates to the API server
 // using cfg — the same *rest.Config the manager already uses for every other
-// client-go call, so TLS/auth is handled identically.
+// client-go call, so TLS/auth is handled identically, with one deliberate
+// difference: this transport forces HTTP/1.1. The API server's
+// services/proxy subresource (used below) is known to reset the connection
+// mid-response over HTTP/2 for anything beyond small/simple payloads —
+// surfaced here as "stream error: ...; INTERNAL_ERROR; received from peer"
+// on every request once a workload's response gets large enough (code-server
+// serving its editor UI/static assets hits this consistently; nginx's
+// one-line demo page and firefox/chrome's much simpler frames didn't).
+// cfg is copied first — it's the manager's own shared config (see
+// cmd/main.go), and forcing HTTP/1.1 on it directly would also downgrade
+// every other client-go call built from it (watches, the controller's own
+// client), not just this proxy's.
 func NewServiceProxy(k8sClient client.Client, cfg *rest.Config, namespace string) (*ServiceProxy, error) {
+	cfg = rest.CopyConfig(cfg)
+	cfg.NextProtos = []string{"http/1.1"}
 	transport, err := rest.TransportFor(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("building api-server transport: %w", err)

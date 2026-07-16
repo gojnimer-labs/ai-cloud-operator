@@ -291,3 +291,47 @@ func TestHandlerServesFailedPageWhenWorkloadFailed(t *testing.T) {
 		t.Fatalf("expected self-refreshing meta tag even on the failed page, got: %s", body)
 	}
 }
+
+// TestNewServiceProxyForcesHTTP1 guards against a real production incident:
+// the API server's services/proxy subresource resets the connection
+// mid-response over HTTP/2 for anything beyond small/simple payloads
+// (observed as "stream error: ...; INTERNAL_ERROR; received from peer" on
+// every request once a proxied workload's response got large enough — a
+// tiny demo page didn't trigger it, a full editor UI's static assets did).
+// The TLS server here has HTTP/2 explicitly enabled so a client with no
+// NextProtos override would negotiate it — proving this is actually
+// NewServiceProxy's override taking effect, not just an absence of h2 on
+// the server side.
+func TestNewServiceProxyForcesHTTP1(t *testing.T) {
+	var negotiatedProto string
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		negotiatedProto = r.Proto
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	fakeClient := fake.NewClientBuilder().Build()
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{
+		Host:            server.URL,
+		TLSClientConfig: rest.TLSClientConfig{Insecure: true},
+	}, namespace)
+	if err != nil {
+		t.Fatalf("NewServiceProxy: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	resp, err := proxy.transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if negotiatedProto != "HTTP/1.1" {
+		t.Fatalf("expected NewServiceProxy's transport to force HTTP/1.1 against an HTTP/2-capable server, got %q", negotiatedProto)
+	}
+}
