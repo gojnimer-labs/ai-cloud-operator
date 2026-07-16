@@ -270,7 +270,7 @@ func TestBrowserProfileDownloadURLDeclaresDownloadDirection(t *testing.T) {
 		tmpl, _ := Get(id)
 		source := findParameter(t, tmpl.Parameters, "profileDownloadUrl").DataSource
 		if source.Kind != DataSourceFile || source.Direction != DirectionDownload ||
-			source.Handler != selectOptionsHandlerR2 || source.SourceParam != "profileName" {
+			source.Handler != selectOptionsHandlerR2 || source.SourceParam != paramKeyProfileName {
 			t.Fatalf("%s: unexpected profileDownloadUrl data source: %+v", id, source)
 		}
 	}
@@ -284,8 +284,8 @@ func TestFirefoxAndChromeUseDistinctProfileSourceKeys(t *testing.T) {
 	firefox, _ := Get(templateIDFirefox)
 	chrome, _ := Get(templateIDChrome)
 
-	firefoxKey := findParameter(t, firefox.Parameters, "profileName").DataSource.SourceKey
-	chromeKey := findParameter(t, chrome.Parameters, "profileName").DataSource.SourceKey
+	firefoxKey := findParameter(t, firefox.Parameters, paramKeyProfileName).DataSource.SourceKey
+	chromeKey := findParameter(t, chrome.Parameters, paramKeyProfileName).DataSource.SourceKey
 
 	if firefoxKey == "" || chromeKey == "" {
 		t.Fatalf("expected both templates to declare a profileName sourceKey, got firefox=%q chrome=%q", firefoxKey, chromeKey)

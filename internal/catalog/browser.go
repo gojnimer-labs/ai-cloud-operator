@@ -58,6 +58,7 @@ const (
 	paramKeyUploadURL      = "uploadUrl"
 	paramKeyRestoreProfile = "restoreProfile"
 	paramKeyLabel          = "label"
+	paramKeyProfileName    = "profileName"
 
 	// selectOptionsHandlerR2 names the Convex-side handler (see
 	// ai-cloud-v2's convex/selectOptions/handlers.ts) that knows how to
@@ -85,7 +86,7 @@ const (
 func browserParameters(profileSourceKey string) []Parameter {
 	return []Parameter{
 		{
-			Key:         "profileName",
+			Key:         paramKeyProfileName,
 			Label:       "Profile name",
 			Description: "Identifies which saved profile to restore, if any.",
 			// The value is a selectOptions row id, not a literal profile name —
@@ -116,7 +117,7 @@ func browserParameters(profileSourceKey string) []Parameter {
 				Kind:        DataSourceFile,
 				Handler:     selectOptionsHandlerR2,
 				Direction:   DirectionDownload,
-				SourceParam: "profileName",
+				SourceParam: paramKeyProfileName,
 			},
 			Required: false,
 			// Only meaningful when a restore was actually requested — machine
