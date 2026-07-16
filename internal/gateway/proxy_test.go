@@ -329,7 +329,7 @@ func TestNewServiceProxyForcesHTTP1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if negotiatedProto != "HTTP/1.1" {
 		t.Fatalf("expected NewServiceProxy's transport to force HTTP/1.1 against an HTTP/2-capable server, got %q", negotiatedProto)
