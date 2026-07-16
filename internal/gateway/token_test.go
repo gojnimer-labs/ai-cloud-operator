@@ -17,6 +17,7 @@ limitations under the License.
 package gateway
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,16 +65,22 @@ func TestVerifyRejectsTamperedSignature(t *testing.T) {
 		Name:      name,
 		Exp:       time.Now().Add(time.Minute).Unix(),
 	})
-	// Flipping to a fixed replacement char is a no-op ~1/64 of the time (the
-	// real last byte, from base64.RawURLEncoding's 64-char alphabet, already
-	// happens to be that char) — flaky rather than a real assertion. Pick
-	// whichever of two candidates actually differs from the real last byte,
-	// so the tamper is guaranteed to change the signature every run.
+	// Flip the signature segment's *first* character, not the token's last
+	// character. SHA-256 is 32 bytes, not a multiple of 3, so
+	// base64.RawURLEncoding's final character of that segment only carries
+	// 4 significant bits — several different characters there decode to
+	// the identical byte, so even a guaranteed-different *character* can
+	// be a no-op at the decoded-*byte* level (this is what made the test
+	// flaky: ~1/64 of runs picked a "different" char that still decoded
+	// the same). A character well inside a full 3-byte group has no such
+	// ambiguity — any different character there unambiguously changes the
+	// decoded bytes.
+	sigStart := strings.IndexByte(token, '.') + 1
 	replacement := byte('x')
-	if token[len(token)-1] == replacement {
+	if token[sigStart] == replacement {
 		replacement = 'y'
 	}
-	tampered := token[:len(token)-1] + string(replacement)
+	tampered := token[:sigStart] + string(replacement) + token[sigStart+1:]
 
 	if _, err := Verify([]byte(testSecret), namespace, name, tampered); err != ErrInvalidSignature {
 		t.Fatalf("expected ErrInvalidSignature, got %v", err)
