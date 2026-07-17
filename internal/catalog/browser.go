@@ -241,8 +241,20 @@ func backupStateFunction(profilePath, containerName, profileSourceKey string) Op
 			if uploadURL == "" {
 				return OperationResult{}, fmt.Errorf("uploadUrl is required")
 			}
+			// tar exiting 1 means "some files changed while being read" (GNU
+			// tar's own distinction from a fatal error, exit 2+) — an
+			// unavoidable race with the browser actively writing to its
+			// profile's SQLite/IDB files, not a failed backup. Only treat
+			// exit codes above 1 as fatal; `|| { ... }` (not `set -e`
+			// directly on the tar line) is what lets the script inspect
+			// that exit code instead of aborting on any nonzero status.
 			const script = `set -e
-tar czf /tmp/backup.tar.gz -C /config "$1"
+tar czf /tmp/backup.tar.gz -C /config "$1" || {
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    exit "$rc"
+  fi
+}
 curl -sf -X PUT --upload-file /tmp/backup.tar.gz "$2"
 rm -f /tmp/backup.tar.gz
 `
