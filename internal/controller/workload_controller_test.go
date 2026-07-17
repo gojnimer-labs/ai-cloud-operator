@@ -430,6 +430,109 @@ var _ = Describe("Workload Controller", func() {
 		})
 	})
 
+	Context("When a Workload is suspended", func() {
+		const (
+			resourceName      = "test-resource-suspend"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+			}
+			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+		})
+
+		It("scales the Deployment to 0 and sets Phase Stopped, then rolls back to Running when un-suspended", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			notifier := &fakeNotifier{}
+			controllerReconciler := &WorkloadReconciler{
+				Client:       k8sClient,
+				ConvexClient: notifier,
+				Scheme:       k8sClient.Scheme(),
+			}
+
+			// Get to Running first, same as the "reaches Running" test above.
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			var deployment appsv1.Deployment
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &deployment)).To(Succeed())
+			deployment.Status.Replicas = 1
+			deployment.Status.ReadyReplicas = 1
+			Expect(k8sClient.Status().Update(ctx, &deployment)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			var workload appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			Expect(workload.Status.Phase).To(Equal(phaseRunning))
+
+			// Suspend: Spec.Suspended=true bumps Generation. reconcileDeployment
+			// must scale the Deployment down to 0 replicas immediately, even
+			// before ReadyReplicas has caught up.
+			workload.Spec.Suspended = true
+			Expect(k8sClient.Update(ctx, &workload)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &deployment)).To(Succeed())
+			Expect(*deployment.Spec.Replicas).To(Equal(int32(0)))
+
+			// Simulate the Deployment actually finishing its scale-down to 0
+			// ready replicas (envtest runs no real deployment controller).
+			deployment.Status.Replicas = 0
+			deployment.Status.ReadyReplicas = 0
+			Expect(k8sClient.Status().Update(ctx, &deployment)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			Expect(workload.Status.Phase).To(Equal(phaseStopped))
+
+			report := notifier.lastLifecycle()
+			Expect(report.phase).To(Equal(lifecyclePhaseStopped))
+
+			// Un-suspend: Spec.Suspended=false bumps Generation again, rolling
+			// the Deployment back up to its normal replica count.
+			workload.Spec.Suspended = false
+			Expect(k8sClient.Update(ctx, &workload)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &deployment)).To(Succeed())
+			Expect(*deployment.Spec.Replicas).To(Equal(int32(1)))
+
+			// Simulate the Deployment scaling back up.
+			deployment.Status.Replicas = 1
+			deployment.Status.ReadyReplicas = 1
+			Expect(k8sClient.Status().Update(ctx, &deployment)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			Expect(workload.Status.Phase).To(Equal(phaseRunning))
+
+			report = notifier.lastLifecycle()
+			Expect(report.phase).To(Equal(lifecyclePhaseActive))
+		})
+	})
+
 	Context("When reconcile fails before ever reaching Running", func() {
 		const (
 			resourceName      = "test-resource-lifecycle-failed"

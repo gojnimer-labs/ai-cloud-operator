@@ -148,6 +148,30 @@ func (wc *WorkloadCreator) Redeploy(ctx context.Context, name string, config map
 	return nil
 }
 
+// SetSuspended patches an existing Workload's Spec.Suspended and lets the
+// reconciler take it from there — same "no Deployment/Service-patch logic
+// needed here" shape as Redeploy: Reconcile's desiredReplicaCount helper
+// (internal/controller/workload_controller.go) picks up the change
+// automatically on the resulting Update event, scaling the backing
+// Deployment to 0 (suspended=true) or back to its normal replica count
+// (suspended=false).
+//
+// Only Spec.Suspended is touched — Name, Namespace, TemplateName, Config,
+// UserID, Subdomain, and every label all stay exactly as they were.
+func (wc *WorkloadCreator) SetSuspended(ctx context.Context, name string, suspended bool) error {
+	var workload appsv1alpha1.Workload
+	if err := wc.client.Get(ctx, client.ObjectKey{Namespace: wc.namespace, Name: name}, &workload); err != nil {
+		return fmt.Errorf("getting workload %q: %w", name, err)
+	}
+
+	workload.Spec.Suspended = suspended
+
+	if err := wc.client.Update(ctx, &workload); err != nil {
+		return fmt.Errorf("updating workload %q: %w", name, err)
+	}
+	return nil
+}
+
 // marshalConfig turns a resolved-parameter-shaped map into the CRD's loose
 // JSON config bag — nil in, nil out (no parameters supplied is valid, not
 // an error; see configToParams in internal/controller for the decode side).

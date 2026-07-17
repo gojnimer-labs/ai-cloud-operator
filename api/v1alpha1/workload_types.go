@@ -72,6 +72,14 @@ type WorkloadSpec struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Config *apiextensionsv1.JSON `json:"config,omitempty"`
+
+	// suspended pauses this workload without destroying it: the reconciler
+	// scales the backing Deployment to 0 replicas (keeping the Service in
+	// place, just unrouted) while suspended is true, and scales it back to
+	// the normal replicas count when flipped back to false. Config, labels,
+	// and everything else about the CR stay exactly as they were.
+	// +optional
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // WorkloadStatus defines the observed state of Workload.

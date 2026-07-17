@@ -234,6 +234,14 @@ spec:
                   actual routing in this POC (HTTPRoute/ingress exposure is deferred) but
                   kept on spec now so wiring it up later doesn't require a breaking CRD change.
                 type: string
+              suspended:
+                description: |-
+                  suspended pauses this workload without destroying it: the reconciler
+                  scales the backing Deployment to 0 replicas (keeping the Service in
+                  place, just unrouted) while suspended is true, and scales it back to
+                  the normal replicas count when flipped back to false. Config, labels,
+                  and everything else about the CR stay exactly as they were.
+                type: boolean
               templateName:
                 description: |-
                   templateName selects a catalog template (e.g. "nginx", "firefox",

@@ -187,6 +187,59 @@ func TestRedeployRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+// TestSetSuspendedOnlyTouchesSpecSuspended mirrors
+// TestRedeployOnlyTouchesSpecConfig's proof for the new stop/resume path:
+// SetSuspended must only ever flip Spec.Suspended, leaving Name and every
+// other field (including Spec.Config and labels) exactly as they were.
+func TestSetSuspendedOnlyTouchesSpecSuspended(t *testing.T) {
+	c, _ := newFakeClient(t)
+	creator := provisioning.NewWorkloadCreator(c, testNamespace)
+
+	original := &appsv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testExistingName,
+			Namespace: testNamespace,
+			Labels:    map[string]string{"keep": "me"},
+		},
+		Spec: appsv1alpha1.WorkloadSpec{
+			TemplateName: testTemplateID,
+			UserID:       "user-1",
+			Subdomain:    testSubdomain,
+		},
+	}
+	if err := c.Create(context.Background(), original); err != nil {
+		t.Fatalf("seeding workload: %v", err)
+	}
+
+	if err := creator.SetSuspended(context.Background(), testExistingName, true); err != nil {
+		t.Fatalf("set suspended: %v", err)
+	}
+
+	var updated appsv1alpha1.Workload
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testNamespace, Name: testExistingName}, &updated); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !updated.Spec.Suspended {
+		t.Fatalf("expected Spec.Suspended=true, got %+v", updated.Spec)
+	}
+	if updated.Name != testExistingName || updated.Spec.UserID != "user-1" || updated.Spec.Subdomain != testSubdomain || updated.Spec.TemplateName != testTemplateID {
+		t.Fatalf("expected only Spec.Suspended to change, got %+v", updated.Spec)
+	}
+	if updated.Labels["keep"] != "me" {
+		t.Fatalf("expected existing labels to be untouched, got %+v", updated.Labels)
+	}
+
+	if err := creator.SetSuspended(context.Background(), testExistingName, false); err != nil {
+		t.Fatalf("unset suspended: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testNamespace, Name: testExistingName}, &updated); err != nil {
+		t.Fatalf("get after unsuspend: %v", err)
+	}
+	if updated.Spec.Suspended {
+		t.Fatalf("expected Spec.Suspended=false after unsuspend, got %+v", updated.Spec)
+	}
+}
+
 func TestDestroySwallowsNotFound(t *testing.T) {
 	c, _ := newFakeClient(t)
 	destroyer := provisioning.NewWorkloadDestroyer(c, testNamespace)

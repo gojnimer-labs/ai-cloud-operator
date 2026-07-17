@@ -40,6 +40,8 @@ const (
 
 	operationDestroy  = "destroy"
 	operationRedeploy = "redeploy"
+	operationStop     = "stop"
+	operationResume   = "resume"
 
 	lifecyclePhaseFailed = "failed"
 
@@ -295,6 +297,14 @@ func (r *Runnable) processClaimable(ctx context.Context, heartbeatToken string, 
 //     active-report call site (see workload_controller.go) — the exact same
 //     mechanism a fresh create's first Running transition uses, no separate
 //     signal needed.
+//   - stop/resume: WorkloadCreator.SetSuspended(ctx, name, operation ==
+//     "stop") flips Spec.Suspended and lets the reconciler's
+//     desiredReplicaCount/phaseStopped machinery do the rest. Same immediate
+//     "failed" report on a synchronous SetSuspended error as
+//     destroy/redeploy; on success, status stays "stopping"/"resuming" until
+//     the reconciler's normal Stopped/Running-transition fires the
+//     generalized syncConvexLifecyclePhase call site, same mechanism as
+//     redeploy's "active" report.
 func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken string, pendingOps []PendingOperation) {
 	if r.creator == nil && r.destroyer == nil {
 		return
@@ -335,6 +345,16 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 				log.Error(err, "failed to redeploy claimed workload", "name", op.Name)
 				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error()); reportErr != nil {
 					log.Error(reportErr, "failed to report redeploy failure", "name", op.Name)
+				}
+			}
+		case operationStop, operationResume:
+			if r.creator == nil {
+				continue
+			}
+			if err := r.creator.SetSuspended(ctx, op.Name, op.Operation == operationStop); err != nil {
+				log.Error(err, "failed to set suspended state for claimed workload", "name", op.Name, "operation", op.Operation)
+				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error()); reportErr != nil {
+					log.Error(reportErr, "failed to report stop/resume failure", "name", op.Name)
 				}
 			}
 		default:

@@ -53,12 +53,13 @@ import (
 type WorkloadNotifier interface {
 	UpsertWorkload(ctx context.Context, info convexclient.WorkloadInfo) error
 	RemoveWorkload(ctx context.Context, name, namespace string) error
-	// ReportLifecycle tells Convex a claimed create/redeploy attempt reached
-	// a terminal-for-now state ("active" or "failed", with reason set for
-	// the latter). workloadID (the apps.aicloud.dev/workload-id label's
-	// value, when present) is passed alongside name so Convex can still
-	// resolve the row even before this Workload's first successful upsert
-	// has recorded its name — see setFailed and syncConvexLifecycleActive.
+	// ReportLifecycle tells Convex a claimed create/redeploy/stop/resume
+	// attempt reached a terminal-for-now state ("active", "stopped", or
+	// "failed", with reason set for the latter). workloadID (the
+	// apps.aicloud.dev/workload-id label's value, when present) is passed
+	// alongside name so Convex can still resolve the row even before this
+	// Workload's first successful upsert has recorded its name — see
+	// setFailed and syncConvexLifecyclePhase.
 	ReportLifecycle(ctx context.Context, name, workloadID, phase, reason string) error
 }
 
@@ -86,12 +87,15 @@ const (
 	phaseDeploying = "Deploying"
 	phaseRunning   = "Running"
 	phaseFailed    = "Failed"
+	phaseStopped   = "Stopped"
 
-	// lifecyclePhaseActive/lifecyclePhaseFailed are the phase values sent to
-	// WorkloadNotifier.ReportLifecycle — see convex/workloads/mutations.ts's
-	// reportLifecycle in ai-cloud-v2 for the Convex side that consumes them.
-	lifecyclePhaseActive = "active"
-	lifecyclePhaseFailed = "failed"
+	// lifecyclePhaseActive/lifecyclePhaseFailed/lifecyclePhaseStopped are the
+	// phase values sent to WorkloadNotifier.ReportLifecycle — see
+	// convex/workloads/mutations.ts's reportLifecycle in ai-cloud-v2 for the
+	// Convex side that consumes them.
+	lifecyclePhaseActive  = "active"
+	lifecyclePhaseFailed  = "failed"
+	lifecyclePhaseStopped = "stopped"
 
 	defaultReplicas      = int32(1)
 	defaultContainerPort = int32(8080)
@@ -168,10 +172,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, fmt.Errorf("getting deployment for status: %w", err)
 	}
 
-	desiredReplicas := defaultReplicas
-	if workload.Spec.Replicas != nil {
-		desiredReplicas = *workload.Spec.Replicas
-	}
+	desiredReplicas := desiredReplicaCount(&workload)
 
 	workload.Status.ReadyReplicas = deployment.Status.ReadyReplicas
 	workload.Status.ObservedGeneration = workload.Generation
@@ -182,17 +183,25 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// lifecycleSynced defaults to true (nothing to report yet) and is only
-	// actually attempted once the Deployment reaches Running — there is no
-	// "active" to report before then. See syncConvexLifecycleActive.
+	// actually attempted once the Deployment settles into Running or
+	// Stopped — there is nothing to report before then. See
+	// syncConvexLifecyclePhase.
 	lifecycleSynced := true
 
-	if desiredReplicas > 0 && deployment.Status.ReadyReplicas >= desiredReplicas {
+	switch {
+	case workload.Spec.Suspended && deployment.Status.ReadyReplicas == 0:
+		workload.Status.Phase = phaseStopped
+		readyCondition.Status = metav1.ConditionFalse
+		readyCondition.Reason = "WorkloadSuspended"
+		readyCondition.Message = "workload is intentionally stopped (spec.suspended=true)"
+		lifecycleSynced = r.syncConvexLifecyclePhase(ctx, &workload, lifecyclePhaseStopped)
+	case desiredReplicas > 0 && deployment.Status.ReadyReplicas >= desiredReplicas:
 		workload.Status.Phase = phaseRunning
 		readyCondition.Status = metav1.ConditionTrue
 		readyCondition.Reason = "DeploymentReady"
 		readyCondition.Message = "backing Deployment has reached the desired ready replica count"
-		lifecycleSynced = r.syncConvexLifecycleActive(ctx, &workload)
-	} else {
+		lifecycleSynced = r.syncConvexLifecyclePhase(ctx, &workload, lifecyclePhaseActive)
+	default:
 		workload.Status.Phase = phaseDeploying
 		readyCondition.Status = metav1.ConditionFalse
 		readyCondition.Reason = "DeploymentProgressing"
@@ -205,7 +214,8 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, fmt.Errorf("updating workload status: %w", err)
 	}
 
-	if workload.Status.Phase != phaseRunning || !convexSynced || !lifecycleSynced {
+	settled := workload.Status.Phase == phaseRunning || workload.Status.Phase == phaseStopped
+	if !settled || !convexSynced || !lifecycleSynced {
 		log.Info("workload not yet ready to stop requeueing", "phase", workload.Status.Phase, "convexSynced", convexSynced, "lifecycleSynced", lifecycleSynced)
 		return ctrl.Result{RequeueAfter: statusRequeueInterval}, nil
 	}
@@ -271,20 +281,22 @@ func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, workload *appsv
 	return err
 }
 
-// syncConvexLifecycleActive tells Convex this workload reached Running for
-// the current generation, and reports whether Convex is now up to date —
-// same idiom as syncConvex/ConvexSynced (condition's own ObservedGeneration
-// tracks "already reported for this generation," rather than a bespoke
-// status field), kept as its own condition/call site because setFailed
-// returns immediately and never reaches this point — "active" and "failed"
-// are reported from two genuinely different places in Reconcile, not a
-// shared helper.
+// syncConvexLifecyclePhase tells Convex this workload reached phase
+// ("active" or "stopped") for the current generation, and reports whether
+// Convex is now up to date — same idiom as syncConvex/ConvexSynced
+// (condition's own ObservedGeneration tracks "already reported for this
+// generation," rather than a bespoke status field), keyed by Generation so a
+// Suspended flip (which bumps Generation the same as any other spec change)
+// naturally triggers a fresh sync. Kept as its own condition/call site,
+// separate from setFailed, because setFailed returns immediately and never
+// reaches this point — "active"/"stopped" and "failed" are reported from
+// genuinely different places in Reconcile, not a shared helper.
 //
 // Best-effort in the same sense as syncConvex: a failure here must never
 // gate the Ready condition, but the caller retries on every subsequent
 // reconcile (via the RequeueAfter this method's false return triggers)
 // until it succeeds.
-func (r *WorkloadReconciler) syncConvexLifecycleActive(ctx context.Context, workload *appsv1alpha1.Workload) bool {
+func (r *WorkloadReconciler) syncConvexLifecyclePhase(ctx context.Context, workload *appsv1alpha1.Workload, phase string) bool {
 	if existing := apimeta.FindStatusCondition(workload.Status.Conditions, conditionTypeConvexLifecycleSynced); existing != nil &&
 		existing.Status == metav1.ConditionTrue && existing.ObservedGeneration == workload.Generation {
 		return true
@@ -294,14 +306,14 @@ func (r *WorkloadReconciler) syncConvexLifecycleActive(ctx context.Context, work
 		Type:               conditionTypeConvexLifecycleSynced,
 		ObservedGeneration: workload.Generation,
 	}
-	if err := r.notifyLifecycle(ctx, workload, lifecyclePhaseActive, ""); err != nil {
+	if err := r.notifyLifecycle(ctx, workload, phase, ""); err != nil {
 		condition.Status = metav1.ConditionFalse
 		condition.Reason = "NotifyFailed"
 		condition.Message = err.Error()
 	} else {
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = "Notified"
-		condition.Message = "Convex has been told this workload is active"
+		condition.Message = fmt.Sprintf("Convex has been told this workload is %s", phase)
 	}
 	apimeta.SetStatusCondition(&workload.Status.Conditions, condition)
 	return condition.Status == metav1.ConditionTrue
@@ -365,7 +377,7 @@ func (r *WorkloadReconciler) setFailed(ctx context.Context, workload *appsv1alph
 	// error return already triggers the manager's normal backoff-requeue,
 	// which retries this call naturally on the next reconcile attempt if it
 	// didn't land — there's no separate condition tracked for it the way
-	// syncConvexLifecycleActive tracks the success path.
+	// syncConvexLifecyclePhase tracks the success path.
 	_ = r.notifyLifecycle(ctx, workload, lifecyclePhaseFailed, reconcileErr.Error())
 
 	return ctrl.Result{}, reconcileErr
@@ -443,11 +455,24 @@ func configToParams(config *apiextensionsv1.JSON) (map[string]any, error) {
 	return params, nil
 }
 
-func (r *WorkloadReconciler) reconcileDeployment(ctx context.Context, workload *appsv1alpha1.Workload, selectorLabels, objectLabels map[string]string, rendered catalog.Rendered) error {
-	replicas := defaultReplicas
-	if workload.Spec.Replicas != nil {
-		replicas = *workload.Spec.Replicas
+// desiredReplicaCount is the single source of truth for how many replicas
+// the backing Deployment should run, shared by reconcileDeployment (what
+// actually gets applied) and Reconcile's own status/phase calc — so the two
+// can never silently diverge on suspend-awareness. A suspended workload
+// always wants 0 replicas, overriding Spec.Replicas entirely; otherwise it's
+// today's existing Spec.Replicas-defaulted-to-defaultReplicas logic.
+func desiredReplicaCount(workload *appsv1alpha1.Workload) int32 {
+	if workload.Spec.Suspended {
+		return 0
 	}
+	if workload.Spec.Replicas != nil {
+		return *workload.Spec.Replicas
+	}
+	return defaultReplicas
+}
+
+func (r *WorkloadReconciler) reconcileDeployment(ctx context.Context, workload *appsv1alpha1.Workload, selectorLabels, objectLabels map[string]string, rendered catalog.Rendered) error {
+	replicas := desiredReplicaCount(workload)
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
