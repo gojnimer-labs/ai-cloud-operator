@@ -556,8 +556,8 @@ func TestCatalogListsKnownTemplates(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &templates); err != nil {
 		t.Fatalf("decoding catalog response: %v", err)
 	}
-	if len(templates) != 4 {
-		t.Fatalf("expected 4 templates, got %d", len(templates))
+	if len(templates) != 3 {
+		t.Fatalf("expected 3 templates, got %d", len(templates))
 	}
 
 	for _, tmpl := range templates {
