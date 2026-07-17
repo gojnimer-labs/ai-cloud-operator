@@ -43,6 +43,7 @@ import (
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/podexec"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/provisioning"
 )
 
 // TokenGetter returns the deploy token currently expected from callers.
@@ -82,6 +83,8 @@ type Server struct {
 	gatewayVerifier GatewayVerifier
 	proxy           *gateway.ServiceProxy
 	podExecutor     catalog.PodExecutor
+	creator         *provisioning.WorkloadCreator
+	destroyer       *provisioning.WorkloadDestroyer
 	// namespace is the single, fixed WORKLOAD_NAMESPACE every workload this
 	// operator manages lives in — an install-time config value, not
 	// something the caller sends per-request.
@@ -94,10 +97,12 @@ type Server struct {
 // Workload custom resources, token to authenticate Convex's management
 // calls, gatewaySecret/verifier/proxy to authenticate and serve end-user
 // gateway requests, podExecutor to run a workload's Operations (see
-// handleRunFunction), and namespace as the single fixed namespace every
-// workload gets deployed into.
-func New(c client.Client, listenAddr string, token TokenGetter, gatewaySecret []byte, verifier GatewayVerifier, proxy *gateway.ServiceProxy, podExecutor catalog.PodExecutor, namespace string) *Server {
-	return &Server{client: c, listenAddr: listenAddr, token: token, gatewaySecret: gatewaySecret, gatewayVerifier: verifier, proxy: proxy, podExecutor: podExecutor, namespace: namespace}
+// handleRunFunction), creator/destroyer to actually create/delete Workload
+// CRs (shared with internal/convexclient/runnable.go's claim-consumption
+// loop — see internal/provisioning), and namespace as the single fixed
+// namespace every workload gets deployed into.
+func New(c client.Client, listenAddr string, token TokenGetter, gatewaySecret []byte, verifier GatewayVerifier, proxy *gateway.ServiceProxy, podExecutor catalog.PodExecutor, creator *provisioning.WorkloadCreator, destroyer *provisioning.WorkloadDestroyer, namespace string) *Server {
+	return &Server{client: c, listenAddr: listenAddr, token: token, gatewaySecret: gatewaySecret, gatewayVerifier: verifier, proxy: proxy, podExecutor: podExecutor, creator: creator, destroyer: destroyer, namespace: namespace}
 }
 
 // Start implements manager.Runnable. It blocks until ctx is cancelled, then
@@ -357,19 +362,14 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	isTemplateDeploy := req.TemplateName != ""
 	if isTemplateDeploy {
-		tmpl, ok := catalog.Get(req.TemplateName)
-		if !ok {
-			log.Info("handleDeploy: unknown template", "templateName", req.TemplateName)
-			http.Error(w, fmt.Sprintf("unknown template %q", req.TemplateName), http.StatusBadRequest)
-			return
-		}
+		// Unknown-template and invalid-config rejection both happen inside
+		// WorkloadCreator.Create below (ErrUnknownTemplate/ErrInvalidConfig)
+		// — checked here only once, rather than duplicated, since Create is
+		// also the claim-consumption loop's entry point and must reject the
+		// same way there. userId has no catalog-side validation of its own,
+		// so it's still cheapest to check directly here.
 		if req.UserID == "" {
 			http.Error(w, "userId is required for a template deploy", http.StatusBadRequest)
-			return
-		}
-		if _, err := catalog.ResolveParams(tmpl.Parameters, req.Config); err != nil {
-			log.Error(err, "handleDeploy: resolving template parameters failed", "templateName", req.TemplateName)
-			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	} else {
@@ -399,15 +399,6 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		"name", req.Name, "namespace", s.namespace, "templateName", req.TemplateName)
 
 	ctx := r.Context()
-	var configRaw *apiextensionsv1.JSON
-	if req.Config != nil {
-		raw, err := json.Marshal(req.Config)
-		if err != nil {
-			http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		configRaw = &apiextensionsv1.JSON{Raw: raw}
-	}
 
 	var workload *appsv1alpha1.Workload
 	if isTemplateDeploy {
@@ -422,23 +413,34 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		// is always Create, never an update-in-place: two deploys with
 		// identical (userId, templateName) always produce two separate
 		// Workloads.
-		workload = &appsv1alpha1.Workload{
-			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: req.TemplateName + "-",
-				Namespace:    s.namespace,
-			},
-			Spec: appsv1alpha1.WorkloadSpec{
-				TemplateName: req.TemplateName,
-				UserID:       req.UserID,
-				Config:       configRaw,
-			},
-		}
-		if err := s.client.Create(ctx, workload); err != nil {
-			log.Error(err, "handleDeploy: failed to create workload", "templateName", req.TemplateName)
-			http.Error(w, "failed to create workload: "+err.Error(), http.StatusInternalServerError)
+		//
+		// workloadID is always empty here: the manual /workloads HTTP path
+		// has no Convex row to correlate this create with (see
+		// internal/provisioning.WorkloadCreator.Create), unlike the
+		// claim-consumption loop in internal/convexclient/runnable.go.
+		var err error
+		workload, err = s.creator.Create(ctx, "", req.TemplateName, req.UserID, req.Subdomain, req.Config)
+		if err != nil {
+			switch {
+			case errors.Is(err, provisioning.ErrUnknownTemplate), errors.Is(err, provisioning.ErrInvalidConfig):
+				log.Info("handleDeploy: rejected by WorkloadCreator", "templateName", req.TemplateName, "error", err.Error())
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			default:
+				log.Error(err, "handleDeploy: failed to create workload", "templateName", req.TemplateName)
+				http.Error(w, "failed to create workload: "+err.Error(), http.StatusInternalServerError)
+			}
 			return
 		}
 	} else {
+		var configRaw *apiextensionsv1.JSON
+		if req.Config != nil {
+			raw, err := json.Marshal(req.Config)
+			if err != nil {
+				http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			configRaw = &apiextensionsv1.JSON{Raw: raw}
+		}
 		workload = &appsv1alpha1.Workload{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      req.Name,
@@ -495,17 +497,9 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	namespace := s.namespace
 	name := r.PathValue("name")
 
-	workload := &appsv1alpha1.Workload{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-	}
-	if err := s.client.Delete(r.Context(), workload); err != nil {
-		if apierrors.IsNotFound(err) {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	if err := s.destroyer.Destroy(r.Context(), name); err != nil {
 		http.Error(w, "failed to delete workload: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

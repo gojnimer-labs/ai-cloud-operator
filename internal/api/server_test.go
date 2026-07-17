@@ -38,6 +38,7 @@ import (
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/provisioning"
 )
 
 const (
@@ -132,7 +133,9 @@ func newTestServer(t *testing.T) (*Server, client.Client, *fakeGatewayVerifier, 
 
 	verifier := newFakeGatewayVerifier()
 	executor := &fakePodExecutor{}
-	s := New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, executor, testServiceNS)
+	creator := provisioning.NewWorkloadCreator(c, testServiceNS)
+	destroyer := provisioning.NewWorkloadDestroyer(c, testServiceNS)
+	s := New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, executor, creator, destroyer, testServiceNS)
 	return s, c, verifier, executor
 }
 
@@ -351,7 +354,9 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 		t.Fatalf("NewServiceProxy: %v", err)
 	}
 	verifier := newFakeGatewayVerifier()
-	return New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, &fakePodExecutor{}, testServiceNS), verifier
+	creator := provisioning.NewWorkloadCreator(c, testServiceNS)
+	destroyer := provisioning.NewWorkloadDestroyer(c, testServiceNS)
+	return New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, &fakePodExecutor{}, creator, destroyer, testServiceNS), verifier
 }
 
 func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {

@@ -124,47 +124,298 @@ type heartbeatRequest struct {
 	Name string `json:"name"`
 }
 
+// claimableWorkloadWire/pendingOperationWire are heartbeatResponse's list
+// element shapes, kept private since callers get the public
+// ClaimableWorkload/PendingOperation instead (see Heartbeat).
+type claimableWorkloadWire struct {
+	WorkloadID string `json:"workloadId"`
+	TemplateID string `json:"templateId"`
+}
+
+type pendingOperationWire struct {
+	WorkloadID string `json:"workloadId"`
+	Operation  string `json:"operation"`
+}
+
+type heartbeatResponse struct {
+	Claimable         []claimableWorkloadWire `json:"claimable"`
+	PendingOperations []pendingOperationWire  `json:"pendingOperations"`
+}
+
+// ClaimableWorkload is one brand-new, not-yet-assigned workload this
+// operator's tags qualify it to claim — see Client.ClaimWorkload.
+type ClaimableWorkload struct {
+	WorkloadID string
+	TemplateID string
+}
+
+// PendingOperation is one destroy/redeploy request already assigned to this
+// operator (from a prior create), waiting to be claimed — see
+// Client.ClaimOperation. Operation is "destroy" or "redeploy".
+type PendingOperation struct {
+	WorkloadID string
+	Operation  string
+}
+
 // Heartbeat reports liveness to Convex using the previously issued heartbeat
-// token. Returns ErrUnauthorized if Convex rejects the token (401/410),
-// signaling the caller should discard it and re-register.
-func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string) error {
+// token, and returns the work this operator can currently pick up: brand-new
+// requests matching its tags (claimable) and destroy/redeploy requests
+// already assigned to it (pendingOperations) — see
+// internal/convexclient/runnable.go's claim-consumption loop for how both
+// get processed. Returns ErrUnauthorized if Convex rejects the token
+// (401/410), signaling the caller should discard it and re-register.
+func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string) ([]ClaimableWorkload, []PendingOperation, error) {
 	body, err := json.Marshal(heartbeatRequest{Name: c.config.OperatorName})
 	if err != nil {
-		return fmt.Errorf("marshaling heartbeat request: %w", err)
+		return nil, nil, fmt.Errorf("marshaling heartbeat request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/operators/heartbeat", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("building heartbeat request: %w", err)
+		return nil, nil, fmt.Errorf("building heartbeat request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+heartbeatToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("calling heartbeat: %w", err)
+		return nil, nil, fmt.Errorf("calling heartbeat: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return nil
+		var out heartbeatResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return nil, nil, fmt.Errorf("decoding heartbeat response: %w", err)
+		}
+		claimable := make([]ClaimableWorkload, len(out.Claimable))
+		for i, w := range out.Claimable {
+			claimable[i] = ClaimableWorkload(w)
+		}
+		pending := make([]PendingOperation, len(out.PendingOperations))
+		for i, p := range out.PendingOperations {
+			pending[i] = PendingOperation(p)
+		}
+		return claimable, pending, nil
 	case http.StatusUnauthorized, http.StatusGone:
-		return ErrUnauthorized
+		return nil, nil, ErrUnauthorized
 	default:
-		return fmt.Errorf("heartbeat returned status %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("heartbeat returned status %d", resp.StatusCode)
 	}
+}
+
+// ClaimedWorkload is what a successful ClaimWorkload call hands back — the
+// info WorkloadCreator.Create needs to actually build the CR. WorkloadID
+// echoes back the correlation token (the Convex row's own _id) that Create
+// stamps onto the CR as a label, since the CR's real name doesn't exist yet
+// (still minted via GenerateName).
+type ClaimedWorkload struct {
+	WorkloadID      string
+	Config          map[string]any
+	Subdomain       string
+	TemplateID      string
+	TemplateVersion string
+	UserID          string
+}
+
+type claimWorkloadRequest struct {
+	WorkloadID string `json:"workloadId"`
+}
+
+type claimWorkloadResponse struct {
+	WorkloadID      string         `json:"workloadId"`
+	Config          map[string]any `json:"config,omitempty"`
+	Subdomain       string         `json:"subdomain,omitempty"`
+	TemplateID      string         `json:"templateId"`
+	TemplateVersion string         `json:"templateVersion,omitempty"`
+	UserID          string         `json:"userId"`
+}
+
+// ClaimWorkload attempts to claim a brand-new workload request previously
+// surfaced by Heartbeat's claimable list. Returns (nil, nil) — not an error
+// — when Convex reports the claim didn't land (404/409): another operator
+// already claimed it, or it's no longer in a claimable state. The caller
+// should simply skip it, not treat this as a failure.
+func (c *Client) ClaimWorkload(ctx context.Context, heartbeatToken, workloadID string) (*ClaimedWorkload, error) {
+	body, err := json.Marshal(claimWorkloadRequest{WorkloadID: workloadID})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling claim workload request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/operators/workloads/claim", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("building claim workload request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+heartbeatToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling claim workload: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var out claimWorkloadResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return nil, fmt.Errorf("decoding claim workload response: %w", err)
+		}
+		return &ClaimedWorkload{
+			WorkloadID:      out.WorkloadID,
+			Config:          out.Config,
+			Subdomain:       out.Subdomain,
+			TemplateID:      out.TemplateID,
+			TemplateVersion: out.TemplateVersion,
+			UserID:          out.UserID,
+		}, nil
+	case http.StatusNotFound, http.StatusConflict:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("claim workload returned status %d", resp.StatusCode)
+	}
+}
+
+// ClaimedOperation is what a successful ClaimOperation call hands back.
+// Config/TemplateID/TemplateVersion are only populated when Operation ==
+// "redeploy" — a "destroy" only ever needs Name/Namespace, both of which are
+// already known from the original create-time upsert.
+type ClaimedOperation struct {
+	Operation       string
+	Name            string
+	Namespace       string
+	Config          map[string]any
+	TemplateID      string
+	TemplateVersion string
+}
+
+type claimOperationRequest struct {
+	WorkloadID string `json:"workloadId"`
+}
+
+type claimOperationResponse struct {
+	Operation       string         `json:"operation"`
+	Name            string         `json:"name"`
+	Namespace       string         `json:"namespace"`
+	Config          map[string]any `json:"config,omitempty"`
+	TemplateID      string         `json:"templateId,omitempty"`
+	TemplateVersion string         `json:"templateVersion,omitempty"`
+}
+
+// ClaimOperation attempts to claim a pending destroy/redeploy request
+// previously surfaced by Heartbeat's pendingOperations list. Returns (nil,
+// nil) — not an error — when Convex reports the claim didn't land (404/409):
+// lost a race with another attempt (shouldn't normally happen, since these
+// are already scoped to this operator), or it's no longer in a claimable
+// state.
+func (c *Client) ClaimOperation(ctx context.Context, heartbeatToken, workloadID string) (*ClaimedOperation, error) {
+	body, err := json.Marshal(claimOperationRequest{WorkloadID: workloadID})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling claim operation request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/operators/workloads/claim-operation", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("building claim operation request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+heartbeatToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling claim operation: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var out claimOperationResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return nil, fmt.Errorf("decoding claim operation response: %w", err)
+		}
+		return &ClaimedOperation{
+			Operation:       out.Operation,
+			Name:            out.Name,
+			Namespace:       out.Namespace,
+			Config:          out.Config,
+			TemplateID:      out.TemplateID,
+			TemplateVersion: out.TemplateVersion,
+		}, nil
+	case http.StatusNotFound, http.StatusConflict:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("claim operation returned status %d", resp.StatusCode)
+	}
+}
+
+type reportLifecycleRequest struct {
+	// Name is the Workload CR's real k8s name — known for every case except
+	// a create attempt that fails (template-version mismatch, or the Create
+	// call itself erroring) before the CR exists to have one. WorkloadID
+	// covers exactly that gap: Convex's reportLifecycle looks a row up by
+	// (operatorId, name) when Name is set, falling back to a direct
+	// workloadId lookup when it's the only identifier available. Passing
+	// both when both are known is harmless — Convex only needs one to
+	// resolve the row.
+	//
+	// NOTE for the Convex-side implementer: this is a deliberate deviation
+	// from the plan's original name-only sketch (A8/B1) — see this repo's
+	// implementation report for why a name-only request can never resolve a
+	// pre-Create-failure or pre-first-upsert row.
+	Name       string `json:"name,omitempty"`
+	WorkloadID string `json:"workloadId,omitempty"`
+	Phase      string `json:"phase"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// ReportLifecycle tells Convex a claimed create/redeploy attempt reached a
+// terminal-for-now state — "active" (succeeded) or "failed" (didn't, with
+// reason explaining why) — so its status can move on from "provisioning"/
+// "redeploying". Safe to call unconditionally for any CR, including
+// manual/legacy ones with no in-flight Convex row: Convex's reportLifecycle
+// mutation is a no-op unless the row it resolves is actually in one of
+// those two states. At least one of name/workloadID should be non-empty;
+// see reportLifecycleRequest for why both are accepted.
+func (c *Client) ReportLifecycle(ctx context.Context, heartbeatToken, name, workloadID, phase, reason string) error {
+	body, err := json.Marshal(reportLifecycleRequest{Name: name, WorkloadID: workloadID, Phase: phase, Reason: reason})
+	if err != nil {
+		return fmt.Errorf("marshaling report lifecycle request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/operators/workloads/lifecycle", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("building report lifecycle request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+heartbeatToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("calling report lifecycle: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("report lifecycle returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // WorkloadInfo is the ownership/identity data the reconciler reports back to
 // Convex — deliberately just the fields already on Workload.Spec, never
-// runtime status/phase (that stays fetched live, never mirrored).
+// runtime status/phase (that stays fetched live, never mirrored). WorkloadID
+// is only ever non-empty for a claim-flow-created CR (read off the
+// apps.aicloud.dev/workload-id label — see internal/labels) — Convex uses it
+// for the direct-by-_id lookup that turns a "provisioning" row (which has no
+// name yet) into one with this workload's real generated name.
 type WorkloadInfo struct {
 	Name         string
 	Namespace    string
 	TemplateName string
 	UserID       string
 	Subdomain    string
+	WorkloadID   string
 }
 
 type upsertWorkloadRequest struct {
@@ -173,6 +424,7 @@ type upsertWorkloadRequest struct {
 	TemplateID string `json:"templateId"`
 	UserID     string `json:"userId"`
 	Subdomain  string `json:"subdomain,omitempty"`
+	WorkloadID string `json:"workloadId,omitempty"`
 }
 
 // UpsertWorkload tells Convex this workload currently exists with this
@@ -185,6 +437,7 @@ func (c *Client) UpsertWorkload(ctx context.Context, heartbeatToken string, info
 		TemplateID: info.TemplateName,
 		UserID:     info.UserID,
 		Subdomain:  info.Subdomain,
+		WorkloadID: info.WorkloadID,
 	})
 	if err != nil {
 		return fmt.Errorf("marshaling upsert workload request: %w", err)

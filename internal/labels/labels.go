@@ -23,4 +23,14 @@ package labels
 const (
 	ManagedBy      = "app.kubernetes.io/managed-by"
 	ManagedByValue = "ai-cloud-operator"
+
+	// WorkloadID correlates a claim-flow-created Workload CR back to the
+	// Convex row that requested it, from the moment of Create() (when the
+	// CR's real name doesn't exist yet, since it's still minted via
+	// GenerateName) through its first successful upsert. Set by
+	// internal/provisioning.WorkloadCreator.Create from the claim response's
+	// workloadId, read back by internal/controller when reporting
+	// ownership/lifecycle to Convex. Empty/absent for a manually
+	// kubectl-created or legacy CR with no Convex row to correlate with.
+	WorkloadID = "apps.aicloud.dev/workload-id"
 )

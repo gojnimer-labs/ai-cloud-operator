@@ -35,6 +35,9 @@ const (
 	testWorkloadName      = "demo"
 	testNamespace         = "default"
 	testUserID            = "user-1"
+	testTemplateID        = "nginx"
+	testSubdomain         = "demo-sub"
+	testClaimWorkloadID   = "wl-1"
 
 	testBearerHeartbeatToken = "Bearer " + testHeartbeatToken
 )
@@ -72,13 +75,45 @@ func TestHeartbeatSuccess(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != testBearerHeartbeatToken {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
 	}))
 	defer srv.Close()
 
 	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-	if err := c.Heartbeat(context.Background(), testHeartbeatToken); err != nil {
+	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken)
+	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
+	}
+	if len(claimable) != 0 || len(pendingOps) != 0 {
+		t.Fatalf("expected empty claimable/pendingOps for an empty-list 200 body, got %+v / %+v", claimable, pendingOps)
+	}
+}
+
+// TestHeartbeatDecodesClaimableAndPendingOperations is the concrete proof of
+// the new two-list response shape (see convex/operators/http.ts's A8 change
+// in the plan): {claimable: [{workloadId, templateId}], pendingOperations:
+// [{workloadId, operation}]}.
+func TestHeartbeatDecodesClaimableAndPendingOperations(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"claimable": [{"workloadId": "wl-1", "templateId": "nginx"}],
+			"pendingOperations": [{"workloadId": "wl-2", "operation": "destroy"}]
+		}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken)
+	if err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if len(claimable) != 1 || claimable[0] != (ClaimableWorkload{WorkloadID: testClaimWorkloadID, TemplateID: testTemplateID}) {
+		t.Fatalf("unexpected claimable: %+v", claimable)
+	}
+	if len(pendingOps) != 1 || pendingOps[0] != (PendingOperation{WorkloadID: "wl-2", Operation: "destroy"}) {
+		t.Fatalf("unexpected pendingOps: %+v", pendingOps)
 	}
 }
 
@@ -89,7 +124,7 @@ func TestHeartbeatUnauthorizedMapsToSentinel(t *testing.T) {
 		}))
 
 		c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-		err := c.Heartbeat(context.Background(), "stale-token")
+		_, _, err := c.Heartbeat(context.Background(), "stale-token")
 		srv.Close()
 
 		if err != ErrUnauthorized {
@@ -118,15 +153,49 @@ func TestUpsertWorkloadSendsExpectedPayload(t *testing.T) {
 	err := c.UpsertWorkload(context.Background(), testHeartbeatToken, WorkloadInfo{
 		Name:         testWorkloadName,
 		Namespace:    testNamespace,
-		Subdomain:    "demo-sub",
-		TemplateName: "nginx",
+		Subdomain:    testSubdomain,
+		TemplateName: testTemplateID,
 		UserID:       testUserID,
 	})
 	if err != nil {
 		t.Fatalf("upsert workload: %v", err)
 	}
-	if got.Name != testWorkloadName || got.Namespace != testNamespace || got.TemplateID != "nginx" || got.UserID != testUserID || got.Subdomain != "demo-sub" {
+	if got.Name != testWorkloadName || got.Namespace != testNamespace || got.TemplateID != testTemplateID || got.UserID != testUserID || got.Subdomain != testSubdomain {
 		t.Fatalf("unexpected payload: %+v", got)
+	}
+	if got.WorkloadID != "" {
+		t.Fatalf("expected no workloadId when WorkloadInfo.WorkloadID is unset, got %q", got.WorkloadID)
+	}
+}
+
+// TestUpsertWorkloadCarriesWorkloadID is the concrete proof that a
+// claim-flow-created CR's apps.aicloud.dev/workload-id label value makes it
+// all the way into the upsert request body — the direct-by-_id correlation
+// Convex's record mutation needs for its very first sync (see A4 in the
+// plan).
+func TestUpsertWorkloadCarriesWorkloadID(t *testing.T) {
+	var got upsertWorkloadRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	err := c.UpsertWorkload(context.Background(), testHeartbeatToken, WorkloadInfo{
+		Name:         testWorkloadName,
+		Namespace:    testNamespace,
+		TemplateName: testTemplateID,
+		UserID:       testUserID,
+		WorkloadID:   "convex-row-id-1",
+	})
+	if err != nil {
+		t.Fatalf("upsert workload: %v", err)
+	}
+	if got.WorkloadID != "convex-row-id-1" {
+		t.Fatalf("expected workloadId to be carried through, got %q", got.WorkloadID)
 	}
 }
 
@@ -180,6 +249,167 @@ func TestVerifyGatewayTokenNonOKIsError(t *testing.T) {
 
 	c := New(Config{BaseURL: srv.URL})
 	if _, err := c.VerifyGatewayToken(context.Background(), testHeartbeatToken, "bad-token", testNamespace, testWorkloadName); err == nil {
+		t.Fatalf("expected an error on non-200 response")
+	}
+}
+
+func TestClaimWorkloadDecodesSuccessResponse(t *testing.T) {
+	var got claimWorkloadRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operators/workloads/claim" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != testBearerHeartbeatToken {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"workloadId": "wl-1",
+			"config": {"replicas": 2},
+			"subdomain": "demo-sub",
+			"templateId": "nginx",
+			"templateVersion": "1.0.0",
+			"userId": "user-1"
+		}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	claimed, err := c.ClaimWorkload(context.Background(), testHeartbeatToken, testClaimWorkloadID)
+	if err != nil {
+		t.Fatalf("claim workload: %v", err)
+	}
+	if claimed == nil {
+		t.Fatalf("expected a non-nil claimed workload")
+	}
+	if claimed.WorkloadID != testClaimWorkloadID || claimed.Subdomain != testSubdomain || claimed.TemplateID != testTemplateID ||
+		claimed.TemplateVersion != "1.0.0" || claimed.UserID != "user-1" {
+		t.Fatalf("unexpected claimed workload: %+v", claimed)
+	}
+	if got, ok := claimed.Config["replicas"]; !ok || got != float64(2) {
+		t.Fatalf("expected config.replicas == 2, got %+v", claimed.Config)
+	}
+	if got.WorkloadID != testClaimWorkloadID {
+		t.Fatalf("expected request to carry workloadId, got %+v", got)
+	}
+}
+
+// TestClaimWorkloadLostRaceReturnsNilNil is the concrete proof that a
+// 404/409 from Convex (another operator already claimed it, or it's no
+// longer claimable) is reported as (nil, nil) — not an error — so the
+// claim-consumption loop just skips it.
+func TestClaimWorkloadLostRaceReturnsNilNil(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusConflict} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+
+		c := New(Config{BaseURL: srv.URL})
+		claimed, err := c.ClaimWorkload(context.Background(), testHeartbeatToken, testClaimWorkloadID)
+		srv.Close()
+
+		if err != nil {
+			t.Fatalf("status %d: expected no error, got %v", status, err)
+		}
+		if claimed != nil {
+			t.Fatalf("status %d: expected nil claimed workload, got %+v", status, claimed)
+		}
+	}
+}
+
+func TestClaimOperationDecodesSuccessResponse(t *testing.T) {
+	var got claimOperationRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operators/workloads/claim-operation" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"operation": "redeploy",
+			"name": "nginx-abc123",
+			"namespace": "default",
+			"config": {"replicas": 3},
+			"templateId": "nginx",
+			"templateVersion": "1.0.0"
+		}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	op, err := c.ClaimOperation(context.Background(), testHeartbeatToken, testClaimWorkloadID)
+	if err != nil {
+		t.Fatalf("claim operation: %v", err)
+	}
+	if op == nil {
+		t.Fatalf("expected a non-nil claimed operation")
+	}
+	if op.Operation != "redeploy" || op.Name != "nginx-abc123" || op.Namespace != "default" ||
+		op.TemplateID != testTemplateID || op.TemplateVersion != "1.0.0" {
+		t.Fatalf("unexpected claimed operation: %+v", op)
+	}
+	if got.WorkloadID != testClaimWorkloadID {
+		t.Fatalf("expected request to carry workloadId, got %+v", got)
+	}
+}
+
+func TestClaimOperationLostRaceReturnsNilNil(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusConflict} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+
+		c := New(Config{BaseURL: srv.URL})
+		op, err := c.ClaimOperation(context.Background(), testHeartbeatToken, testClaimWorkloadID)
+		srv.Close()
+
+		if err != nil {
+			t.Fatalf("status %d: expected no error, got %v", status, err)
+		}
+		if op != nil {
+			t.Fatalf("status %d: expected nil claimed operation, got %+v", status, op)
+		}
+	}
+}
+
+func TestReportLifecycleSendsExpectedPayload(t *testing.T) {
+	var got reportLifecycleRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operators/workloads/lifecycle" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != testBearerHeartbeatToken {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	if err := c.ReportLifecycle(context.Background(), testHeartbeatToken, testWorkloadName, testClaimWorkloadID, "failed", "boom"); err != nil {
+		t.Fatalf("report lifecycle: %v", err)
+	}
+	if got.Name != testWorkloadName || got.WorkloadID != testClaimWorkloadID || got.Phase != "failed" || got.Reason != "boom" {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestReportLifecycleNonOKIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	if err := c.ReportLifecycle(context.Background(), testHeartbeatToken, testWorkloadName, "", "active", ""); err == nil {
 		t.Fatalf("expected an error on non-200 response")
 	}
 }

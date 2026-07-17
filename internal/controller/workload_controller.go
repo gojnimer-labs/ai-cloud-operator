@@ -53,6 +53,13 @@ import (
 type WorkloadNotifier interface {
 	UpsertWorkload(ctx context.Context, info convexclient.WorkloadInfo) error
 	RemoveWorkload(ctx context.Context, name, namespace string) error
+	// ReportLifecycle tells Convex a claimed create/redeploy attempt reached
+	// a terminal-for-now state ("active" or "failed", with reason set for
+	// the latter). workloadID (the apps.aicloud.dev/workload-id label's
+	// value, when present) is passed alongside name so Convex can still
+	// resolve the row even before this Workload's first successful upsert
+	// has recorded its name — see setFailed and syncConvexLifecycleActive.
+	ReportLifecycle(ctx context.Context, name, workloadID, phase, reason string) error
 }
 
 // WorkloadReconciler reconciles a Workload object.
@@ -72,12 +79,19 @@ const (
 	labelInstance = "app.kubernetes.io/instance"
 	labelUserID   = "apps.aicloud.dev/user-id"
 
-	conditionTypeReady        = "Ready"
-	conditionTypeConvexSynced = "ConvexSynced"
+	conditionTypeReady                 = "Ready"
+	conditionTypeConvexSynced          = "ConvexSynced"
+	conditionTypeConvexLifecycleSynced = "ConvexLifecycleSynced"
 
 	phaseDeploying = "Deploying"
 	phaseRunning   = "Running"
 	phaseFailed    = "Failed"
+
+	// lifecyclePhaseActive/lifecyclePhaseFailed are the phase values sent to
+	// WorkloadNotifier.ReportLifecycle — see convex/workloads/mutations.ts's
+	// reportLifecycle in ai-cloud-v2 for the Convex side that consumes them.
+	lifecyclePhaseActive = "active"
+	lifecyclePhaseFailed = "failed"
 
 	defaultReplicas      = int32(1)
 	defaultContainerPort = int32(8080)
@@ -167,11 +181,17 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		ObservedGeneration: workload.Generation,
 	}
 
+	// lifecycleSynced defaults to true (nothing to report yet) and is only
+	// actually attempted once the Deployment reaches Running — there is no
+	// "active" to report before then. See syncConvexLifecycleActive.
+	lifecycleSynced := true
+
 	if desiredReplicas > 0 && deployment.Status.ReadyReplicas >= desiredReplicas {
 		workload.Status.Phase = phaseRunning
 		readyCondition.Status = metav1.ConditionTrue
 		readyCondition.Reason = "DeploymentReady"
 		readyCondition.Message = "backing Deployment has reached the desired ready replica count"
+		lifecycleSynced = r.syncConvexLifecycleActive(ctx, &workload)
 	} else {
 		workload.Status.Phase = phaseDeploying
 		readyCondition.Status = metav1.ConditionFalse
@@ -185,8 +205,8 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, fmt.Errorf("updating workload status: %w", err)
 	}
 
-	if workload.Status.Phase != phaseRunning || !convexSynced {
-		log.Info("workload not yet ready to stop requeueing", "phase", workload.Status.Phase, "convexSynced", convexSynced)
+	if workload.Status.Phase != phaseRunning || !convexSynced || !lifecycleSynced {
+		log.Info("workload not yet ready to stop requeueing", "phase", workload.Status.Phase, "convexSynced", convexSynced, "lifecycleSynced", lifecycleSynced)
 		return ctrl.Result{RequeueAfter: statusRequeueInterval}, nil
 	}
 
@@ -243,9 +263,63 @@ func (r *WorkloadReconciler) notifyUpserted(ctx context.Context, workload *appsv
 		Subdomain:    workload.Spec.Subdomain,
 		TemplateName: workload.Spec.TemplateName,
 		UserID:       workload.Spec.UserID,
+		WorkloadID:   workload.Labels[labels.WorkloadID],
 	})
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to notify convex of workload upsert")
+	}
+	return err
+}
+
+// syncConvexLifecycleActive tells Convex this workload reached Running for
+// the current generation, and reports whether Convex is now up to date —
+// same idiom as syncConvex/ConvexSynced (condition's own ObservedGeneration
+// tracks "already reported for this generation," rather than a bespoke
+// status field), kept as its own condition/call site because setFailed
+// returns immediately and never reaches this point — "active" and "failed"
+// are reported from two genuinely different places in Reconcile, not a
+// shared helper.
+//
+// Best-effort in the same sense as syncConvex: a failure here must never
+// gate the Ready condition, but the caller retries on every subsequent
+// reconcile (via the RequeueAfter this method's false return triggers)
+// until it succeeds.
+func (r *WorkloadReconciler) syncConvexLifecycleActive(ctx context.Context, workload *appsv1alpha1.Workload) bool {
+	if existing := apimeta.FindStatusCondition(workload.Status.Conditions, conditionTypeConvexLifecycleSynced); existing != nil &&
+		existing.Status == metav1.ConditionTrue && existing.ObservedGeneration == workload.Generation {
+		return true
+	}
+
+	condition := metav1.Condition{
+		Type:               conditionTypeConvexLifecycleSynced,
+		ObservedGeneration: workload.Generation,
+	}
+	if err := r.notifyLifecycle(ctx, workload, lifecyclePhaseActive, ""); err != nil {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = "NotifyFailed"
+		condition.Message = err.Error()
+	} else {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "Notified"
+		condition.Message = "Convex has been told this workload is active"
+	}
+	apimeta.SetStatusCondition(&workload.Status.Conditions, condition)
+	return condition.Status == metav1.ConditionTrue
+}
+
+// notifyLifecycle reports a create/redeploy attempt's terminal-for-now
+// phase to Convex, passing both this Workload's real name and (when
+// present) its apps.aicloud.dev/workload-id label — see
+// WorkloadNotifier.ReportLifecycle for why both are sent.
+func (r *WorkloadReconciler) notifyLifecycle(ctx context.Context, workload *appsv1alpha1.Workload, phase, reason string) error {
+	if r.ConvexClient == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, convexNotifyTimeout)
+	defer cancel()
+	err := r.ConvexClient.ReportLifecycle(ctx, workload.Name, workload.Labels[labels.WorkloadID], phase, reason)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to notify convex of workload lifecycle", "phase", phase)
 	}
 	return err
 }
@@ -286,6 +360,13 @@ func (r *WorkloadReconciler) setFailed(ctx context.Context, workload *appsv1alph
 	if err := r.Status().Update(ctx, workload); err != nil {
 		log.Error(err, "failed to update workload status after reconcile error")
 	}
+
+	// Fire-and-forget, same reasoning as notifyRemoved: this method's own
+	// error return already triggers the manager's normal backoff-requeue,
+	// which retries this call naturally on the next reconcile attempt if it
+	// didn't land — there's no separate condition tracked for it the way
+	// syncConvexLifecycleActive tracks the success path.
+	_ = r.notifyLifecycle(ctx, workload, lifecyclePhaseFailed, reconcileErr.Error())
 
 	return ctrl.Result{}, reconcileErr
 }

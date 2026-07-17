@@ -47,6 +47,7 @@ import (
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/convexclient"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/podexec"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/provisioning"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/workloadns"
 	// +kubebuilder:scaffold:imports
@@ -302,6 +303,15 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		heartbeatInterval = parsed
 	}
 
+	// One WorkloadCreator + one WorkloadDestroyer, shared between the
+	// manual /workloads* HTTP path (api.New, still reachable for
+	// local/manual testing) and the claim-consumption loop
+	// (convexclient.NewRunnable) that's the normal flow once Convex owns
+	// create/destroy/redeploy as claimable requests — see
+	// internal/provisioning.
+	workloadCreator := provisioning.NewWorkloadCreator(mgr.GetClient(), workloadNamespace)
+	workloadDestroyer := provisioning.NewWorkloadDestroyer(mgr.GetClient(), workloadNamespace)
+
 	convexRunnable := convexclient.NewRunnable(
 		convexclient.New(convexclient.Config{
 			BaseURL:          convexBaseURL,
@@ -312,6 +322,8 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		tokenstore.New(mgr.GetClient(), podNamespace),
 		convexclient.NewEnrollmentSecretWatcher(mgr.GetClient(), podNamespace),
 		heartbeatInterval,
+		workloadCreator,
+		workloadDestroyer,
 	)
 	if err := mgr.Add(convexRunnable); err != nil {
 		return nil, err
@@ -329,7 +341,7 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 
 	apiServer := api.New(
 		mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken,
-		gatewaySigningSecret, convexRunnable, proxy, podExecutor, workloadNamespace,
+		gatewaySigningSecret, convexRunnable, proxy, podExecutor, workloadCreator, workloadDestroyer, workloadNamespace,
 	)
 	if err := mgr.Add(apiServer); err != nil {
 		return nil, err

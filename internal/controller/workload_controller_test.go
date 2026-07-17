@@ -34,19 +34,32 @@ import (
 
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/convexclient"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/labels"
 )
 
 const testImage = "nginx:latest"
 
-// fakeNotifier records UpsertWorkload/RemoveWorkload calls for assertions,
-// standing in for a real *convexclient.Runnable. upsertErr, when set, makes
-// every UpsertWorkload call fail (while still recording it) — used to
-// exercise syncConvex's retry-until-success path.
+// lifecycleReport records one WorkloadNotifier.ReportLifecycle call, for
+// assertions in fakeNotifier's consumers.
+type lifecycleReport struct {
+	name       string
+	workloadID string
+	phase      string
+	reason     string
+}
+
+// fakeNotifier records UpsertWorkload/RemoveWorkload/ReportLifecycle calls
+// for assertions, standing in for a real *convexclient.Runnable. upsertErr,
+// when set, makes every UpsertWorkload call fail (while still recording it)
+// — used to exercise syncConvex's retry-until-success path. lifecycleErr
+// does the same for ReportLifecycle.
 type fakeNotifier struct {
-	mu        sync.Mutex
-	upserts   []convexclient.WorkloadInfo
-	removals  []types.NamespacedName
-	upsertErr error
+	mu           sync.Mutex
+	upserts      []convexclient.WorkloadInfo
+	removals     []types.NamespacedName
+	lifecycles   []lifecycleReport
+	upsertErr    error
+	lifecycleErr error
 }
 
 func (f *fakeNotifier) UpsertWorkload(_ context.Context, info convexclient.WorkloadInfo) error {
@@ -63,6 +76,13 @@ func (f *fakeNotifier) RemoveWorkload(_ context.Context, name, namespace string)
 	return nil
 }
 
+func (f *fakeNotifier) ReportLifecycle(_ context.Context, name, workloadID, phase, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lifecycles = append(f.lifecycles, lifecycleReport{name: name, workloadID: workloadID, phase: phase, reason: reason})
+	return f.lifecycleErr
+}
+
 func (f *fakeNotifier) upsertCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -73,6 +93,21 @@ func (f *fakeNotifier) removalCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.removals)
+}
+
+func (f *fakeNotifier) lifecycleCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.lifecycles)
+}
+
+func (f *fakeNotifier) lastLifecycle() lifecycleReport {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.lifecycles) == 0 {
+		return lifecycleReport{}
+	}
+	return f.lifecycles[len(f.lifecycles)-1]
 }
 
 var _ = Describe("Workload Controller", func() {
@@ -205,7 +240,11 @@ var _ = Describe("Workload Controller", func() {
 
 		It("upserts once on creation, not again on an unchanged reconcile, and removes on deletion", func() {
 			resource := &appsv1alpha1.Workload{
-				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: resourceNamespace,
+					Labels:    map[string]string{labels.WorkloadID: "wl-789"},
+				},
 				Spec: appsv1alpha1.WorkloadSpec{
 					Image:        testImage,
 					Subdomain:    "demo-sub",
@@ -229,6 +268,10 @@ var _ = Describe("Workload Controller", func() {
 			Expect(notifier.upserts[0].TemplateName).To(Equal("nginx"))
 			Expect(notifier.upserts[0].UserID).To(Equal("user-456"))
 			Expect(notifier.upserts[0].Subdomain).To(Equal("demo-sub"))
+			// B6: the claim-flow correlation label, when present, must ride
+			// along in the upsert so Convex's record mutation can resolve
+			// this workload directly by _id for its very first sync.
+			Expect(notifier.upserts[0].WorkloadID).To(Equal("wl-789"))
 
 			// A second reconcile with no spec change must not upsert again.
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
@@ -314,6 +357,130 @@ var _ = Describe("Workload Controller", func() {
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(notifier.upsertCount()).To(Equal(3))
+		})
+	})
+
+	Context("When a Workload reaches Running", func() {
+		const (
+			resourceName      = "test-resource-lifecycle-active"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+			}
+			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+		})
+
+		It("reports active once, not again on a subsequent Running reconcile", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			notifier := &fakeNotifier{}
+			controllerReconciler := &WorkloadReconciler{
+				Client:       k8sClient,
+				ConvexClient: notifier,
+				Scheme:       k8sClient.Scheme(),
+			}
+
+			// First reconcile: the Deployment gets created but envtest runs
+			// no real kubelet/deployment-controller, so ReadyReplicas stays
+			// 0 — phase is Deploying, not yet Running, so no active report
+			// is attempted yet.
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.lifecycleCount()).To(Equal(0))
+
+			// Simulate the Deployment actually becoming ready. Status.Replicas
+			// must be set too — the apiserver rejects readyReplicas >
+			// replicas.
+			var deployment appsv1.Deployment
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &deployment)).To(Succeed())
+			deployment.Status.Replicas = 1
+			deployment.Status.ReadyReplicas = 1
+			Expect(k8sClient.Status().Update(ctx, &deployment)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.lifecycleCount()).To(Equal(1))
+			report := notifier.lastLifecycle()
+			Expect(report.name).To(Equal(resourceName))
+			Expect(report.phase).To(Equal(lifecyclePhaseActive))
+
+			var workload appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			Expect(workload.Status.Phase).To(Equal(phaseRunning))
+			cond := apimeta.FindStatusCondition(workload.Status.Conditions, conditionTypeConvexLifecycleSynced)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+
+			// A further reconcile with nothing changed must not re-report.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.lifecycleCount()).To(Equal(1))
+		})
+	})
+
+	Context("When reconcile fails before ever reaching Running", func() {
+		const (
+			resourceName      = "test-resource-lifecycle-failed"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+			}
+		})
+
+		It("calls ReportLifecycle(failed) from setFailed, carrying the workload-id label when present", func() {
+			// No Image and no TemplateName: render() errors immediately, so
+			// Reconcile never gets anywhere near the Deployment/Service or
+			// the phaseRunning block — setFailed is the only call site that
+			// can possibly run here, proving active/failed really are two
+			// distinct call sites, not a shared helper.
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: resourceNamespace,
+					Labels:    map[string]string{labels.WorkloadID: "wl-failed-1"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			notifier := &fakeNotifier{}
+			controllerReconciler := &WorkloadReconciler{
+				Client:       k8sClient,
+				ConvexClient: notifier,
+				Scheme:       k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).To(HaveOccurred())
+
+			Expect(notifier.lifecycleCount()).To(Equal(1))
+			report := notifier.lastLifecycle()
+			Expect(report.name).To(Equal(resourceName))
+			Expect(report.workloadID).To(Equal("wl-failed-1"))
+			Expect(report.phase).To(Equal(lifecyclePhaseFailed))
+			Expect(report.reason).NotTo(BeEmpty())
+
+			var workload appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			Expect(workload.Status.Phase).To(Equal(phaseFailed))
 		})
 	})
 })

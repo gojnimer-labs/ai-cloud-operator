@@ -91,7 +91,7 @@ func TestLoadOrRegisterFallsBackWhenNoPersistedToken(t *testing.T) {
 	store := newFakeTokenStore(t)
 	enrollment, _ := newFakeEnrollmentWatcher(t)
 	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-	runnable := NewRunnable(convexClient, store, enrollment, time.Hour)
+	runnable := NewRunnable(convexClient, store, enrollment, time.Hour, nil, nil)
 
 	if err := runnable.loadOrRegister(context.Background()); err != nil {
 		t.Fatalf("loadOrRegister: %v", err)
@@ -134,7 +134,7 @@ func TestHeartbeatOnceReregistersOnRejection(t *testing.T) {
 	store := newFakeTokenStore(t)
 	enrollment, _ := newFakeEnrollmentWatcher(t)
 	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-	runnable := NewRunnable(convexClient, store, enrollment, time.Hour)
+	runnable := NewRunnable(convexClient, store, enrollment, time.Hour, nil, nil)
 	runnable.setTokens(tokenstore.Tokens{HeartbeatToken: "hb-stale", DeployToken: "dp-stale"})
 
 	runnable.heartbeatOnce(context.Background())
@@ -176,7 +176,7 @@ func TestCheckEnrollmentSecretReregistersOnChange(t *testing.T) {
 	store := newFakeTokenStore(t)
 	enrollment, fakeClient := newFakeEnrollmentWatcher(t)
 	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, EnrollmentSecret: "old-secret"})
-	runnable := NewRunnable(convexClient, store, enrollment, time.Hour)
+	runnable := NewRunnable(convexClient, store, enrollment, time.Hour, nil, nil)
 	runnable.setTokens(tokenstore.Tokens{HeartbeatToken: "hb-1", DeployToken: "dp-1"})
 
 	putEnrollmentSecret(t, fakeClient, "new-secret")
@@ -210,7 +210,7 @@ func TestCheckEnrollmentSecretNoopWhenUnchanged(t *testing.T) {
 	store := newFakeTokenStore(t)
 	enrollment, fakeClient := newFakeEnrollmentWatcher(t)
 	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, EnrollmentSecret: "same-secret"})
-	runnable := NewRunnable(convexClient, store, enrollment, time.Hour)
+	runnable := NewRunnable(convexClient, store, enrollment, time.Hour, nil, nil)
 
 	putEnrollmentSecret(t, fakeClient, "same-secret")
 
@@ -236,7 +236,7 @@ func TestCheckEnrollmentSecretNoopWhenSecretMissing(t *testing.T) {
 	store := newFakeTokenStore(t)
 	enrollment, _ := newFakeEnrollmentWatcher(t)
 	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, EnrollmentSecret: "some-secret"})
-	runnable := NewRunnable(convexClient, store, enrollment, time.Hour)
+	runnable := NewRunnable(convexClient, store, enrollment, time.Hour, nil, nil)
 
 	runnable.checkEnrollmentSecret(context.Background())
 
