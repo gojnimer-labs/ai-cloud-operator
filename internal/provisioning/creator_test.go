@@ -49,6 +49,7 @@ const (
 	testTemplateID      = "nginx"
 	testSubdomain       = "sub-1"
 	testExistingName    = "nginx-abc"
+	testUserID          = "user-1"
 	paramKeyWorkerConns = "workerConnections"
 )
 
@@ -69,7 +70,7 @@ func TestCreateSetsWorkloadIDLabelWhenPresent(t *testing.T) {
 	c, _ := newFakeClient(t)
 	creator := provisioning.NewWorkloadCreator(c, testNamespace)
 
-	workload, err := creator.Create(context.Background(), "wl-123", testTemplateID, "user-1", testSubdomain, nil)
+	workload, err := creator.Create(context.Background(), "wl-123", testTemplateID, testUserID, testSubdomain, nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestCreateOmitsWorkloadIDLabelWhenEmpty(t *testing.T) {
 	c, _ := newFakeClient(t)
 	creator := provisioning.NewWorkloadCreator(c, testNamespace)
 
-	workload, err := creator.Create(context.Background(), "", testTemplateID, "user-1", "", nil)
+	workload, err := creator.Create(context.Background(), "", testTemplateID, testUserID, "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestCreateRejectsUnknownTemplate(t *testing.T) {
 	c, _ := newFakeClient(t)
 	creator := provisioning.NewWorkloadCreator(c, testNamespace)
 
-	_, err := creator.Create(context.Background(), "", "does-not-exist", "user-1", "", nil)
+	_, err := creator.Create(context.Background(), "", "does-not-exist", testUserID, "", nil)
 	if !errors.Is(err, provisioning.ErrUnknownTemplate) {
 		t.Fatalf("expected provisioning.ErrUnknownTemplate, got %v", err)
 	}
@@ -113,7 +114,7 @@ func TestCreateRejectsInvalidConfig(t *testing.T) {
 
 	// workerConnections' Validation caps it at 65536 — 999999 must fail
 	// ResolveParams and surface as provisioning.ErrInvalidConfig, not a k8s API error.
-	_, err := creator.Create(context.Background(), "", testTemplateID, "user-1", "", map[string]any{paramKeyWorkerConns: float64(999999)})
+	_, err := creator.Create(context.Background(), "", testTemplateID, testUserID, "", map[string]any{paramKeyWorkerConns: float64(999999)})
 	if !errors.Is(err, provisioning.ErrInvalidConfig) {
 		t.Fatalf("expected provisioning.ErrInvalidConfig, got %v", err)
 	}
@@ -135,7 +136,7 @@ func TestRedeployOnlyTouchesSpecConfig(t *testing.T) {
 		},
 		Spec: appsv1alpha1.WorkloadSpec{
 			TemplateName: testTemplateID,
-			UserID:       "user-1",
+			UserID:       testUserID,
 			Subdomain:    testSubdomain,
 		},
 	}
@@ -151,7 +152,7 @@ func TestRedeployOnlyTouchesSpecConfig(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testNamespace, Name: testExistingName}, &updated); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if updated.Name != testExistingName || updated.Spec.UserID != "user-1" || updated.Spec.Subdomain != testSubdomain || updated.Spec.TemplateName != testTemplateID {
+	if updated.Name != testExistingName || updated.Spec.UserID != testUserID || updated.Spec.Subdomain != testSubdomain || updated.Spec.TemplateName != testTemplateID {
 		t.Fatalf("expected only Spec.Config to change, got %+v", updated.Spec)
 	}
 	if updated.Labels["keep"] != "me" {
@@ -203,7 +204,7 @@ func TestSetSuspendedOnlyTouchesSpecSuspended(t *testing.T) {
 		},
 		Spec: appsv1alpha1.WorkloadSpec{
 			TemplateName: testTemplateID,
-			UserID:       "user-1",
+			UserID:       testUserID,
 			Subdomain:    testSubdomain,
 		},
 	}
@@ -222,7 +223,7 @@ func TestSetSuspendedOnlyTouchesSpecSuspended(t *testing.T) {
 	if !updated.Spec.Suspended {
 		t.Fatalf("expected Spec.Suspended=true, got %+v", updated.Spec)
 	}
-	if updated.Name != testExistingName || updated.Spec.UserID != "user-1" || updated.Spec.Subdomain != testSubdomain || updated.Spec.TemplateName != testTemplateID {
+	if updated.Name != testExistingName || updated.Spec.UserID != testUserID || updated.Spec.Subdomain != testSubdomain || updated.Spec.TemplateName != testTemplateID {
 		t.Fatalf("expected only Spec.Suspended to change, got %+v", updated.Spec)
 	}
 	if updated.Labels["keep"] != "me" {
@@ -279,7 +280,7 @@ func TestReconcileAfterRedeployUpdatesDeployment(t *testing.T) {
 	c, scheme := newFakeClient(t)
 	creator := provisioning.NewWorkloadCreator(c, testNamespace)
 
-	workload, err := creator.Create(context.Background(), "", testTemplateID, "user-1", "", map[string]any{paramKeyWorkerConns: float64(1024)})
+	workload, err := creator.Create(context.Background(), "", testTemplateID, testUserID, "", map[string]any{paramKeyWorkerConns: float64(1024)})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
