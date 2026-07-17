@@ -770,27 +770,13 @@ func TestRunFunctionExecutesAgainstRunningPod(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if len(result.AdditionalInfo) != 2 || result.AdditionalInfo[0].Name != "result" ||
+	if len(result.AdditionalInfo) != 1 || result.AdditionalInfo[0].Name != "result" ||
 		result.AdditionalInfo[0].Type != catalog.AdditionalInfoPlain ||
 		result.AdditionalInfo[0].Value != "backup_state.success" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	// Value round-trips through JSON as a map, not the original
-	// catalog.InsertRowValue struct.
-	insertRow, ok := result.AdditionalInfo[1].Value.(map[string]any)
-	if result.AdditionalInfo[1].Name != "profile" ||
-		result.AdditionalInfo[1].Type != catalog.AdditionalInfoInsertRow || !ok {
-		t.Fatalf("expected an insert_row AdditionalInfo, got %+v", result.AdditionalInfo[1])
-	}
-	if insertRow["table"] != "selectOptions" {
-		t.Fatalf("expected insert_row to target the selectOptions table, got %+v", insertRow)
-	}
-	fields, ok := insertRow["fields"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected insert_row fields to be an object, got %+v", insertRow["fields"])
-	}
-	if fields["sourceKey"] != "profiles_firefox" || fields["handler"] != "r2_helper" {
-		t.Fatalf("unexpected insert_row fields: %+v", fields)
+	if result.File == nil || result.File.Type != "browser_profile_backup" {
+		t.Fatalf("expected a browser_profile_backup FileResult, got %+v", result.File)
 	}
 	if len(executor.calls) != 1 {
 		t.Fatalf("expected exactly one exec call, got %d", len(executor.calls))

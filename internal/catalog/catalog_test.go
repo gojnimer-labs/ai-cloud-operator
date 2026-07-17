@@ -247,8 +247,9 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 			t.Fatalf("%s: expected label to be a static data source", id)
 		}
 		uploadSource := fn.Parameters[1].DataSource
-		if uploadSource.Kind != DataSourceFile || uploadSource.Direction != DirectionUpload || uploadSource.Handler != selectOptionsHandlerR2 {
-			t.Fatalf("%s: expected uploadUrl to be an upload-direction r2_helper file data source, got %+v", id, uploadSource)
+		wantGroup := "profiles_" + id
+		if uploadSource.Kind != DataSourceFile || uploadSource.Direction != DirectionUpload || uploadSource.Group != wantGroup {
+			t.Fatalf("%s: expected uploadUrl to be an upload-direction file data source with group %q, got %+v", id, wantGroup, uploadSource)
 		}
 		if fn.Refreshable {
 			t.Fatalf("%s: expected backup_state to not be Refreshable — it has a real side effect", id)
@@ -261,37 +262,37 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 
 // TestBrowserProfileDownloadURLDeclaresDownloadDirection guards the other
 // half of the file-param contract: profileDownloadUrl must declare it
-// resolves from profileName's selected row via r2_helper, not just that
-// it's file-sourced — deployWorkload dispatches on these fields generically
-// (see workloads/actions.ts#deployWorkload), so a missing/wrong value here
-// would silently break restore.
+// resolves from profileName's selected row, not just that it's
+// file-sourced — deployWorkload dispatches on these fields generically (see
+// workloads/actions.ts#deployWorkload), so a missing/wrong value here would
+// silently break restore.
 func TestBrowserProfileDownloadURLDeclaresDownloadDirection(t *testing.T) {
 	for _, id := range []string{templateIDFirefox, templateIDChrome} {
 		tmpl, _ := Get(id)
 		source := findParameter(t, tmpl.Parameters, "profileDownloadUrl").DataSource
 		if source.Kind != DataSourceFile || source.Direction != DirectionDownload ||
-			source.Handler != selectOptionsHandlerR2 || source.SourceParam != paramKeyProfileName {
+			source.SourceParam != paramKeyProfileName {
 			t.Fatalf("%s: unexpected profileDownloadUrl data source: %+v", id, source)
 		}
 	}
 }
 
-// TestFirefoxAndChromeUseDistinctProfileSourceKeys guards against the
-// two templates ever sharing one dynamic-select catalog for saved
-// profiles — Firefox and Chrome profile tarballs aren't interchangeable,
-// so restoring one into the other would silently produce a broken profile.
+// TestFirefoxAndChromeUseDistinctProfileSourceKeys guards against the two
+// templates ever sharing one files-table group for saved profiles —
+// Firefox and Chrome profile tarballs aren't interchangeable, so restoring
+// one into the other would silently produce a broken profile.
 func TestFirefoxAndChromeUseDistinctProfileSourceKeys(t *testing.T) {
 	firefox, _ := Get(templateIDFirefox)
 	chrome, _ := Get(templateIDChrome)
 
-	firefoxKey := findParameter(t, firefox.Parameters, paramKeyProfileName).DataSource.SourceKey
-	chromeKey := findParameter(t, chrome.Parameters, paramKeyProfileName).DataSource.SourceKey
+	firefoxGroup := findParameter(t, firefox.Parameters, paramKeyProfileName).DataSource.Group
+	chromeGroup := findParameter(t, chrome.Parameters, paramKeyProfileName).DataSource.Group
 
-	if firefoxKey == "" || chromeKey == "" {
-		t.Fatalf("expected both templates to declare a profileName sourceKey, got firefox=%q chrome=%q", firefoxKey, chromeKey)
+	if firefoxGroup == "" || chromeGroup == "" {
+		t.Fatalf("expected both templates to declare a profileName group, got firefox=%q chrome=%q", firefoxGroup, chromeGroup)
 	}
-	if firefoxKey == chromeKey {
-		t.Fatalf("expected distinct profileName sourceKeys, both were %q", firefoxKey)
+	if firefoxGroup == chromeGroup {
+		t.Fatalf("expected distinct profileName groups, both were %q", firefoxGroup)
 	}
 }
 
@@ -331,22 +332,12 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result) != 2 || result[0].Name != "result" || result[0].Type != AdditionalInfoPlain || result[0].Value != "backup_state.success" {
-		t.Fatalf("expected a plain result AdditionalInfo with a stable message key, got %+v", result)
+	if len(result.AdditionalInfo) != 1 || result.AdditionalInfo[0].Name != "result" ||
+		result.AdditionalInfo[0].Type != AdditionalInfoPlain || result.AdditionalInfo[0].Value != "backup_state.success" {
+		t.Fatalf("expected a single plain result AdditionalInfo with a stable message key, got %+v", result.AdditionalInfo)
 	}
-	insertRow, ok := result[1].Value.(InsertRowValue)
-	if result[1].Name != "profile" || result[1].Type != AdditionalInfoInsertRow || !ok {
-		t.Fatalf("expected an insert_row AdditionalInfo, got %+v", result[1])
-	}
-	if insertRow.Table != "selectOptions" {
-		t.Fatalf("expected insert_row to target the selectOptions table, got %+v", insertRow)
-	}
-	fields, ok := insertRow.Fields.(selectOptionsInsertFields)
-	if !ok {
-		t.Fatalf("expected selectOptionsInsertFields, got %+v", insertRow.Fields)
-	}
-	if fields.SourceKey != profileSourceKeyFirefox || fields.Label != "test backup" || fields.Handler != selectOptionsHandlerR2 {
-		t.Fatalf("unexpected insert_row fields: %+v", fields)
+	if result.File == nil || result.File.Type != "browser_profile_backup" || result.File.Label != "test backup" {
+		t.Fatalf("expected a browser_profile_backup FileResult, got %+v", result.File)
 	}
 
 	if exec.namespace != testNamespace || exec.podName != testFirefoxPod || exec.container != templateIDFirefox {

@@ -35,11 +35,11 @@ const (
 	templateIDChrome  = "chrome"
 
 	// profileSourceKeyFirefox/profileSourceKeyChrome are each browser's
-	// selectOptions sourceKey — computed once here and reused by both
-	// browserParameters (the restore picker's dataSource) and
-	// backupStateFunction (the insert_row directive backup_state emits),
-	// so the two never drift apart the way separate ad hoc string concats
-	// at each call site could.
+	// files-table group — computed once here and reused by both
+	// browserParameters (the restore picker's DataSource.Group) and
+	// backupStateFunction (the uploadUrl param's DataSource.Group, and the
+	// FileResult a successful backup produces), so the two never drift
+	// apart the way separate ad hoc string concats at each call site could.
 	profileSourceKeyFirefox = "profiles_" + templateIDFirefox
 	profileSourceKeyChrome  = "profiles_" + templateIDChrome
 
@@ -74,13 +74,6 @@ const (
 	paramKeyLabel          = "label"
 	paramKeyProfileName    = "profileName"
 
-	// selectOptionsHandlerR2 names the Convex-side handler (see
-	// ai-cloud-v2's convex/selectOptions/handlers.ts) that knows how to
-	// turn a selectOptions row's data back into a usable value for this
-	// operation's insert_row directive — an R2 object key here, resolved
-	// into a presigned download URL on restore.
-	selectOptionsHandlerR2 = "r2_helper"
-
 	// initialTemplateVersion is every template's Version until its
 	// Parameters change for the first time — see Template.Version.
 	initialTemplateVersion = "1.0.0"
@@ -95,7 +88,7 @@ const (
 // profileSourceKey scopes the profile picker (and, on the Convex side,
 // wherever backed-up profiles get recorded) to one specific browser —
 // Firefox and Chrome profile tarballs aren't interchangeable, so they must
-// never share one dynamic-select catalog. Callers pass a distinct key per
+// never share one files-table group. Callers pass a distinct key per
 // template (see firefox.go/chrome.go).
 func browserParameters(profileSourceKey string) []Parameter {
 	return []Parameter{
@@ -103,11 +96,11 @@ func browserParameters(profileSourceKey string) []Parameter {
 			Key:         paramKeyProfileName,
 			Label:       "Profile name",
 			Description: "Identifies which saved profile to restore, if any.",
-			// The value is a selectOptions row id, not a literal profile name —
+			// The value is a files-table row id, not a literal profile name —
 			// Convex resolves it back to an actual R2 object when restoring (see
 			// convex/workloads/actions.ts#deployWorkload).
 			Type:       ParameterTypeSelect,
-			DataSource: DataSource{Kind: DataSourceDynamic, SourceKey: profileSourceKey},
+			DataSource: DataSource{Kind: DataSourceFileOptions, Group: profileSourceKey},
 			Required:   false,
 			// Only meaningful when a restore was actually requested — same
 			// condition as profileDownloadUrl below, so the picker doesn't invite
@@ -129,7 +122,6 @@ func browserParameters(profileSourceKey string) []Parameter {
 			Type:  ParameterTypeString,
 			DataSource: DataSource{
 				Kind:        DataSourceFile,
-				Handler:     selectOptionsHandlerR2,
 				Direction:   DirectionDownload,
 				SourceParam: paramKeyProfileName,
 			},
@@ -187,16 +179,6 @@ chmod -R 755 /config
 	}
 }
 
-// selectOptionsInsertFields is the Fields shape the Convex-side
-// selectOptions row-directive target (registered under table
-// "selectOptions", see ai-cloud-v2's convex/selectOptions/
-// rowDirectiveTarget.ts) expects for backup_state's insert_row.
-type selectOptionsInsertFields struct {
-	Handler   string `json:"handler"`
-	Label     string `json:"label"`
-	SourceKey string `json:"sourceKey"`
-}
-
 // backupStateFunction builds the "backup_state" Operation shared by
 // firefox/chrome: the first instance of the reusable operation pattern (see
 // catalog.Operation) — a named operation against an already-running
@@ -237,28 +219,27 @@ func backupStateFunction(profilePath, containerName, profileSourceKey string) Op
 				Type:  ParameterTypeString,
 				DataSource: DataSource{
 					Kind:      DataSourceFile,
-					Handler:   selectOptionsHandlerR2,
 					Direction: DirectionUpload,
+					Group:     profileSourceKey,
 				},
 				Required: true,
 			},
 		},
-		// The success result carries two AdditionalInfo entries: a stable,
-		// namespaced message key ("backup_state.success"), not raw shell
-		// stdout — tar/curl both run silently (no -v/-s output to
-		// surface), so stdout was never meaningfully informative anyway,
-		// and a literal English string can't be localized (the frontend
-		// looks this key up in its own translation table) — plus an
-		// insert_row directive so Convex records this backup as a future
-		// restore option, using "label" (read here, with a timestamp
-		// fallback if the caller left it blank) and profileSourceKey.
-		// Failures instead surface as a real Go error below (wrapping
-		// stderr), which the API layer returns as a plain error string,
-		// not a translatable AdditionalInfo.
-		Run: func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) ([]AdditionalInfo, error) {
+		// The success result carries a stable, namespaced message key
+		// ("backup_state.success") in AdditionalInfo, not raw shell stdout
+		// — tar/curl both run silently (no -v/-s output to surface), so
+		// stdout was never meaningfully informative anyway, and a literal
+		// English string can't be localized (the frontend looks this key
+		// up in its own translation table) — plus a FileResult so Convex
+		// records this backup as a future restore option, using "label"
+		// (read here, with a timestamp fallback if the caller left it
+		// blank). Failures instead surface as a real Go error below
+		// (wrapping stderr), which the API layer returns as a plain error
+		// string, not a translatable AdditionalInfo.
+		Run: func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) (OperationResult, error) {
 			uploadURL := paramString(params, paramKeyUploadURL, "")
 			if uploadURL == "" {
-				return nil, fmt.Errorf("uploadUrl is required")
+				return OperationResult{}, fmt.Errorf("uploadUrl is required")
 			}
 			const script = `set -e
 tar czf /tmp/backup.tar.gz -C /config "$1"
@@ -268,22 +249,17 @@ rm -f /tmp/backup.tar.gz
 			command := []string{"/bin/sh", "-c", script, "sh", profilePath, uploadURL}
 			_, stderr, err := exec.Exec(ctx, pod.Namespace, pod.PodName, containerName, command)
 			if err != nil {
-				return nil, fmt.Errorf("backup exec failed: %w (stderr: %s)", err, stderr)
+				return OperationResult{}, fmt.Errorf("backup exec failed: %w (stderr: %s)", err, stderr)
 			}
 			label := paramString(params, paramKeyLabel, "")
 			if label == "" {
 				label = fmt.Sprintf("Backup %s", time.Now().UTC().Format(time.RFC3339))
 			}
-			return []AdditionalInfo{
-				{Name: "result", Type: AdditionalInfoPlain, Value: "backup_state.success"},
-				{Name: "profile", Type: AdditionalInfoInsertRow, Value: InsertRowValue{
-					Table: "selectOptions",
-					Fields: selectOptionsInsertFields{
-						Handler:   selectOptionsHandlerR2,
-						Label:     label,
-						SourceKey: profileSourceKey,
-					},
-				}},
+			return OperationResult{
+				AdditionalInfo: []AdditionalInfo{
+					{Name: "result", Type: AdditionalInfoPlain, Value: "backup_state.success"},
+				},
+				File: &FileResult{Type: "browser_profile_backup", Label: label},
 			}, nil
 		},
 	}

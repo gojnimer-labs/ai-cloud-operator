@@ -246,6 +246,7 @@ type runFunctionRequest struct {
 
 type runFunctionResponse struct {
 	AdditionalInfo []catalog.AdditionalInfo `json:"additionalInfo"`
+	File           *catalog.FileResult      `json:"file,omitempty"`
 }
 
 // handleRunFunction invokes a named Operation (see catalog.Template's
@@ -309,7 +310,7 @@ func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(runFunctionResponse{AdditionalInfo: result})
+	_ = json.NewEncoder(w).Encode(runFunctionResponse{AdditionalInfo: result.AdditionalInfo, File: result.File})
 }
 
 type deployRequest struct {

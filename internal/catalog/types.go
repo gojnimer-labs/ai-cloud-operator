@@ -75,6 +75,13 @@ const (
 	// specific label than the generic "system" for this common case.
 	// Prefer this over DataSourceSystem whenever the value is a file URL.
 	DataSourceFile DataSourceKind = "file"
+	// DataSourceFileOptions marks a ParameterTypeSelect parameter whose
+	// Options are files Convex resolves from its own files table, scoped by
+	// DataSource.Group — the files-table counterpart to DataSourceDynamic/
+	// selectOptions. Like DataSourceDynamic, the operator only declares
+	// *that* a select needs this and *which* group backs it; Convex holds
+	// the actual file records.
+	DataSourceFileOptions DataSourceKind = "fileOptions"
 )
 
 // FileDirection distinguishes the two things a DataSourceFile parameter can
@@ -98,18 +105,19 @@ type DataSource struct {
 	// options. Only meaningful when Kind == DataSourceDynamic.
 	SourceKey string `json:"sourceKey,omitempty"`
 
-	// Handler names the Convex-side handler (see ai-cloud-v2's
-	// convex/selectOptions/handlers.ts) responsible for this file
-	// parameter — minting an upload target (Direction == DirectionUpload)
-	// or resolving a selected row's stored payload into a URL (Direction
-	// == DirectionDownload). Only meaningful when Kind == DataSourceFile.
-	Handler string `json:"handler,omitempty"`
 	// Direction — see FileDirection. Only meaningful when Kind == DataSourceFile.
 	Direction FileDirection `json:"direction,omitempty"`
 	// SourceParam names another Parameter.Key in the same Parameters list
-	// whose resolved value is a selectOptions row id to resolve via
-	// Handler. Only meaningful when Direction == DirectionDownload.
+	// whose resolved value is a files-table row id to resolve into a URL.
+	// Only meaningful when Kind == DataSourceFile and Direction ==
+	// DirectionDownload.
 	SourceParam string `json:"sourceParam,omitempty"`
+	// Group names which group of files this belongs to — for
+	// DataSourceFileOptions, which group to list as this select's options;
+	// for DataSourceFile with Direction == DirectionUpload, which group a
+	// newly-uploaded file should be filed under (matching the
+	// DataSourceFileOptions parameter that will later list it).
+	Group string `json:"group,omitempty"`
 }
 
 // VisibilityOp is the comparison a Visibility condition applies to the
@@ -216,62 +224,39 @@ const (
 	// AdditionalInfoPlain is informational — display as-is, no special
 	// handling.
 	AdditionalInfoPlain AdditionalInfoType = "plain"
-	// AdditionalInfoInsertRow, AdditionalInfoUpdateRow, and
-	// AdditionalInfoRemoveRow are processing directives, not display
-	// values: Convex consumes them server-side against a named
-	// row-directive target (see ai-cloud-v2's
-	// convex/rowDirectives/registry.ts) and strips them before returning a
-	// result to the frontend. See InsertRowValue, UpdateRowValue,
-	// RemoveRowValue for each one's Value payload shape.
-	AdditionalInfoInsertRow AdditionalInfoType = "insert_row"
-	AdditionalInfoUpdateRow AdditionalInfoType = "update_row"
-	AdditionalInfoRemoveRow AdditionalInfoType = "remove_row"
 )
 
-// InsertRowValue is the Value payload for an AdditionalInfo entry of Type
-// AdditionalInfoInsertRow — a request for Convex to create a row via a
-// named row-directive target (see ai-cloud-v2's
-// convex/rowDirectives/registry.ts). This directive system is not specific
-// to any one table or feature — Table names which registered target
-// handles it; selectOptions is just its first target. Fields is opaque at
-// this layer (any JSON value) — only the named target's own implementation
-// knows how to interpret it, and Convex validates it there, not here.
-// Convex supplies everything it alone holds (the owning userId, any
-// credential-derived data like an R2 key) itself and is never asked to
-// trust operator-supplied identity for those.
-type InsertRowValue struct {
-	Table  string `json:"table"`
-	Fields any    `json:"fields"`
-}
-
-// UpdateRowValue is the Value payload for AdditionalInfoUpdateRow. RowID
-// must be a row id the operation itself received back as one of its own
-// params (the same row-id-as-param-value pattern profileName already uses
-// for restore, see browserParameters) — the operator never invents one,
-// and the target's own mutation re-checks ownership before touching
-// anything regardless.
-type UpdateRowValue struct {
-	Table  string `json:"table"`
-	RowID  string `json:"rowId"`
-	Fields any    `json:"fields"`
-}
-
-// RemoveRowValue is the Value payload for AdditionalInfoRemoveRow — same
-// RowID sourcing/ownership rules as UpdateRowValue.
-type RemoveRowValue struct {
-	Table string `json:"table"`
-	RowID string `json:"rowId"`
-}
-
-// AdditionalInfo is one named value an Operation's Run produces. Unlike
-// Parameter (an input schema), there's no separate static declaration of
-// what an Operation's Outputs will be — the type travels with the value at
-// the moment Run actually returns it, so there's no schema/instance drift
-// to keep in sync.
+// AdditionalInfo is one named value an Operation's Run produces — always
+// display data for the caller (secret/plain), never a processing
+// directive. Unlike Parameter (an input schema), there's no separate static
+// declaration of what an Operation's Outputs will be — the type travels
+// with the value at the moment Run actually returns it, so there's no
+// schema/instance drift to keep in sync.
 type AdditionalInfo struct {
 	Name  string             `json:"name"`
 	Type  AdditionalInfoType `json:"type"`
 	Value any                `json:"value"`
+}
+
+// FileResult is set on OperationResult when a Run call produced a file
+// worth recording (e.g. a completed backup) — see backupStateFunction in
+// browser.go for the only current producer. Convex creates the actual
+// files-table row itself using data only it holds (the R2 key/bucket it
+// minted before calling the operator); this only carries what the
+// operator itself decided.
+type FileResult struct {
+	// Type is a free-form kind tag, e.g. "browser_profile_backup".
+	Type string `json:"type"`
+	// Label is the display name for the resulting file (e.g. a
+	// user-supplied backup name).
+	Label string `json:"label"`
+}
+
+// OperationResult is what Operation.Run returns.
+type OperationResult struct {
+	AdditionalInfo []AdditionalInfo `json:"additionalInfo"`
+	// File is nil unless this call produced a file worth recording.
+	File *FileResult `json:"file,omitempty"`
 }
 
 // Operation is a named operation a template exposes against an
@@ -294,8 +279,8 @@ type Operation struct {
 	// reading (e.g. reading a token file), as opposed to one like
 	// backup_state that does real work and should only run when a user
 	// deliberately triggers it.
-	Refreshable bool                                                                                                     `json:"refreshable"`
-	Run         func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) ([]AdditionalInfo, error) `json:"-"`
+	Refreshable bool                                                                                                    `json:"refreshable"`
+	Run         func(ctx context.Context, exec PodExecutor, pod PodRef, params map[string]any) (OperationResult, error) `json:"-"`
 }
 
 // Entrypoint is one web entrypoint a template's Service exposes — catalog
