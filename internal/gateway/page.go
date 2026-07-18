@@ -37,6 +37,7 @@ const (
 	pageLoading         pageKind = "loading"
 	pageFailed          pageKind = "failed"
 	pageStopped         pageKind = "stopped"
+	pageNotFound        pageKind = "notfound"
 	pageUnauthenticated pageKind = "unauthenticated"
 )
 
@@ -109,6 +110,19 @@ func renderFailedPage(w http.ResponseWriter, r *http.Request, name, message stri
 func renderStoppedPage(w http.ResponseWriter, r *http.Request, name string) {
 	renderPage(w, r, http.StatusOK, pageData{
 		Kind: pageStopped,
+		Name: name,
+	})
+}
+
+// renderNotFoundPage shows that no Workload exists by this name — deleted,
+// never existed, or a mistyped link. Distinct from renderStoppedPage even
+// though both are terminal/non-self-refreshing: this is Handler's very
+// first lookup, before there's any Workload object to read a phase from at
+// all, so it has no Ready-condition message or phase to show — just the
+// name from the URL itself.
+func renderNotFoundPage(w http.ResponseWriter, r *http.Request, name string) {
+	renderPage(w, r, http.StatusNotFound, pageData{
+		Kind: pageNotFound,
 		Name: name,
 	})
 }

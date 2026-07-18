@@ -102,7 +102,7 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 		var workload appsv1alpha1.Workload
 		if err := p.k8sClient.Get(r.Context(), client.ObjectKey{Namespace: p.namespace, Name: name}, &workload); err != nil {
 			if apierrors.IsNotFound(err) {
-				http.Error(w, "workload not found", http.StatusNotFound)
+				renderNotFoundPage(w, r, name)
 				return
 			}
 			log.Error(err, "resolving workload")

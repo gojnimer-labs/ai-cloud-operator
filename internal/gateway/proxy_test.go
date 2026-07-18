@@ -169,7 +169,7 @@ func TestHandlerReturns404WhenEntrypointUnknown(t *testing.T) {
 	}
 }
 
-func TestHandlerReturns404WhenWorkloadMissing(t *testing.T) {
+func TestHandlerServesNotFoundPageWhenWorkloadMissing(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding scheme: %v", err)
@@ -194,8 +194,17 @@ func TestHandlerReturns404WhenWorkloadMissing(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "text/html") {
-		t.Fatalf("expected plain-text 404 (not the HTML waiting page), got Content-Type %q", ct)
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("expected the HTML not-found page, got Content-Type %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "demo") {
+		t.Fatalf("expected workload name %q in not-found page, got: %s", "demo", body)
+	}
+	// A missing Workload won't come back on its own — must not poll like the
+	// loading/failed pages do.
+	if strings.Contains(body, `<meta http-equiv="refresh"`) {
+		t.Fatalf("expected no self-refresh meta tag on the not-found page, got: %s", body)
 	}
 }
 

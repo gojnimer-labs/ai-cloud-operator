@@ -95,6 +95,28 @@ func TestRenderStoppedPageDoesNotSelfRefresh(t *testing.T) {
 	}
 }
 
+func TestRenderNotFoundPageDoesNotSelfRefresh(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testPageWorkloadName+"/http/", nil)
+	rec := httptest.NewRecorder()
+
+	renderNotFoundPage(rec, req, testPageWorkloadName)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("expected text/html Content-Type, got %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, testPageWorkloadName) {
+		t.Fatalf("expected workload name %q in not-found page, got: %s", testPageWorkloadName, body)
+	}
+	// A deleted/nonexistent workload won't come back on its own.
+	if strings.Contains(body, `<meta http-equiv="refresh"`) {
+		t.Fatalf("expected no self-refresh meta tag on the not-found page, got: %s", body)
+	}
+}
+
 func TestRenderUnauthenticatedPageDoesNotSelfRefresh(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/gw/"+testPageWorkloadName+"/http/", nil)
 	rec := httptest.NewRecorder()

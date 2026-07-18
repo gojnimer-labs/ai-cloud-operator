@@ -5,7 +5,7 @@
   {{if .ShowRefresh}}<meta http-equiv="refresh" content="{{.RefreshSeconds}}">{{end}}
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-  <title>{{if eq .Kind "loading"}}Starting up{{else if eq .Kind "failed"}}Deployment failed{{else if eq .Kind "stopped"}}Stopped{{else}}Link expired{{end}}{{if .Name}} — {{.Name}}{{end}}</title>
+  <title>{{if eq .Kind "loading"}}Starting up{{else if eq .Kind "failed"}}Deployment failed{{else if eq .Kind "stopped"}}Stopped{{else if eq .Kind "notfound"}}Not found{{else}}Link expired{{end}}{{if .Name}} — {{.Name}}{{end}}</title>
   <style>
     :root { color-scheme: dark; }
     html, body {
@@ -92,6 +92,7 @@
     }
     .icon.failed { background: rgba(248, 81, 73, 0.15); color: #f85149; }
     .icon.stopped { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
+    .icon.notfound { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
     .icon.unauthenticated { background: rgba(210, 153, 34, 0.15); color: #d29922; }
   </style>
 </head>
@@ -111,6 +112,10 @@
       <div class="icon stopped" aria-hidden="true">&#9632;</div>
       <h1>{{if .Name}}{{.Name}}{{else}}This workspace{{end}} is stopped</h1>
       <p>It was intentionally stopped and won't start on its own. Resume it from the dashboard to continue.</p>
+    {{else if eq .Kind "notfound"}}
+      <div class="icon notfound" aria-hidden="true">?</div>
+      <h1>{{if .Name}}{{.Name}}{{else}}This workspace{{end}} doesn't exist</h1>
+      <p>It may have been deleted, or the link may be mistyped.</p>
     {{else}}
       <div class="icon unauthenticated" aria-hidden="true">&#128274;</div>
       <h1>This link is no longer valid</h1>
