@@ -381,9 +381,38 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 	}), verifier
 }
 
+// exchangeGatewayToken performs a token-bearing gateway request against the
+// "http" entrypoint of testServiceName and asserts it redirects — rather
+// than serving content directly on the same response — to the same path
+// with ?token= stripped, carrying exactly one cookie. See
+// requireGatewayToken's doc comment for why: the one-time token must never
+// linger in the address bar, browser history, or a bookmark once it's been
+// exchanged for a cookie. Returns that cookie for the caller's own
+// follow-up request.
+func exchangeGatewayToken(t *testing.T, s *Server) *http.Cookie {
+	t.Helper()
+	requestPath := "/gw/" + testServiceName + "/http/?token=" + testOneTimeToken
+	req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect after token exchange, got %d: %s", rec.Code, rec.Body.String())
+	}
+	wantLocation, _, _ := strings.Cut(requestPath, "?")
+	if got := rec.Header().Get("Location"); got != wantLocation {
+		t.Fatalf("expected redirect Location %q with token stripped, got %q", wantLocation, got)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != gatewayCookieName {
+		t.Fatalf("expected a %s cookie to be set, got %+v", gatewayCookieName, cookies)
+	}
+	return cookies[0]
+}
+
 func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 	// Stand in for the real kube-apiserver so we can assert the proxied
-	// request actually reaches it once the gateway token passes.
+	// request actually reaches it once the gateway cookie passes.
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wantPath := "/api/v1/namespaces/" + testServiceNS + "/services/" + testServiceName + ":8080/proxy/"
 		if r.URL.Path != wantPath {
@@ -396,7 +425,16 @@ func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
+	cookie := exchangeGatewayToken(t, s)
+	wantPath := "/gw/" + testServiceName
+	if cookie.Path != wantPath {
+		t.Fatalf("expected cookie Path %q, got %q", wantPath, cookie.Path)
+	}
+
+	// The browser's next request is the redirect target: same path, cookie
+	// attached, no token — this is what actually has to reach the service.
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/", nil)
+	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec, req)
 
@@ -405,15 +443,6 @@ func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
 	}
 	if rec.Body.String() != "ok from service" {
 		t.Fatalf("unexpected proxied body: %q", rec.Body.String())
-	}
-
-	cookies := rec.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != gatewayCookieName {
-		t.Fatalf("expected a %s cookie to be set, got %+v", gatewayCookieName, cookies)
-	}
-	wantPath := "/gw/" + testServiceName
-	if cookies[0].Path != wantPath {
-		t.Fatalf("expected cookie Path %q, got %q", wantPath, cookies[0].Path)
 	}
 }
 
@@ -426,12 +455,7 @@ func TestGatewayTokenIsSingleUse(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
-	rec := httptest.NewRecorder()
-	s.testHandler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected first use to succeed, got %d", rec.Code)
-	}
+	exchangeGatewayToken(t, s)
 
 	// Same token again, no cookie this time — the fake verifier already
 	// deleted it on first use, exactly like Convex's real single-use check.
@@ -452,23 +476,14 @@ func TestGatewayCookieAuthorizesSubsequentRequestsWithoutToken(t *testing.T) {
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
-	rec := httptest.NewRecorder()
-	s.testHandler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected exchange request to succeed, got %d", rec.Code)
-	}
-	cookies := rec.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("expected a cookie to be set")
-	}
+	cookie := exchangeGatewayToken(t, s)
 
 	// A follow-up request — as a sub-resource load would be — carries the
 	// cookie but no ?token=. This must succeed purely from the cookie: the
 	// one-time token was already consumed above, so any accidental fallback
 	// to the verifier would fail this request.
 	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/assets/app.js", nil)
-	req2.AddCookie(cookies[0])
+	req2.AddCookie(cookie)
 	rec2 := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec2, req2)
 
@@ -492,21 +507,12 @@ func TestGatewayCookieAuthorizesDifferentEntrypointsOfSameWorkload(t *testing.T)
 	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
-	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token="+testOneTimeToken, nil)
-	rec := httptest.NewRecorder()
-	s.testHandler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected exchange request against the http entrypoint to succeed, got %d", rec.Code)
-	}
-	cookies := rec.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("expected a cookie to be set")
-	}
+	cookie := exchangeGatewayToken(t, s)
 
 	// Same cookie, no token, but against the "backoffice" entrypoint of the
 	// same workload — must succeed purely from the workload-scoped cookie.
 	req2 := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/backoffice/", nil)
-	req2.AddCookie(cookies[0])
+	req2.AddCookie(cookie)
 	rec2 := httptest.NewRecorder()
 	s.testHandler().ServeHTTP(rec2, req2)
 

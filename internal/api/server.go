@@ -208,8 +208,11 @@ func (s *Server) requireDeployToken(next http.Handler) http.Handler {
 //     Authorization header, so the token has to ride in the URL). The
 //     operator hands it to Convex to verify+consume (the only party that
 //     can enforce true single-use), and on success mints its own session
-//     cookie scoped to this exact workload so every later request —
-//     including sub-resource ones — authenticates from the cookie alone.
+//     cookie scoped to this exact workload, then redirects to the same URL
+//     with ?token= stripped — the freshly-set cookie authorizes that
+//     redirected request via the fast path above, so the exchange never
+//     leaves the one-time token sitting in the address bar, browser
+//     history, or a bookmark.
 //
 // Both rejection paths render gateway.RenderUnauthenticatedPage rather than
 // a plain-text 401 — this route is reached by an actual browser navigation
@@ -256,7 +259,19 @@ func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 			Secure:   true,
 			SameSite: http.SameSiteLaxMode,
 		})
-		next.ServeHTTP(w, r)
+
+		// Redirect rather than serve next directly: a browser processes
+		// Set-Cookie headers before following Location, so the redirected
+		// request carries the cookie just set and re-enters this handler on
+		// the fast path above — no second Convex round trip. r.URL here is
+		// the request-target form (path + query only, no scheme/host), so
+		// this is always a same-origin relative redirect, never an
+		// open-redirect risk from a spoofed Host header.
+		clean := *r.URL
+		q := clean.Query()
+		q.Del("token")
+		clean.RawQuery = q.Encode()
+		http.Redirect(w, r, clean.String(), http.StatusFound)
 	})
 }
 
