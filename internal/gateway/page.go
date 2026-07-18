@@ -36,6 +36,7 @@ type pageKind string
 const (
 	pageLoading         pageKind = "loading"
 	pageFailed          pageKind = "failed"
+	pageStopped         pageKind = "stopped"
 	pageUnauthenticated pageKind = "unauthenticated"
 )
 
@@ -95,6 +96,20 @@ func renderFailedPage(w http.ResponseWriter, r *http.Request, name, message stri
 		Message:        message,
 		RefreshSeconds: refreshSeconds,
 		ShowRefresh:    true,
+	})
+}
+
+// renderStoppedPage shows that a workload is intentionally suspended
+// (Spec.Suspended=true, Status.Phase=Stopped) rather than starting up or
+// broken. Unlike loading/failed, this is a stable, terminal-until-resumed
+// state — nothing about it changes on its own, so like
+// RenderUnauthenticatedPage it deliberately does not self-refresh; polling
+// every few seconds while a user has to go elsewhere to resume it would
+// just be noise.
+func renderStoppedPage(w http.ResponseWriter, r *http.Request, name string) {
+	renderPage(w, r, http.StatusOK, pageData{
+		Kind: pageStopped,
+		Name: name,
 	})
 }
 

@@ -110,16 +110,26 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 			return
 		}
 
-		if workload.Status.Phase == appsv1alpha1.PhaseFailed {
+		// Every Workload phase (see appsv1alpha1.Phase* et al.) gets an
+		// explicit case here rather than falling through an `!=
+		// PhaseRunning` catch-all — that used to send Stopped down the same
+		// path as Deploying, showing an endlessly-refreshing "starting up"
+		// spinner for a workload that was intentionally suspended and won't
+		// start on its own.
+		switch workload.Status.Phase {
+		case appsv1alpha1.PhaseFailed:
 			var message string
 			if cond := apimeta.FindStatusCondition(workload.Status.Conditions, appsv1alpha1.ConditionTypeReady); cond != nil {
 				message = cond.Message
 			}
 			renderFailedPage(w, r, name, message, gatewayPageRefreshSeconds)
 			return
-		}
-
-		if workload.Status.Phase != appsv1alpha1.PhaseRunning {
+		case appsv1alpha1.PhaseStopped:
+			renderStoppedPage(w, r, name)
+			return
+		case appsv1alpha1.PhaseRunning:
+			// Fall through to Service resolution below.
+		default:
 			renderLoadingPage(w, r, name, gatewayPageRefreshSeconds)
 			return
 		}

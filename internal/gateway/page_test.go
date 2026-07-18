@@ -75,6 +75,26 @@ func TestRenderFailedPageShowsMessageAndKeepsRefreshing(t *testing.T) {
 	}
 }
 
+func TestRenderStoppedPageDoesNotSelfRefresh(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testPageWorkloadName+"/http/", nil)
+	rec := httptest.NewRecorder()
+
+	renderStoppedPage(rec, req, testPageWorkloadName)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, testPageWorkloadName) {
+		t.Fatalf("expected workload name %q in stopped page, got: %s", testPageWorkloadName, body)
+	}
+	// Stopped is stable until a user resumes it elsewhere — nothing about it
+	// changes on its own, so unlike loading/failed this must not poll.
+	if strings.Contains(body, `<meta http-equiv="refresh"`) {
+		t.Fatalf("expected no self-refresh meta tag on the stopped page, got: %s", body)
+	}
+}
+
 func TestRenderUnauthenticatedPageDoesNotSelfRefresh(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/gw/"+testPageWorkloadName+"/http/", nil)
 	rec := httptest.NewRecorder()

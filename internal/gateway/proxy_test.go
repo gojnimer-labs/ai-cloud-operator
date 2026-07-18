@@ -290,6 +290,46 @@ func TestHandlerServesFailedPageWhenWorkloadFailed(t *testing.T) {
 	}
 }
 
+func TestHandlerServesStoppedPageWhenWorkloadStopped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("adding scheme: %v", err)
+	}
+	wl := &appsv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Status:     appsv1alpha1.WorkloadStatus{Phase: "Stopped", ReadyReplicas: 0},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(wl).Build()
+
+	proxy, err := NewServiceProxy(fakeClient, &rest.Config{Host: testInvalidAPIServerHost}, namespace)
+	if err != nil {
+		t.Fatalf("NewServiceProxy: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/gw/{name}/{entrypoint}/{subpath...}", proxy.Handler())
+
+	req := httptest.NewRequest(http.MethodGet, "/gw/demo/http/", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "stopped") {
+		t.Fatalf("expected the stopped page, got: %s", body)
+	}
+	// A Stopped workload won't start on its own the way Deploying/Failed
+	// might — this must not be the endlessly-polling loading page.
+	if strings.Contains(body, `<meta http-equiv="refresh"`) {
+		t.Fatalf("expected no self-refresh meta tag on the stopped page, got: %s", body)
+	}
+}
+
 // TestNewServiceProxyForcesHTTP1 guards against a real production incident:
 // the API server's services/proxy subresource resets the connection
 // mid-response over HTTP/2 for anything beyond small/simple payloads
