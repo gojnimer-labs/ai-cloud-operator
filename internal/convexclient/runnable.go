@@ -321,6 +321,7 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 			// Lost the race, or it's no longer claimable — nothing to do.
 			continue
 		}
+		log.Info("claimed pending operation", "operation", op.Operation, "name", op.Name, "workloadId", item.WorkloadID)
 
 		switch op.Operation {
 		case operationDestroy:
@@ -329,6 +330,8 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 			}
 			if err := r.destroyer.Destroy(ctx, op.Name); err != nil {
 				log.Error(err, "failed to destroy claimed workload", "name", op.Name)
+			} else {
+				log.Info("destroyed claimed workload", "name", op.Name)
 			}
 		case operationRedeploy:
 			if r.creator == nil {
@@ -336,6 +339,7 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 			}
 			tmpl, ok := catalog.Get(op.TemplateID)
 			if !ok || tmpl.Version != op.TemplateVersion {
+				log.Info("redeploy claim failed template-version check", "name", op.Name, "templateId", op.TemplateID, "claimedVersion", op.TemplateVersion, "catalogFound", ok, "catalogVersion", tmpl.Version)
 				if err := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, reasonTemplateVersionMismatch); err != nil {
 					log.Error(err, "failed to report template-version-mismatch failure", "name", op.Name)
 				}
@@ -346,6 +350,8 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error()); reportErr != nil {
 					log.Error(reportErr, "failed to report redeploy failure", "name", op.Name)
 				}
+			} else {
+				log.Info("redeployed claimed workload, waiting on reconciler to report active", "name", op.Name)
 			}
 		case operationStop, operationResume:
 			if r.creator == nil {
@@ -356,6 +362,8 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error()); reportErr != nil {
 					log.Error(reportErr, "failed to report stop/resume failure", "name", op.Name)
 				}
+			} else {
+				log.Info("set suspended state for claimed workload, waiting on reconciler to report outcome", "name", op.Name, "operation", op.Operation)
 			}
 		default:
 			log.Info("ignoring pending operation of unknown kind", "operation", op.Operation, "name", op.Name)
