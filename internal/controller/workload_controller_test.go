@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -60,6 +61,7 @@ type fakeNotifier struct {
 	lifecycles   []lifecycleReport
 	upsertErr    error
 	lifecycleErr error
+	removeErr    error
 }
 
 func (f *fakeNotifier) UpsertWorkload(_ context.Context, info convexclient.WorkloadInfo) error {
@@ -73,7 +75,7 @@ func (f *fakeNotifier) RemoveWorkload(_ context.Context, name, namespace string)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removals = append(f.removals, types.NamespacedName{Name: name, Namespace: namespace})
-	return nil
+	return f.removeErr
 }
 
 func (f *fakeNotifier) ReportLifecycle(_ context.Context, name, workloadID, phase, reason string) error {
@@ -108,6 +110,26 @@ func (f *fakeNotifier) lastLifecycle() lifecycleReport {
 		return lifecycleReport{}
 	}
 	return f.lifecycles[len(f.lifecycles)-1]
+}
+
+// forceRemoveFinalizers is test cleanup only — production finalizer removal
+// always goes through WorkloadReconciler.reconcileDelete's
+// notify-then-release path. Every AfterEach below deletes its Workload
+// without a follow-up Reconcile call, and workloadFinalizer now blocks a
+// bare k8sClient.Delete from actually removing the object (it only sets
+// DeletionTimestamp) — this strips the finalizer directly so cleanup
+// between tests behaves the same as it did before the finalizer existed.
+// A no-op if the object is already gone or already finalizer-free.
+func forceRemoveFinalizers(ctx context.Context, key types.NamespacedName) {
+	var workload appsv1alpha1.Workload
+	if err := k8sClient.Get(ctx, key, &workload); err != nil {
+		return
+	}
+	if len(workload.Finalizers) == 0 {
+		return
+	}
+	workload.Finalizers = nil
+	_ = k8sClient.Update(ctx, &workload)
 }
 
 var _ = Describe("Workload Controller", func() {
@@ -150,6 +172,7 @@ var _ = Describe("Workload Controller", func() {
 
 			By("Cleanup the specific resource instance Workload")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			forceRemoveFinalizers(ctx, typeNamespacedName)
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
@@ -162,8 +185,11 @@ var _ = Describe("Workload Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			By("adding workloadFinalizer in the same pass")
+			var reconciled appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &reconciled)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(&reconciled, workloadFinalizer)).To(BeTrue())
 		})
 
 	})
@@ -186,6 +212,7 @@ var _ = Describe("Workload Controller", func() {
 			workload := &appsv1alpha1.Workload{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
 				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
 			}
 			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
@@ -233,6 +260,7 @@ var _ = Describe("Workload Controller", func() {
 			workload := &appsv1alpha1.Workload{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
 				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
 			}
 			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
@@ -284,6 +312,124 @@ var _ = Describe("Workload Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(notifier.removalCount()).To(Equal(1))
 			Expect(notifier.removals[0]).To(Equal(typeNamespacedName))
+
+			// workloadFinalizer only releases once the notify above
+			// succeeds — confirm the object is actually gone, not just
+			// marked DeletionTimestamp, in this single reconcile pass.
+			err = k8sClient.Get(ctx, typeNamespacedName, &appsv1alpha1.Workload{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	Context("When Convex notify fails during deletion", func() {
+		const (
+			resourceName      = "test-resource-notify-delete-retry"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
+			}
+			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+		})
+
+		It("keeps workloadFinalizer and retries on every reconcile until the removal notify succeeds", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			notifier := &fakeNotifier{removeErr: fmt.Errorf("simulated convex outage")}
+			controllerReconciler := &WorkloadReconciler{
+				Client:       k8sClient,
+				ConvexClient: notifier,
+				Scheme:       k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(statusRequeueInterval))
+			Expect(notifier.removalCount()).To(Equal(1))
+
+			// Object must still exist, still finalized, still Terminating —
+			// a failed notify must never let deletion complete.
+			var stillThere appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &stillThere)).To(Succeed())
+			Expect(stillThere.DeletionTimestamp.IsZero()).To(BeFalse())
+			Expect(controllerutil.ContainsFinalizer(&stillThere, workloadFinalizer)).To(BeTrue())
+
+			// Once Convex is reachable again, the next reconcile releases
+			// the finalizer and the object is actually gone.
+			notifier.mu.Lock()
+			notifier.removeErr = nil
+			notifier.mu.Unlock()
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.removalCount()).To(Equal(2))
+
+			err = k8sClient.Get(ctx, typeNamespacedName, &appsv1alpha1.Workload{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	Context("When no WorkloadNotifier is configured", func() {
+		const (
+			resourceName      = "test-resource-no-notifier-delete"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
+			}
+			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+		})
+
+		It("still adds and releases workloadFinalizer cleanly with ConvexClient nil", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			controllerReconciler := &WorkloadReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			var reconciled appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &reconciled)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(&reconciled, workloadFinalizer)).To(BeTrue())
+
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, typeNamespacedName, &appsv1alpha1.Workload{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
 	})
 
@@ -300,6 +446,7 @@ var _ = Describe("Workload Controller", func() {
 			workload := &appsv1alpha1.Workload{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
 				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
 			}
 			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
@@ -373,6 +520,7 @@ var _ = Describe("Workload Controller", func() {
 			workload := &appsv1alpha1.Workload{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
 				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
 			}
 			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
@@ -443,6 +591,7 @@ var _ = Describe("Workload Controller", func() {
 			workload := &appsv1alpha1.Workload{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
 				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
 			}
 			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
@@ -546,6 +695,7 @@ var _ = Describe("Workload Controller", func() {
 			workload := &appsv1alpha1.Workload{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
 				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
 			}
 		})
 

@@ -106,6 +106,17 @@ const (
 	// so a slow/unreachable Convex during syncConvex doesn't serialize
 	// reconciliation of every other Workload in the cluster behind it.
 	maxConcurrentReconciles = 5
+
+	// workloadFinalizer holds deletion of a Workload open until Convex has
+	// confirmed the removal notification (see notifyRemoved) — without it,
+	// a failed notify has nothing left to retry against once the CR is gone
+	// from etcd. Retried indefinitely on notify failure, the same tradeoff
+	// syncConvex/syncConvexLifecyclePhase already accept for other
+	// best-effort Convex syncs. If Convex is unreachable for a prolonged
+	// outage and a Workload needs to be force-deleted anyway, clear it
+	// manually: `kubectl patch workload <name> --type=merge -p
+	// '{"metadata":{"finalizers":[]}}'`.
+	workloadFinalizer = "apps.aicloud.dev/workload-finalizer"
 )
 
 // +kubebuilder:rbac:groups=apps.aicloud.dev,resources=workloads,verbs=get;list;watch;create;update;patch;delete
@@ -123,10 +134,31 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var workload appsv1alpha1.Workload
 	if err := r.Get(ctx, req.NamespacedName, &workload); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.notifyRemoved(ctx, req.NamespacedName)
+			// Fallback for an object that somehow left etcd without going
+			// through reconcileDelete below (e.g. the documented manual
+			// finalizer-clear escape hatch) — best-effort, same reasoning
+			// as notifyRemoved itself.
+			_ = r.notifyRemoved(ctx, req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("getting Workload: %w", err)
+	}
+
+	if !workload.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, &workload)
+	}
+
+	if !controllerutil.ContainsFinalizer(&workload, workloadFinalizer) {
+		controllerutil.AddFinalizer(&workload, workloadFinalizer)
+		if err := r.Update(ctx, &workload); err != nil {
+			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
+		}
+		// No early return: r.Update above refreshes workload's
+		// ResourceVersion/UID in place, so the rest of this reconcile (and
+		// its own r.Status().Update at the end) proceeds against the
+		// now-current object in the same pass, exactly as it would have
+		// without a finalizer — one Reconcile call still fully processes a
+		// newly-created Workload.
 	}
 
 	// selectorLabels stays exactly what it's always been — Deployment/Service
@@ -340,21 +372,44 @@ func (r *WorkloadReconciler) notifyLifecycle(ctx context.Context, workload *apps
 	return err
 }
 
-// notifyRemoved tells Convex this workload no longer exists. Best-effort,
-// same reasoning as notifyUpserted — but the Workload CR (and so its status,
-// where a retry would otherwise be tracked) is already gone by the time this
-// runs, so unlike notifyUpserted this stays a single fire-and-forget
-// attempt: there's nothing left to record a pending retry against without a
-// finalizer, which is a bigger behavior change than this fix is scoped to.
-func (r *WorkloadReconciler) notifyRemoved(ctx context.Context, key types.NamespacedName) {
+// notifyRemoved tells Convex this workload no longer exists. Retried by
+// reconcileDelete (via workloadFinalizer) until it succeeds; the one
+// remaining fire-and-forget caller is Reconcile's IsNotFound fallback, for
+// an object that left etcd some other way.
+func (r *WorkloadReconciler) notifyRemoved(ctx context.Context, key types.NamespacedName) error {
 	if r.ConvexClient == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, convexNotifyTimeout)
 	defer cancel()
-	if err := r.ConvexClient.RemoveWorkload(ctx, key.Name, key.Namespace); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to notify convex of workload removal (best-effort)")
+	err := r.ConvexClient.RemoveWorkload(ctx, key.Name, key.Namespace)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to notify convex of workload removal")
 	}
+	return err
+}
+
+// reconcileDelete handles a Workload with a non-zero DeletionTimestamp:
+// retries notifyRemoved until it succeeds, then releases workloadFinalizer
+// so the object actually disappears. Kept separate from setFailed since a
+// deleting Workload can't take a Status().Update the way a live one can —
+// the finalizer itself is the only state left to track a pending retry
+// against once deletion has started.
+func (r *WorkloadReconciler) reconcileDelete(ctx context.Context, workload *appsv1alpha1.Workload) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(workload, workloadFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	key := types.NamespacedName{Name: workload.Name, Namespace: workload.Namespace}
+	if err := r.notifyRemoved(ctx, key); err != nil {
+		return ctrl.Result{RequeueAfter: statusRequeueInterval}, nil
+	}
+
+	controllerutil.RemoveFinalizer(workload, workloadFinalizer)
+	if err := r.Update(ctx, workload); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing workload finalizer: %w", err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // setFailed marks the Workload as Failed and surfaces the reconcile error via
