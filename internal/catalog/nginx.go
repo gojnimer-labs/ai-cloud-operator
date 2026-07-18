@@ -18,6 +18,7 @@ package catalog
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -38,6 +39,21 @@ var Nginx = Template{
 					Image: "nginxdemos/hello:latest",
 					Name:  templateIDNginx,
 					Ports: []corev1.ContainerPort{{ContainerPort: 80, Name: portNameHTTP}},
+					// Previously unset entirely, which meant this template
+					// counted as zero-cost toward any capacity accounting
+					// (see internal/capacity) — a static demo page is
+					// genuinely light, but "no request declared" and
+					// "requests essentially nothing" aren't the same thing.
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("50m"),
+							corev1.ResourceMemory: resource.MustParse("64Mi"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("200m"),
+							corev1.ResourceMemory: resource.MustParse("128Mi"),
+						},
+					},
 				},
 			},
 			ServicePorts: []corev1.ServicePort{

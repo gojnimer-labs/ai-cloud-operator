@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
 )
 
@@ -122,6 +123,23 @@ func (c *Client) Register(ctx context.Context) (tokenstore.Tokens, error) {
 
 type heartbeatRequest struct {
 	Name string `json:"name"`
+	// ResourceCapacity is report-only, for the admin fleet-visibility view
+	// (see convex/operators/mutations.ts#markHeartbeat in ai-cloud-v2) — it
+	// is never read by any claim/listClaimable gating logic. omitempty so an
+	// unconfigured Tracker (nil snapshot) leaves Convex's prior value
+	// untouched rather than overwriting it with zeros.
+	ResourceCapacity *resourceCapacityWire `json:"resourceCapacity,omitempty"`
+}
+
+// resourceCapacityWire mirrors capacity.Snapshot's fields for the wire —
+// kept as a separate type (rather than reusing capacity.Snapshot directly)
+// so this package's JSON contract with Convex doesn't silently change shape
+// if capacity.Snapshot ever gains an internal-only field.
+type resourceCapacityWire struct {
+	AllocatableMilliCPU    int64 `json:"allocatableMilliCpu"`
+	AllocatableMemoryBytes int64 `json:"allocatableMemoryBytes"`
+	UsedMilliCPU           int64 `json:"usedMilliCpu"`
+	UsedMemoryBytes        int64 `json:"usedMemoryBytes"`
 }
 
 // claimableWorkloadWire/pendingOperationWire are heartbeatResponse's list
@@ -164,8 +182,22 @@ type PendingOperation struct {
 // internal/convexclient/runnable.go's claim-consumption loop for how both
 // get processed. Returns ErrUnauthorized if Convex rejects the token
 // (401/410), signaling the caller should discard it and re-register.
-func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string) ([]ClaimableWorkload, []PendingOperation, error) {
-	body, err := json.Marshal(heartbeatRequest{Name: c.config.OperatorName})
+//
+// snapshot, when non-nil, is included purely for Convex's admin
+// fleet-visibility view — nil (no Tracker configured, or this tick's
+// Snapshot call errored) omits it from the request entirely rather than
+// sending zeros.
+func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string, snapshot *capacity.Snapshot) ([]ClaimableWorkload, []PendingOperation, error) {
+	var resourceCapacity *resourceCapacityWire
+	if snapshot != nil {
+		resourceCapacity = &resourceCapacityWire{
+			AllocatableMilliCPU:    snapshot.AllocatableMilliCPU,
+			AllocatableMemoryBytes: snapshot.AllocatableMemoryBytes,
+			UsedMilliCPU:           snapshot.UsedMilliCPU,
+			UsedMemoryBytes:        snapshot.UsedMemoryBytes,
+		}
+	}
+	body, err := json.Marshal(heartbeatRequest{Name: c.config.OperatorName, ResourceCapacity: resourceCapacity})
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshaling heartbeat request: %w", err)
 	}
@@ -367,18 +399,28 @@ type reportLifecycleRequest struct {
 	WorkloadID string `json:"workloadId,omitempty"`
 	Phase      string `json:"phase"`
 	Reason     string `json:"reason,omitempty"`
+	// Retryable marks a "failed" report as transient: Convex releases the
+	// claim back to a queued state for a future retry (see
+	// convex/workloads/mutations.ts#releaseClaim in ai-cloud-v2) instead of
+	// applying the plain phase-resolution path. MUST be true whenever phase
+	// is reported against a "destroying" row — Convex has no non-retryable
+	// resolution for that status (destroy completion is normally reported
+	// via the separate RemoveWorkload call, never through here).
+	Retryable bool `json:"retryable,omitempty"`
 }
 
-// ReportLifecycle tells Convex a claimed create/redeploy attempt reached a
-// terminal-for-now state — "active" (succeeded) or "failed" (didn't, with
-// reason explaining why) — so its status can move on from "provisioning"/
-// "redeploying". Safe to call unconditionally for any CR, including
+// ReportLifecycle tells Convex a claimed create/redeploy/stop/resume/destroy
+// attempt reached an outcome. phase "active"/"stopped" always means success;
+// phase "failed" means it didn't, with reason explaining why and retryable
+// indicating whether Convex should release the claim for another attempt
+// (see reportLifecycleRequest.Retryable) rather than resolve it as a
+// terminal-for-now state. Safe to call unconditionally for any CR, including
 // manual/legacy ones with no in-flight Convex row: Convex's reportLifecycle
-// mutation is a no-op unless the row it resolves is actually in one of
-// those two states. At least one of name/workloadID should be non-empty;
+// mutation is a no-op unless the row it resolves is actually in one of the
+// in-flight statuses. At least one of name/workloadID should be non-empty;
 // see reportLifecycleRequest for why both are accepted.
-func (c *Client) ReportLifecycle(ctx context.Context, heartbeatToken, name, workloadID, phase, reason string) error {
-	body, err := json.Marshal(reportLifecycleRequest{Name: name, WorkloadID: workloadID, Phase: phase, Reason: reason})
+func (c *Client) ReportLifecycle(ctx context.Context, heartbeatToken, name, workloadID, phase, reason string, retryable bool) error {
+	body, err := json.Marshal(reportLifecycleRequest{Name: name, WorkloadID: workloadID, Phase: phase, Reason: reason, Retryable: retryable})
 	if err != nil {
 		return fmt.Errorf("marshaling report lifecycle request: %w", err)
 	}

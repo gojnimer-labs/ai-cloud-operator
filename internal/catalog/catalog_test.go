@@ -46,6 +46,38 @@ func (f *fakePodExecutor) Exec(_ context.Context, namespace, podName, container 
 	return f.stdout, f.stderr, f.err
 }
 
+// TestEstimatedResourcesNonZeroForEveryTemplate guards against the exact gap
+// nginx used to have (see nginx.go): a template that declares no Resources
+// at all would silently count as free toward any capacity accounting.
+func TestEstimatedResourcesNonZeroForEveryTemplate(t *testing.T) {
+	for _, tmpl := range List() {
+		milliCPU, memoryBytes := tmpl.EstimatedResources()
+		if milliCPU <= 0 || memoryBytes <= 0 {
+			t.Errorf("template %q: expected nonzero estimated resources, got milliCPU=%d memoryBytes=%d", tmpl.ID, milliCPU, memoryBytes)
+		}
+	}
+}
+
+// TestEstimatedResourcesMatchesHardcodedBrowserValues pins the exact figures
+// browserResources("1000m", "1500Mi", "3Gi") should sum to, so a future
+// change to those hardcoded values is a deliberate, visible diff here rather
+// than a silent capacity-accounting drift.
+func TestEstimatedResourcesMatchesHardcodedBrowserValues(t *testing.T) {
+	const wantMilliCPU = 1000
+	const wantMemoryBytes = 1500 * 1024 * 1024
+
+	for _, id := range []string{templateIDFirefox, templateIDChrome} {
+		tmpl, ok := Get(id)
+		if !ok {
+			t.Fatalf("expected template %q to be registered", id)
+		}
+		milliCPU, memoryBytes := tmpl.EstimatedResources()
+		if milliCPU != wantMilliCPU || memoryBytes != wantMemoryBytes {
+			t.Errorf("template %q: expected milliCPU=%d memoryBytes=%d, got milliCPU=%d memoryBytes=%d", id, wantMilliCPU, wantMemoryBytes, milliCPU, memoryBytes)
+		}
+	}
+}
+
 func TestGetReturnsKnownTemplates(t *testing.T) {
 	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome} {
 		if _, ok := Get(id); !ok {

@@ -43,6 +43,7 @@ import (
 
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/api"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/controller"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/convexclient"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
@@ -312,6 +313,17 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 	workloadCreator := provisioning.NewWorkloadCreator(mgr.GetClient(), workloadNamespace)
 	workloadDestroyer := provisioning.NewWorkloadDestroyer(mgr.GetClient(), workloadNamespace)
 
+	// capacityTracker gates processClaimable against local headroom before
+	// ever calling ClaimWorkload — see internal/capacity's package doc for
+	// why this is a purely operator-side decision, never reported to Convex
+	// for gating. Registered via mgr.Add for lifecycle parity with the other
+	// long-running components below, though its actual computation is
+	// pull-based from heartbeatOnce, not driven by Start.
+	capacityTracker := capacity.NewTracker(mgr.GetClient(), workloadNamespace)
+	if err := mgr.Add(capacityTracker); err != nil {
+		return nil, err
+	}
+
 	convexRunnable := convexclient.NewRunnable(convexclient.RunnableConfig{
 		Client: convexclient.New(convexclient.Config{
 			BaseURL:          convexBaseURL,
@@ -324,6 +336,7 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		HeartbeatInterval: heartbeatInterval,
 		Creator:           workloadCreator,
 		Destroyer:         workloadDestroyer,
+		Capacity:          capacityTracker,
 	})
 	if err := mgr.Add(convexRunnable); err != nil {
 		return nil, err

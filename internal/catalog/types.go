@@ -318,3 +318,36 @@ type Template struct {
 	Operations  []Operation                                   `json:"operations,omitempty"`
 	Build       func(params map[string]any) (Rendered, error) `json:"-"`
 }
+
+// EstimatedResources returns this template's total declared CPU (milli-cores)
+// and memory (bytes) requests, summed across every container its Build
+// produces — used by internal/capacity's self-gate to decide whether a
+// candidate workload fits before ever claiming it. Computed against Build's
+// own zero-value defaults rather than a resolved config: a workload's actual
+// config isn't known until after a claim succeeds (see convex/workloads/
+// mutations.ts#claim's response shape), and every template's resource
+// declarations are independent of its parameters today (see
+// browser.go#browserResources and nginx.go — both hardcoded, never read from
+// params). If a future template's Build does start branching resource sizing
+// on params, this becomes an estimate rather than an exact figure — still a
+// reasonable input to a coarse self-gate, not a correctness-critical value.
+//
+// InitContainers are deliberately excluded: none of today's templates set
+// Resources on one (they'd contribute zero anyway), and an init container's
+// request only matters transiently at pod startup, not for steady-state
+// capacity pressure.
+//
+// Returns zero if Build errors against an empty params map (shouldn't happen
+// for a well-formed template) — a capacity estimate is a best-effort input,
+// not worth propagating an error for.
+func (t Template) EstimatedResources() (milliCPU, memoryBytes int64) {
+	rendered, err := t.Build(map[string]any{})
+	if err != nil {
+		return 0, 0
+	}
+	for _, c := range rendered.Containers {
+		milliCPU += c.Resources.Requests.Cpu().MilliValue()
+		memoryBytes += c.Resources.Requests.Memory().Value()
+	}
+	return milliCPU, memoryBytes
+}

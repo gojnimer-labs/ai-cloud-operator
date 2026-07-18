@@ -23,10 +23,19 @@ import (
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/provisioning"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
 )
+
+// capacitySnapshotter is the narrow slice of capacity.Tracker's API this
+// package depends on — matching the WorkloadNotifier/GatewayVerifier
+// narrow-interface convention already used elsewhere, and letting tests
+// substitute a stub without needing a real Node-backed fake client.
+type capacitySnapshotter interface {
+	Snapshot(ctx context.Context) (capacity.Snapshot, error)
+}
 
 const (
 	// maxClaimsPerTick/maxPendingOperationsPerTick bound how much claimable
@@ -62,6 +71,7 @@ type Runnable struct {
 	heartbeatInterval time.Duration
 	creator           *provisioning.WorkloadCreator
 	destroyer         *provisioning.WorkloadDestroyer
+	capacity          capacitySnapshotter
 
 	mu     sync.RWMutex
 	tokens tokenstore.Tokens
@@ -81,6 +91,13 @@ type RunnableConfig struct {
 	HeartbeatInterval time.Duration
 	Creator           *provisioning.WorkloadCreator
 	Destroyer         *provisioning.WorkloadDestroyer
+	// Capacity, when set, gates processClaimable against local headroom
+	// before ever calling ClaimWorkload for a candidate — see
+	// internal/capacity's package doc for why this decision lives here
+	// rather than on the Convex side. Nil disables the self-gate entirely
+	// (every candidate is treated as fitting), matching the fail-open
+	// posture tests and any future no-Convex mode rely on.
+	Capacity capacitySnapshotter
 }
 
 // NewRunnable builds a Runnable from cfg.
@@ -92,6 +109,7 @@ func NewRunnable(cfg RunnableConfig) *Runnable {
 		heartbeatInterval: cfg.HeartbeatInterval,
 		creator:           cfg.Creator,
 		destroyer:         cfg.Destroyer,
+		capacity:          cfg.Capacity,
 	}
 }
 
@@ -123,12 +141,16 @@ func (r *Runnable) RemoveWorkload(ctx context.Context, name, namespace string) e
 }
 
 // ReportLifecycle implements internal/controller.WorkloadNotifier, always
-// presenting whatever heartbeat token is current.
+// presenting whatever heartbeat token is current. Reconcile-loop-originated
+// reports are outside the retryable-release design added for
+// processClaimable/processPendingOperations below — the reconciler's own
+// exponential-backoff requeue already handles retrying these, so this stays
+// non-retryable, preserving its exact prior behavior.
 func (r *Runnable) ReportLifecycle(ctx context.Context, name, workloadID, phase, reason string) error {
 	r.mu.RLock()
 	token := r.tokens.HeartbeatToken
 	r.mu.RUnlock()
-	return r.client.ReportLifecycle(ctx, token, name, workloadID, phase, reason)
+	return r.client.ReportLifecycle(ctx, token, name, workloadID, phase, reason, false)
 }
 
 // VerifyGatewayToken implements internal/api.GatewayVerifier, always
@@ -192,7 +214,7 @@ func (r *Runnable) checkEnrollmentSecret(ctx context.Context) {
 func (r *Runnable) loadOrRegister(ctx context.Context) error {
 	log := logf.FromContext(ctx)
 	if tokens, ok, err := r.store.Load(ctx); err == nil && ok {
-		if _, _, err := r.client.Heartbeat(ctx, tokens.HeartbeatToken); err == nil {
+		if _, _, err := r.client.Heartbeat(ctx, tokens.HeartbeatToken, nil); err == nil {
 			log.Info("reusing persisted operator token")
 			r.setTokens(tokens)
 			return nil
@@ -223,7 +245,24 @@ func (r *Runnable) heartbeatOnce(ctx context.Context) {
 	heartbeatToken := r.tokens.HeartbeatToken
 	r.mu.RUnlock()
 
-	claimable, pendingOps, err := r.client.Heartbeat(ctx, heartbeatToken)
+	// Computed once per tick and used twice: sent along with this heartbeat
+	// purely for Convex's admin fleet-visibility view (see Client.Heartbeat),
+	// and reused below as processClaimable's self-gate input — one
+	// consistent reading for both, rather than two separately-timed ones.
+	var snap *capacity.Snapshot
+	if r.capacity != nil {
+		s, err := r.capacity.Snapshot(ctx)
+		if err != nil {
+			// Fail open, same spirit as Convex's own fail-open when an
+			// operator has never reported capacity: never let a snapshot
+			// error block heartbeating or claiming altogether.
+			logf.FromContext(ctx).Error(err, "failed to compute capacity snapshot; heartbeating and self-gating without one this tick")
+		} else {
+			snap = &s
+		}
+	}
+
+	claimable, pendingOps, err := r.client.Heartbeat(ctx, heartbeatToken, snap)
 	if err != nil {
 		log := logf.FromContext(ctx)
 		if err != ErrUnauthorized {
@@ -238,7 +277,7 @@ func (r *Runnable) heartbeatOnce(ctx context.Context) {
 		return
 	}
 
-	r.processClaimable(ctx, heartbeatToken, claimable)
+	r.processClaimable(ctx, heartbeatToken, claimable, snap)
 	r.processPendingOperations(ctx, heartbeatToken, pendingOps)
 }
 
@@ -249,16 +288,37 @@ func (r *Runnable) heartbeatOnce(ctx context.Context) {
 // why this check exists, and the plan's "Template version compatibility"
 // section for the full reasoning. Any error past the claim itself (version
 // mismatch, or Create failing) is reported back to Convex immediately as a
-// "failed" lifecycle event so the row never gets stuck in "provisioning"
-// forever — there's no drift-detector (out of scope) that would otherwise
-// ever notice.
-func (r *Runnable) processClaimable(ctx context.Context, heartbeatToken string, claimable []ClaimableWorkload) {
+// lifecycle event (retryable for Create, terminal for a version mismatch)
+// so the row never gets stuck in "provisioning" forever.
+//
+// snap, when non-nil, gates each candidate against local capacity before
+// ever calling ClaimWorkload — skipping (not aborting the loop on) a
+// candidate that doesn't fit, since a smaller later candidate still might,
+// and shrinking snap in place after each successful Create so later
+// candidates in this same tick see reduced headroom (the informer cache
+// backing the next tick's own Snapshot won't reflect a just-created
+// Deployment until it syncs). nil (no Tracker configured, or this tick's
+// Snapshot call errored) disables the gate entirely — every candidate is
+// treated as fitting, the same fail-open posture Convex itself uses.
+func (r *Runnable) processClaimable(ctx context.Context, heartbeatToken string, claimable []ClaimableWorkload, snap *capacity.Snapshot) {
 	if r.creator == nil {
 		return
 	}
 	log := logf.FromContext(ctx)
 
 	for _, item := range claimable[:min(len(claimable), maxClaimsPerTick)] {
+		if snap != nil {
+			if tmpl, ok := catalog.Get(item.TemplateID); ok {
+				estCPU, estMem := tmpl.EstimatedResources()
+				if !snap.Fits(estCPU, estMem) {
+					log.Info("skipping claimable workload: insufficient local capacity", "workloadId", item.WorkloadID, "templateId", item.TemplateID)
+					continue
+				}
+			}
+			// Unknown template: don't gate on it here — the post-claim
+			// lookup below already handles reporting that failure.
+		}
+
 		claimed, err := r.client.ClaimWorkload(ctx, heartbeatToken, item.WorkloadID)
 		if err != nil {
 			log.Error(err, "failed to claim workload", "workloadId", item.WorkloadID)
@@ -272,7 +332,9 @@ func (r *Runnable) processClaimable(ctx context.Context, heartbeatToken string, 
 
 		tmpl, ok := catalog.Get(claimed.TemplateID)
 		if !ok || tmpl.Version != claimed.TemplateVersion {
-			if err := r.client.ReportLifecycle(ctx, heartbeatToken, "", claimed.WorkloadID, lifecyclePhaseFailed, reasonTemplateVersionMismatch); err != nil {
+			// Genuinely terminal — the request itself is stale, retrying
+			// against the same (now-mismatched) template can never succeed.
+			if err := r.client.ReportLifecycle(ctx, heartbeatToken, "", claimed.WorkloadID, lifecyclePhaseFailed, reasonTemplateVersionMismatch, false); err != nil {
 				log.Error(err, "failed to report template-version-mismatch failure", "workloadId", claimed.WorkloadID)
 			}
 			continue
@@ -280,9 +342,17 @@ func (r *Runnable) processClaimable(ctx context.Context, heartbeatToken string, 
 
 		if _, err := r.creator.Create(ctx, claimed.WorkloadID, claimed.TemplateID, claimed.UserID, claimed.Subdomain, claimed.Config); err != nil {
 			log.Error(err, "failed to create claimed workload", "workloadId", claimed.WorkloadID)
-			if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, "", claimed.WorkloadID, lifecyclePhaseFailed, err.Error()); reportErr != nil {
+			// Retryable: a transient Create failure (e.g. a momentary API
+			// error) shouldn't strand this request — Convex releases it back
+			// to "requested" so any tag-matching operator (including this one
+			// on a future tick) can try again, up to its own attempt cap.
+			if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, "", claimed.WorkloadID, lifecyclePhaseFailed, err.Error(), true); reportErr != nil {
 				log.Error(reportErr, "failed to report create failure", "workloadId", claimed.WorkloadID)
 			}
+		} else if snap != nil {
+			estCPU, estMem := tmpl.EstimatedResources()
+			snap.UsedMilliCPU += estCPU
+			snap.UsedMemoryBytes += estMem
 		}
 	}
 }
@@ -291,15 +361,18 @@ func (r *Runnable) processClaimable(ctx context.Context, heartbeatToken string, 
 // request already assigned to this operator that the heartbeat surfaced
 // (bounded by maxPendingOperationsPerTick).
 //
-//   - destroy: no immediate ReportLifecycle call on either success or
-//     failure — destroy has no "failed" status in the unified status model
-//     (see the plan), so the existing reconciler IsNotFound branch
-//     (notifyRemoved, generalized Convex-side to fire from any status) stays
-//     the sole trigger for the "destroyed" transition, covering both this
-//     claimed path and an out-of-band kubectl delete identically. A
-//     synchronous Destroy error just gets retried on a future heartbeat tick
-//     (Convex still shows the row as "destroying" until it actually
-//     succeeds).
+//   - destroy: no ReportLifecycle call on success — the existing reconciler
+//     IsNotFound branch (notifyRemoved, generalized Convex-side to fire from
+//     any status) stays the sole trigger for the "destroyed" transition,
+//     covering both this claimed path and an out-of-band kubectl delete
+//     identically. A synchronous Destroy error IS now reported (retryable),
+//     closing what used to be a silent gap: previously nothing told Convex
+//     about the failure, and it only got retried at all because Convex kept
+//     re-surfacing the same pending destroy operation on future heartbeats —
+//     an accidental, uncapped retry with no visibility. Now it goes through
+//     the same releaseClaim/attempt-cap machinery as every other in-flight
+//     status, and eventually terminal-fails with a clear reason instead of
+//     retrying forever.
 //   - redeploy: same template-version compatibility check as create, same
 //     immediate "failed" report on mismatch or a synchronous Redeploy error.
 //     On success, status intentionally stays "redeploying" until the
@@ -340,6 +413,12 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 			}
 			if err := r.destroyer.Destroy(ctx, op.Name); err != nil {
 				log.Error(err, "failed to destroy claimed workload", "name", op.Name)
+				// Retryable: destroying has no non-retryable resolution on
+				// the Convex side (see reportLifecycleRequest.Retryable) —
+				// this MUST always be true here.
+				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error(), true); reportErr != nil {
+					log.Error(reportErr, "failed to report destroy failure", "name", op.Name)
+				}
 			} else {
 				log.Info("destroyed claimed workload", "name", op.Name)
 			}
@@ -350,14 +429,15 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 			tmpl, ok := catalog.Get(op.TemplateID)
 			if !ok || tmpl.Version != op.TemplateVersion {
 				log.Info("redeploy claim failed template-version check", "name", op.Name, "templateId", op.TemplateID, "claimedVersion", op.TemplateVersion, "catalogFound", ok, "catalogVersion", tmpl.Version)
-				if err := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, reasonTemplateVersionMismatch); err != nil {
+				// Genuinely terminal, same reasoning as create's own check.
+				if err := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, reasonTemplateVersionMismatch, false); err != nil {
 					log.Error(err, "failed to report template-version-mismatch failure", "name", op.Name)
 				}
 				continue
 			}
 			if err := r.creator.Redeploy(ctx, op.Name, op.Config); err != nil {
 				log.Error(err, "failed to redeploy claimed workload", "name", op.Name)
-				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error()); reportErr != nil {
+				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error(), true); reportErr != nil {
 					log.Error(reportErr, "failed to report redeploy failure", "name", op.Name)
 				}
 			} else {
@@ -369,7 +449,7 @@ func (r *Runnable) processPendingOperations(ctx context.Context, heartbeatToken 
 			}
 			if err := r.creator.SetSuspended(ctx, op.Name, op.Operation == operationStop); err != nil {
 				log.Error(err, "failed to set suspended state for claimed workload", "name", op.Name, "operation", op.Operation)
-				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error()); reportErr != nil {
+				if reportErr := r.client.ReportLifecycle(ctx, heartbeatToken, op.Name, "", lifecyclePhaseFailed, err.Error(), true); reportErr != nil {
 					log.Error(reportErr, "failed to report stop/resume failure", "name", op.Name)
 				}
 			} else {

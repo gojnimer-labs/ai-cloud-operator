@@ -19,25 +19,32 @@ package convexclient
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
 )
 
 // Shared fixture values across this package's tests (client_test.go and
 // runnable_test.go) — extracted so the same token/name/path is never typed
 // twice with a chance to drift out of sync.
 const (
-	pathOperatorsRegister = "/operators/register"
-	testHeartbeatToken    = "hb-1"
-	testDeployTokenValue  = "dp-1"
-	testOperatorName      = "op-1"
-	testWorkloadName      = "demo"
-	testNamespace         = "default"
-	testUserID            = "user-1"
-	testTemplateID        = "nginx"
-	testSubdomain         = "demo-sub"
-	testClaimWorkloadID   = "wl-1"
+	pathOperatorsRegister       = "/operators/register"
+	pathOperatorsClaim          = "/operators/workloads/claim"
+	pathOperatorsClaimOperation = "/operators/workloads/claim-operation"
+	pathOperatorsLifecycle      = "/operators/workloads/lifecycle"
+	testHeartbeatToken          = "hb-1"
+	testDeployTokenValue        = "dp-1"
+	testOperatorName            = "op-1"
+	testWorkloadName            = "demo"
+	testNamespace               = "default"
+	testUserID                  = "user-1"
+	testTemplateID              = "nginx"
+	testSubdomain               = "demo-sub"
+	testClaimWorkloadID         = "wl-1"
 
 	testBearerHeartbeatToken = "Bearer " + testHeartbeatToken
 )
@@ -81,7 +88,7 @@ func TestHeartbeatSuccess(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken)
+	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil)
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -105,7 +112,7 @@ func TestHeartbeatDecodesClaimableAndPendingOperations(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken)
+	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil)
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -117,6 +124,52 @@ func TestHeartbeatDecodesClaimableAndPendingOperations(t *testing.T) {
 	}
 }
 
+func TestHeartbeatSendsResourceCapacityWhenSnapshotProvided(t *testing.T) {
+	var got heartbeatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	snap := &capacity.Snapshot{AllocatableMilliCPU: 4000, AllocatableMemoryBytes: 8 * 1024 * 1024 * 1024, UsedMilliCPU: 1000, UsedMemoryBytes: 1024 * 1024 * 1024}
+	if _, _, err := c.Heartbeat(context.Background(), testHeartbeatToken, snap); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if got.ResourceCapacity == nil {
+		t.Fatalf("expected resourceCapacity to be sent when a snapshot is provided")
+	}
+	if got.ResourceCapacity.AllocatableMilliCPU != snap.AllocatableMilliCPU || got.ResourceCapacity.UsedMemoryBytes != snap.UsedMemoryBytes {
+		t.Fatalf("unexpected resourceCapacity payload: %+v", got.ResourceCapacity)
+	}
+}
+
+func TestHeartbeatOmitsResourceCapacityWhenSnapshotNil(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("reading request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	if _, _, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if strings.Contains(string(gotBody), "resourceCapacity") {
+		t.Fatalf("expected resourceCapacity to be omitted when snapshot is nil, got body: %s", gotBody)
+	}
+}
+
 func TestHeartbeatUnauthorizedMapsToSentinel(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusGone} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -124,7 +177,7 @@ func TestHeartbeatUnauthorizedMapsToSentinel(t *testing.T) {
 		}))
 
 		c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-		_, _, err := c.Heartbeat(context.Background(), "stale-token")
+		_, _, err := c.Heartbeat(context.Background(), "stale-token", nil)
 		srv.Close()
 
 		if err != ErrUnauthorized {
@@ -256,7 +309,7 @@ func TestVerifyGatewayTokenNonOKIsError(t *testing.T) {
 func TestClaimWorkloadDecodesSuccessResponse(t *testing.T) {
 	var got claimWorkloadRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/operators/workloads/claim" {
+		if r.URL.Path != pathOperatorsClaim {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != testBearerHeartbeatToken {
@@ -323,7 +376,7 @@ func TestClaimWorkloadLostRaceReturnsNilNil(t *testing.T) {
 func TestClaimOperationDecodesSuccessResponse(t *testing.T) {
 	var got claimOperationRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/operators/workloads/claim-operation" {
+		if r.URL.Path != pathOperatorsClaimOperation {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
@@ -380,7 +433,7 @@ func TestClaimOperationLostRaceReturnsNilNil(t *testing.T) {
 func TestReportLifecycleSendsExpectedPayload(t *testing.T) {
 	var got reportLifecycleRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/operators/workloads/lifecycle" {
+		if r.URL.Path != pathOperatorsLifecycle {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != testBearerHeartbeatToken {
@@ -394,11 +447,32 @@ func TestReportLifecycleSendsExpectedPayload(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{BaseURL: srv.URL})
-	if err := c.ReportLifecycle(context.Background(), testHeartbeatToken, testWorkloadName, testClaimWorkloadID, "failed", "boom"); err != nil {
+	if err := c.ReportLifecycle(context.Background(), testHeartbeatToken, testWorkloadName, testClaimWorkloadID, "failed", "boom", true); err != nil {
 		t.Fatalf("report lifecycle: %v", err)
 	}
-	if got.Name != testWorkloadName || got.WorkloadID != testClaimWorkloadID || got.Phase != "failed" || got.Reason != "boom" {
+	if got.Name != testWorkloadName || got.WorkloadID != testClaimWorkloadID || got.Phase != "failed" || got.Reason != "boom" || !got.Retryable {
 		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestReportLifecycleOmitsRetryableWhenFalse(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("reading request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	if err := c.ReportLifecycle(context.Background(), testHeartbeatToken, testWorkloadName, "", "active", "", false); err != nil {
+		t.Fatalf("report lifecycle: %v", err)
+	}
+	if strings.Contains(string(gotBody), "retryable") {
+		t.Fatalf("expected retryable to be omitted when false, got body: %s", gotBody)
 	}
 }
 
@@ -409,7 +483,7 @@ func TestReportLifecycleNonOKIsError(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{BaseURL: srv.URL})
-	if err := c.ReportLifecycle(context.Background(), testHeartbeatToken, testWorkloadName, "", "active", ""); err == nil {
+	if err := c.ReportLifecycle(context.Background(), testHeartbeatToken, testWorkloadName, "", "active", "", false); err == nil {
 		t.Fatalf("expected an error on non-200 response")
 	}
 }
