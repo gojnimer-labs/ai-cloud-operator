@@ -210,6 +210,11 @@ func (s *Server) requireDeployToken(next http.Handler) http.Handler {
 //     can enforce true single-use), and on success mints its own session
 //     cookie scoped to this exact workload so every later request —
 //     including sub-resource ones — authenticates from the cookie alone.
+//
+// Both rejection paths render gateway.RenderUnauthenticatedPage rather than
+// a plain-text 401 — this route is reached by an actual browser navigation
+// (top-level or sub-resource), so a human, not an API client, is the one
+// seeing the response.
 func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
@@ -223,12 +228,12 @@ func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 
 		token := r.URL.Query().Get("token")
 		if token == "" {
-			http.Error(w, "missing token", http.StatusUnauthorized)
+			gateway.RenderUnauthenticatedPage(w, r, name)
 			return
 		}
 		userID, err := s.gatewayVerifier.VerifyGatewayToken(r.Context(), token, s.namespace, name)
 		if err != nil {
-			http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+			gateway.RenderUnauthenticatedPage(w, r, name)
 			return
 		}
 

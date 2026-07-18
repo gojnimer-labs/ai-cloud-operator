@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  {{if .ShowRefresh}}<meta http-equiv="refresh" content="{{.RefreshSeconds}}">{{end}}
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{{if eq .Kind "loading"}}Starting up{{else if eq .Kind "failed"}}Deployment failed{{else}}Link expired{{end}}{{if .Name}} — {{.Name}}{{end}}</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #17181c;
+      color: #f2f2f3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .container {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 24px;
+      box-sizing: border-box;
+    }
+    h1 {
+      font-size: 17px;
+      font-weight: 600;
+      margin: 0 0 8px;
+      letter-spacing: -0.01em;
+    }
+    p {
+      font-size: 14px;
+      color: #a7a8ad;
+      margin: 0;
+      max-width: 380px;
+      line-height: 1.5;
+    }
+
+    /* Loading: a soft glowing dual-ring spinner. */
+    .orb {
+      position: relative;
+      width: 56px;
+      height: 56px;
+      margin-bottom: 28px;
+    }
+    .orb::before, .orb::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+    }
+    .orb::before {
+      background: radial-gradient(circle, rgba(110, 168, 254, 0.35), transparent 70%);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .orb::after {
+      border: 3px solid rgba(242, 242, 243, 0.12);
+      border-top-color: #6ea8fe;
+      border-right-color: #6ea8fe;
+      animation: spin 0.85s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.35; transform: scale(0.82); }
+      50%      { opacity: 1;    transform: scale(1.15); }
+    }
+    .dots span {
+      display: inline-block;
+      animation: blink 1.4s infinite both;
+    }
+    .dots span:nth-child(2) { animation-delay: 0.2s; }
+    .dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes blink {
+      0%, 80%, 100% { opacity: 0.2; }
+      40%           { opacity: 1; }
+    }
+
+    /* Failed / unauthenticated: a static status badge. */
+    .icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 22px;
+    }
+    .icon.failed { background: rgba(248, 81, 73, 0.15); color: #f85149; }
+    .icon.unauthenticated { background: rgba(210, 153, 34, 0.15); color: #d29922; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    {{if eq .Kind "loading"}}
+      <div class="orb" aria-hidden="true"></div>
+      <h1>
+        Starting {{if .Name}}{{.Name}}{{else}}your workspace{{end}}<span class="dots"><span>.</span><span>.</span><span>.</span></span>
+      </h1>
+      <p>This usually only takes a few seconds.</p>
+    {{else if eq .Kind "failed"}}
+      <div class="icon failed" aria-hidden="true">&#33;</div>
+      <h1>{{if .Name}}{{.Name}}{{else}}Your workspace{{end}} couldn't start</h1>
+      <p>{{if .Message}}{{.Message}}{{else}}The workload reconciler reported a failure.{{end}}</p>
+    {{else}}
+      <div class="icon unauthenticated" aria-hidden="true">&#128274;</div>
+      <h1>This link is no longer valid</h1>
+      <p>The access link for {{if .Name}}{{.Name}}{{else}}this workspace{{end}} has expired or already been used. Ask for a new link to continue.</p>
+    {{end}}
+  </div>
+</body>
+</html>

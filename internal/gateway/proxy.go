@@ -34,11 +34,11 @@ import (
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 )
 
-// Phase/condition/replica values come from api/v1alpha1 — the CRD's own
-// source of truth (see PhaseRunning et al.'s doc comments) — so
-// internal/controller (which sets them) and this package (which only reads
-// them) share one definition without either importing the other.
-const waitingPageRefreshSeconds = 3
+// Phase/condition values come from api/v1alpha1 — the CRD's own source of
+// truth (see PhaseRunning et al.'s doc comments) — so internal/controller
+// (which sets them) and this package (which only reads them) share one
+// definition without either importing the other.
+const gatewayPageRefreshSeconds = 3
 
 // ServiceProxy relays HTTP requests into a cluster-internal Service via the
 // Kubernetes API server's services/proxy subresource — the same mechanism
@@ -110,31 +110,17 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 			return
 		}
 
-		if workload.Status.Phase != appsv1alpha1.PhaseRunning {
-			desired := appsv1alpha1.DefaultReplicas
-			if workload.Spec.Replicas != nil {
-				desired = *workload.Spec.Replicas
-			}
+		if workload.Status.Phase == appsv1alpha1.PhaseFailed {
 			var message string
 			if cond := apimeta.FindStatusCondition(workload.Status.Conditions, appsv1alpha1.ConditionTypeReady); cond != nil {
 				message = cond.Message
 			}
-			failed := workload.Status.Phase == appsv1alpha1.PhaseFailed
-			status := http.StatusOK
-			if failed {
-				status = http.StatusServiceUnavailable
-			}
-			renderWaitingPage(w, r, status, waitingPageData{
-				Namespace:       p.namespace,
-				Name:            name,
-				Phase:           workload.Status.Phase,
-				Message:         message,
-				ReadyReplicas:   workload.Status.ReadyReplicas,
-				DesiredReplicas: desired,
-				RefreshSeconds:  waitingPageRefreshSeconds,
-				ShowRefresh:     true, // keep refreshing even on Failed — see plan notes
-				Failed:          failed,
-			})
+			renderFailedPage(w, r, name, message, gatewayPageRefreshSeconds)
+			return
+		}
+
+		if workload.Status.Phase != appsv1alpha1.PhaseRunning {
+			renderLoadingPage(w, r, name, gatewayPageRefreshSeconds)
 			return
 		}
 
