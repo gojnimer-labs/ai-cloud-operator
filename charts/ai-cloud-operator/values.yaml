@@ -57,6 +57,7 @@ metricsService:
   type: ClusterIP
 params:
   convexBaseUrl: ""
+  heartbeatInterval: 30s
   operatorExternalUrl: ""
   operatorName: ""
   workloadNamespace: ai-cloud-workloads

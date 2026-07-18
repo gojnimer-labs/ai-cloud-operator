@@ -100,6 +100,11 @@ spec:
               configMapKeyRef:
                 name: params
                 key: WORKLOAD_NAMESPACE
+          - name: HEARTBEAT_INTERVAL
+            valueFrom:
+              configMapKeyRef:
+                name: params
+                key: HEARTBEAT_INTERVAL
           # Created out-of-band per cluster, never checked into git — see
           # docs/production-deploy.md. Not a kustomize-generated resource, so
           # its name here is the literal final name kubectl must create it

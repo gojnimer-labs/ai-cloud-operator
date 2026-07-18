@@ -6,6 +6,7 @@ metadata:
   {{- include "ai-cloud-operator.labels" . | nindent 4 }}
 data:
   CONVEX_BASE_URL: {{ .Values.params.convexBaseUrl | quote }}
+  HEARTBEAT_INTERVAL: {{ .Values.params.heartbeatInterval | quote }}
   OPERATOR_EXTERNAL_URL: {{ .Values.params.operatorExternalUrl | quote }}
   OPERATOR_NAME: {{ .Values.params.operatorName | quote }}
   WORKLOAD_NAMESPACE: {{ .Values.params.workloadNamespace | quote }}
