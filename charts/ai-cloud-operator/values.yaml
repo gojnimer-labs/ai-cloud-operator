@@ -38,6 +38,7 @@ controllerManager:
       requests:
         cpu: 10m
         memory: 64Mi
+  maxUnavailable: 1
   nodeSelector: {}
   podSecurityContext:
     runAsNonRoot: true
@@ -46,6 +47,17 @@ controllerManager:
   replicas: 1
   tolerations: []
   topologySpreadConstraints: []
+  # helmify's PodDisruptionBudget template (templates/controller-manager.yaml)
+  # unconditionally references .Values.controllerManager.minAvailable even
+  # though config/manager/poddisruptionbudget.yaml only sets maxUnavailable —
+  # helmify only adds a values.yaml key for fields actually set on the
+  # source object (see its pdb.go processor), so without this the key is
+  # entirely absent and Helm's default `missingkey=invalid` template option
+  # renders the reference as the literal string "<no value>", which fails
+  # Kubernetes API validation. Explicitly null here is equivalent to the
+  # field being unset (same as omitting it) and keeps the key present so
+  # the template renders cleanly.
+  minAvailable: null
 crds:
   enabled: true
 metricsService:

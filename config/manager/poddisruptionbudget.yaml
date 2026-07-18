@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: controller-manager
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: ai-cloud-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: ai-cloud-operator

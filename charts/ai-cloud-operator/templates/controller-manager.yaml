@@ -1,0 +1,15 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ai-cloud-operator.fullname" . }}-controller-manager
+  labels:
+    control-plane: controller-manager
+  {{- include "ai-cloud-operator.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.controllerManager.minAvailable }}
+  maxUnavailable: {{ .Values.controllerManager.maxUnavailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-cloud-operator
+      control-plane: controller-manager
+    {{- include "ai-cloud-operator.selectorLabels" . | nindent 6 }}

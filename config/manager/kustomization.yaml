@@ -1,6 +1,7 @@
 resources:
 - manager.yaml
 - service.yaml
+- poddisruptionbudget.yaml
 
 configMapGenerator:
 - name: params
