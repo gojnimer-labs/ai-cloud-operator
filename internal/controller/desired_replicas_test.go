@@ -25,7 +25,7 @@ import (
 // TestDesiredReplicaCount is the unit-level proof that Suspended always
 // forces 0 replicas regardless of Spec.Replicas, and that unsuspended
 // behavior is unchanged from before Suspended existed (nil Replicas falls
-// back to defaultReplicas, an explicit value is used as-is) — see
+// back to appsv1alpha1.DefaultReplicas, an explicit value is used as-is) — see
 // reconcileDeployment and Reconcile's own desiredReplicas calc, both of
 // which now call this single shared helper instead of duplicating the
 // pattern independently.
@@ -38,7 +38,7 @@ func TestDesiredReplicaCount(t *testing.T) {
 		spec appsv1alpha1.WorkloadSpec
 		want int32
 	}{
-		{"unsuspended, nil replicas defaults", appsv1alpha1.WorkloadSpec{}, defaultReplicas},
+		{"unsuspended, nil replicas defaults", appsv1alpha1.WorkloadSpec{}, appsv1alpha1.DefaultReplicas},
 		{"unsuspended, explicit replicas", appsv1alpha1.WorkloadSpec{Replicas: &three}, 3},
 		{"unsuspended, explicit zero replicas", appsv1alpha1.WorkloadSpec{Replicas: &zero}, 0},
 		{"suspended, nil replicas forces 0", appsv1alpha1.WorkloadSpec{Suspended: true}, 0},

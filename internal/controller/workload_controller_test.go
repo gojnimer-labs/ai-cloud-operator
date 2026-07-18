@@ -418,7 +418,7 @@ var _ = Describe("Workload Controller", func() {
 
 			var workload appsv1alpha1.Workload
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
-			Expect(workload.Status.Phase).To(Equal(phaseRunning))
+			Expect(workload.Status.Phase).To(Equal(appsv1alpha1.PhaseRunning))
 			cond := apimeta.FindStatusCondition(workload.Status.Conditions, conditionTypeConvexLifecycleSynced)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
@@ -477,7 +477,7 @@ var _ = Describe("Workload Controller", func() {
 
 			var workload appsv1alpha1.Workload
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
-			Expect(workload.Status.Phase).To(Equal(phaseRunning))
+			Expect(workload.Status.Phase).To(Equal(appsv1alpha1.PhaseRunning))
 
 			// Suspend: Spec.Suspended=true bumps Generation. reconcileDeployment
 			// must scale the Deployment down to 0 replicas immediately, even
@@ -501,7 +501,7 @@ var _ = Describe("Workload Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
-			Expect(workload.Status.Phase).To(Equal(phaseStopped))
+			Expect(workload.Status.Phase).To(Equal(appsv1alpha1.PhaseStopped))
 
 			report := notifier.lastLifecycle()
 			Expect(report.phase).To(Equal(lifecyclePhaseStopped))
@@ -526,7 +526,7 @@ var _ = Describe("Workload Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
-			Expect(workload.Status.Phase).To(Equal(phaseRunning))
+			Expect(workload.Status.Phase).To(Equal(appsv1alpha1.PhaseRunning))
 
 			report = notifier.lastLifecycle()
 			Expect(report.phase).To(Equal(lifecyclePhaseActive))
@@ -552,7 +552,7 @@ var _ = Describe("Workload Controller", func() {
 		It("calls ReportLifecycle(failed) from setFailed, carrying the workload-id label when present", func() {
 			// No Image and no TemplateName: render() errors immediately, so
 			// Reconcile never gets anywhere near the Deployment/Service or
-			// the phaseRunning block — setFailed is the only call site that
+			// the appsv1alpha1.PhaseRunning block — setFailed is the only call site that
 			// can possibly run here, proving active/failed really are two
 			// distinct call sites, not a shared helper.
 			resource := &appsv1alpha1.Workload{
@@ -583,7 +583,7 @@ var _ = Describe("Workload Controller", func() {
 
 			var workload appsv1alpha1.Workload
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
-			Expect(workload.Status.Phase).To(Equal(phaseFailed))
+			Expect(workload.Status.Phase).To(Equal(appsv1alpha1.PhaseFailed))
 		})
 	})
 })

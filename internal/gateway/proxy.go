@@ -34,18 +34,11 @@ import (
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 )
 
-// Phase/condition values mirror internal/controller/workload_controller.go's
-// own unexported consts. Duplicated rather than imported: that package
-// already keeps them local instead of exporting them, and importing it from
-// here would invert the controller -> gateway dependency direction wired in
-// cmd/main.go.
-const (
-	phaseRunning              = "Running"
-	phaseFailed               = "Failed"
-	conditionTypeReady        = "Ready"
-	defaultReplicas           = int32(1)
-	waitingPageRefreshSeconds = 3
-)
+// Phase/condition/replica values come from api/v1alpha1 — the CRD's own
+// source of truth (see PhaseRunning et al.'s doc comments) — so
+// internal/controller (which sets them) and this package (which only reads
+// them) share one definition without either importing the other.
+const waitingPageRefreshSeconds = 3
 
 // ServiceProxy relays HTTP requests into a cluster-internal Service via the
 // Kubernetes API server's services/proxy subresource — the same mechanism
@@ -117,16 +110,16 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 			return
 		}
 
-		if workload.Status.Phase != phaseRunning {
-			desired := defaultReplicas
+		if workload.Status.Phase != appsv1alpha1.PhaseRunning {
+			desired := appsv1alpha1.DefaultReplicas
 			if workload.Spec.Replicas != nil {
 				desired = *workload.Spec.Replicas
 			}
 			var message string
-			if cond := apimeta.FindStatusCondition(workload.Status.Conditions, conditionTypeReady); cond != nil {
+			if cond := apimeta.FindStatusCondition(workload.Status.Conditions, appsv1alpha1.ConditionTypeReady); cond != nil {
 				message = cond.Message
 			}
-			failed := workload.Status.Phase == phaseFailed
+			failed := workload.Status.Phase == appsv1alpha1.PhaseFailed
 			status := http.StatusOK
 			if failed {
 				status = http.StatusServiceUnavailable

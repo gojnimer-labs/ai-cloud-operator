@@ -80,14 +80,8 @@ const (
 	labelInstance = "app.kubernetes.io/instance"
 	labelUserID   = "apps.aicloud.dev/user-id"
 
-	conditionTypeReady                 = "Ready"
 	conditionTypeConvexSynced          = "ConvexSynced"
 	conditionTypeConvexLifecycleSynced = "ConvexLifecycleSynced"
-
-	phaseDeploying = "Deploying"
-	phaseRunning   = "Running"
-	phaseFailed    = "Failed"
-	phaseStopped   = "Stopped"
 
 	// lifecyclePhaseActive/lifecyclePhaseFailed/lifecyclePhaseStopped are the
 	// phase values sent to WorkloadNotifier.ReportLifecycle — see
@@ -97,7 +91,6 @@ const (
 	lifecyclePhaseFailed  = "failed"
 	lifecyclePhaseStopped = "stopped"
 
-	defaultReplicas      = int32(1)
 	defaultContainerPort = int32(8080)
 
 	statusRequeueInterval = 10 * time.Second
@@ -172,13 +165,35 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, fmt.Errorf("getting deployment for status: %w", err)
 	}
 
-	desiredReplicas := desiredReplicaCount(&workload)
+	lifecycleSynced := r.updateStatus(ctx, &workload, &deployment)
+
+	if err := r.Status().Update(ctx, &workload); err != nil {
+		return ctrl.Result{}, fmt.Errorf("updating workload status: %w", err)
+	}
+
+	settled := workload.Status.Phase == appsv1alpha1.PhaseRunning || workload.Status.Phase == appsv1alpha1.PhaseStopped
+	if !settled || !convexSynced || !lifecycleSynced {
+		log.Info("workload not yet ready to stop requeueing", "phase", workload.Status.Phase, "convexSynced", convexSynced, "lifecycleSynced", lifecycleSynced)
+		return ctrl.Result{RequeueAfter: statusRequeueInterval}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// updateStatus computes workload's Phase and Ready condition from
+// deployment's currently observed state, and — when the phase just settled
+// into Running or Stopped — reports that lifecycle transition to Convex via
+// syncConvexLifecyclePhase. Returns whether Convex is now up to date for
+// this generation (mirrors syncConvex's own return value; see Reconcile for
+// how both feed into the settled/requeue decision).
+func (r *WorkloadReconciler) updateStatus(ctx context.Context, workload *appsv1alpha1.Workload, deployment *appsv1.Deployment) bool {
+	desiredReplicas := desiredReplicaCount(workload)
 
 	workload.Status.ReadyReplicas = deployment.Status.ReadyReplicas
 	workload.Status.ObservedGeneration = workload.Generation
 
 	readyCondition := metav1.Condition{
-		Type:               conditionTypeReady,
+		Type:               appsv1alpha1.ConditionTypeReady,
 		ObservedGeneration: workload.Generation,
 	}
 
@@ -190,37 +205,26 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	switch {
 	case workload.Spec.Suspended && deployment.Status.ReadyReplicas == 0:
-		workload.Status.Phase = phaseStopped
+		workload.Status.Phase = appsv1alpha1.PhaseStopped
 		readyCondition.Status = metav1.ConditionFalse
 		readyCondition.Reason = "WorkloadSuspended"
 		readyCondition.Message = "workload is intentionally stopped (spec.suspended=true)"
-		lifecycleSynced = r.syncConvexLifecyclePhase(ctx, &workload, lifecyclePhaseStopped)
+		lifecycleSynced = r.syncConvexLifecyclePhase(ctx, workload, lifecyclePhaseStopped)
 	case desiredReplicas > 0 && deployment.Status.ReadyReplicas >= desiredReplicas:
-		workload.Status.Phase = phaseRunning
+		workload.Status.Phase = appsv1alpha1.PhaseRunning
 		readyCondition.Status = metav1.ConditionTrue
 		readyCondition.Reason = "DeploymentReady"
 		readyCondition.Message = "backing Deployment has reached the desired ready replica count"
-		lifecycleSynced = r.syncConvexLifecyclePhase(ctx, &workload, lifecyclePhaseActive)
+		lifecycleSynced = r.syncConvexLifecyclePhase(ctx, workload, lifecyclePhaseActive)
 	default:
-		workload.Status.Phase = phaseDeploying
+		workload.Status.Phase = appsv1alpha1.PhaseDeploying
 		readyCondition.Status = metav1.ConditionFalse
 		readyCondition.Reason = "DeploymentProgressing"
 		readyCondition.Message = fmt.Sprintf("%d/%d replicas ready", deployment.Status.ReadyReplicas, desiredReplicas)
 	}
 
 	apimeta.SetStatusCondition(&workload.Status.Conditions, readyCondition)
-
-	if err := r.Status().Update(ctx, &workload); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating workload status: %w", err)
-	}
-
-	settled := workload.Status.Phase == phaseRunning || workload.Status.Phase == phaseStopped
-	if !settled || !convexSynced || !lifecycleSynced {
-		log.Info("workload not yet ready to stop requeueing", "phase", workload.Status.Phase, "convexSynced", convexSynced, "lifecycleSynced", lifecycleSynced)
-		return ctrl.Result{RequeueAfter: statusRequeueInterval}, nil
-	}
-
-	return ctrl.Result{}, nil
+	return lifecycleSynced
 }
 
 // syncConvex tells Convex about workload's current ownership info when
@@ -360,10 +364,10 @@ func (r *WorkloadReconciler) setFailed(ctx context.Context, workload *appsv1alph
 	log := logf.FromContext(ctx)
 	log.Error(reconcileErr, "reconcile failed")
 
-	workload.Status.Phase = phaseFailed
+	workload.Status.Phase = appsv1alpha1.PhaseFailed
 	workload.Status.ObservedGeneration = workload.Generation
 	apimeta.SetStatusCondition(&workload.Status.Conditions, metav1.Condition{
-		Type:               conditionTypeReady,
+		Type:               appsv1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             "ReconcileError",
 		Message:            reconcileErr.Error(),
@@ -460,7 +464,7 @@ func configToParams(config *apiextensionsv1.JSON) (map[string]any, error) {
 // actually gets applied) and Reconcile's own status/phase calc — so the two
 // can never silently diverge on suspend-awareness. A suspended workload
 // always wants 0 replicas, overriding Spec.Replicas entirely; otherwise it's
-// today's existing Spec.Replicas-defaulted-to-defaultReplicas logic.
+// today's existing Spec.Replicas-defaulted-to-appsv1alpha1.DefaultReplicas logic.
 func desiredReplicaCount(workload *appsv1alpha1.Workload) int32 {
 	if workload.Spec.Suspended {
 		return 0
@@ -468,7 +472,7 @@ func desiredReplicaCount(workload *appsv1alpha1.Workload) int32 {
 	if workload.Spec.Replicas != nil {
 		return *workload.Spec.Replicas
 	}
-	return defaultReplicas
+	return appsv1alpha1.DefaultReplicas
 }
 
 func (r *WorkloadReconciler) reconcileDeployment(ctx context.Context, workload *appsv1alpha1.Workload, selectorLabels, objectLabels map[string]string, rendered catalog.Rendered) error {

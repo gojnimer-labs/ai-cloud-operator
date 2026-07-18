@@ -93,16 +93,42 @@ type Server struct {
 	httpServer *http.Server
 }
 
-// New builds a Server listening on listenAddr, using c to read/write
-// Workload custom resources, token to authenticate Convex's management
-// calls, gatewaySecret/verifier/proxy to authenticate and serve end-user
-// gateway requests, podExecutor to run a workload's Operations (see
-// handleRunFunction), creator/destroyer to actually create/delete Workload
-// CRs (shared with internal/convexclient/runnable.go's claim-consumption
-// loop — see internal/provisioning), and namespace as the single fixed
-// namespace every workload gets deployed into.
-func New(c client.Client, listenAddr string, token TokenGetter, gatewaySecret []byte, verifier GatewayVerifier, proxy *gateway.ServiceProxy, podExecutor catalog.PodExecutor, creator *provisioning.WorkloadCreator, destroyer *provisioning.WorkloadDestroyer, namespace string) *Server {
-	return &Server{client: c, listenAddr: listenAddr, token: token, gatewaySecret: gatewaySecret, gatewayVerifier: verifier, proxy: proxy, podExecutor: podExecutor, creator: creator, destroyer: destroyer, namespace: namespace}
+// Config holds everything Server needs to construct — see New. Field docs
+// mirror Server's own (see that struct) since Config exists purely to name
+// New's arguments instead of leaving them positional.
+type Config struct {
+	Client          client.Client
+	ListenAddr      string
+	Token           TokenGetter
+	GatewaySecret   []byte
+	GatewayVerifier GatewayVerifier
+	Proxy           *gateway.ServiceProxy
+	// PodExecutor runs a workload's Operations — see handleRunFunction.
+	PodExecutor catalog.PodExecutor
+	// Creator/Destroyer actually create/delete Workload CRs, shared with
+	// internal/convexclient/runnable.go's claim-consumption loop — see
+	// internal/provisioning.
+	Creator   *provisioning.WorkloadCreator
+	Destroyer *provisioning.WorkloadDestroyer
+	// Namespace is the single fixed namespace every workload gets deployed
+	// into.
+	Namespace string
+}
+
+// New builds a Server from cfg.
+func New(cfg Config) *Server {
+	return &Server{
+		client:          cfg.Client,
+		listenAddr:      cfg.ListenAddr,
+		token:           cfg.Token,
+		gatewaySecret:   cfg.GatewaySecret,
+		gatewayVerifier: cfg.GatewayVerifier,
+		proxy:           cfg.Proxy,
+		podExecutor:     cfg.PodExecutor,
+		creator:         cfg.Creator,
+		destroyer:       cfg.Destroyer,
+		namespace:       cfg.Namespace,
+	}
 }
 
 // Start implements manager.Runnable. It blocks until ctx is cancelled, then
@@ -153,13 +179,11 @@ func (s *Server) NeedLeaderElection() bool {
 // "Authorization: Bearer <deployToken>".
 func (s *Server) requireDeployToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const prefix = "Bearer "
-		header := r.Header.Get("Authorization")
-		if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+		presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || presented == "" {
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
 		}
-		presented := header[len(prefix):]
 
 		expected := s.token()
 		if expected == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(expected)) != 1 {

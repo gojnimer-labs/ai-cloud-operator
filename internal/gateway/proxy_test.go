@@ -207,7 +207,7 @@ func TestHandlerServesWaitingPageWhenWorkloadNotReady(t *testing.T) {
 	if err := appsv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding scheme: %v", err)
 	}
-	// Spec.Replicas left nil deliberately, to exercise the defaultReplicas
+	// Spec.Replicas left nil deliberately, to exercise the appsv1alpha1.DefaultReplicas
 	// fallback in the "X/Y replicas ready" copy.
 	wl := &appsv1alpha1.Workload{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},

@@ -135,7 +135,18 @@ func newTestServer(t *testing.T) (*Server, client.Client, *fakeGatewayVerifier, 
 	executor := &fakePodExecutor{}
 	creator := provisioning.NewWorkloadCreator(c, testServiceNS)
 	destroyer := provisioning.NewWorkloadDestroyer(c, testServiceNS)
-	s := New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, executor, creator, destroyer, testServiceNS)
+	s := New(Config{
+		Client:          c,
+		ListenAddr:      ":0",
+		Token:           func() string { return testDeployToken },
+		GatewaySecret:   []byte(testGatewaySecret),
+		GatewayVerifier: verifier,
+		Proxy:           proxy,
+		PodExecutor:     executor,
+		Creator:         creator,
+		Destroyer:       destroyer,
+		Namespace:       testServiceNS,
+	})
 	return s, c, verifier, executor
 }
 
@@ -356,7 +367,18 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 	verifier := newFakeGatewayVerifier()
 	creator := provisioning.NewWorkloadCreator(c, testServiceNS)
 	destroyer := provisioning.NewWorkloadDestroyer(c, testServiceNS)
-	return New(c, ":0", func() string { return testDeployToken }, []byte(testGatewaySecret), verifier, proxy, &fakePodExecutor{}, creator, destroyer, testServiceNS), verifier
+	return New(Config{
+		Client:          c,
+		ListenAddr:      ":0",
+		Token:           func() string { return testDeployToken },
+		GatewaySecret:   []byte(testGatewaySecret),
+		GatewayVerifier: verifier,
+		Proxy:           proxy,
+		PodExecutor:     &fakePodExecutor{},
+		Creator:         creator,
+		Destroyer:       destroyer,
+		Namespace:       testServiceNS,
+	}), verifier
 }
 
 func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {

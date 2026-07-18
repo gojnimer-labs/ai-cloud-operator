@@ -67,21 +67,31 @@ type Runnable struct {
 	tokens tokenstore.Tokens
 }
 
-// NewRunnable builds a Runnable that talks to Convex via client and persists
-// tokens via store, heartbeating every heartbeatInterval. On every heartbeat
-// tick it also checks enrollment for an out-of-band rotation of
-// ENROLLMENT_SECRET, re-registering immediately when one is found, and
-// processes any claimable/pending-operation work the heartbeat returned
-// using creator/destroyer (see internal/provisioning) — the same instances
-// wired into internal/api.Server for the manual HTTP path.
-func NewRunnable(client *Client, store *tokenstore.Store, enrollment *EnrollmentSecretWatcher, heartbeatInterval time.Duration, creator *provisioning.WorkloadCreator, destroyer *provisioning.WorkloadDestroyer) *Runnable {
+// RunnableConfig holds everything Runnable needs to construct — see
+// NewRunnable. On every heartbeat tick, Runnable also checks Enrollment for
+// an out-of-band rotation of ENROLLMENT_SECRET, re-registering immediately
+// when one is found, and processes any claimable/pending-operation work the
+// heartbeat returned using Creator/Destroyer (see internal/provisioning) —
+// the same instances wired into internal/api.Server for the manual HTTP
+// path.
+type RunnableConfig struct {
+	Client            *Client
+	Store             *tokenstore.Store
+	Enrollment        *EnrollmentSecretWatcher
+	HeartbeatInterval time.Duration
+	Creator           *provisioning.WorkloadCreator
+	Destroyer         *provisioning.WorkloadDestroyer
+}
+
+// NewRunnable builds a Runnable from cfg.
+func NewRunnable(cfg RunnableConfig) *Runnable {
 	return &Runnable{
-		client:            client,
-		store:             store,
-		enrollment:        enrollment,
-		heartbeatInterval: heartbeatInterval,
-		creator:           creator,
-		destroyer:         destroyer,
+		client:            cfg.Client,
+		store:             cfg.Store,
+		enrollment:        cfg.Enrollment,
+		heartbeatInterval: cfg.HeartbeatInterval,
+		creator:           cfg.Creator,
+		destroyer:         cfg.Destroyer,
 	}
 }
 

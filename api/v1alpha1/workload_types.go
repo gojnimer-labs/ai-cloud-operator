@@ -128,6 +128,27 @@ type WorkloadStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// Workload.Status.Phase values — see WorkloadStatus.Phase's
+// kubebuilder:validation:Enum marker for the authoritative list. Exported so
+// internal/controller (which sets these) and internal/gateway (which reads
+// them to decide whether to proxy or show a waiting page) share one
+// definition instead of independently-typed local copies that could drift.
+const (
+	PhaseDeploying = "Deploying"
+	PhaseRunning   = "Running"
+	PhaseFailed    = "Failed"
+	PhaseStopped   = "Stopped"
+)
+
+// ConditionTypeReady is the Workload.Status.Conditions type reporting
+// whether the backing Deployment has reached its desired ready replica
+// count. Exported for the same reason as the Phase* constants above.
+const ConditionTypeReady = "Ready"
+
+// DefaultReplicas is the replica count assumed when Spec.Replicas is nil —
+// mirrors WorkloadSpec.Replicas' +kubebuilder:default=1 marker.
+const DefaultReplicas = int32(1)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`

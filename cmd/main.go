@@ -312,19 +312,19 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 	workloadCreator := provisioning.NewWorkloadCreator(mgr.GetClient(), workloadNamespace)
 	workloadDestroyer := provisioning.NewWorkloadDestroyer(mgr.GetClient(), workloadNamespace)
 
-	convexRunnable := convexclient.NewRunnable(
-		convexclient.New(convexclient.Config{
+	convexRunnable := convexclient.NewRunnable(convexclient.RunnableConfig{
+		Client: convexclient.New(convexclient.Config{
 			BaseURL:          convexBaseURL,
 			EnrollmentSecret: enrollmentSecret,
 			OperatorName:     operatorName,
 			ExternalURL:      operatorExternalURL,
 		}),
-		tokenstore.New(mgr.GetClient(), podNamespace),
-		convexclient.NewEnrollmentSecretWatcher(mgr.GetClient(), podNamespace),
-		heartbeatInterval,
-		workloadCreator,
-		workloadDestroyer,
-	)
+		Store:             tokenstore.New(mgr.GetClient(), podNamespace),
+		Enrollment:        convexclient.NewEnrollmentSecretWatcher(mgr.GetClient(), podNamespace),
+		HeartbeatInterval: heartbeatInterval,
+		Creator:           workloadCreator,
+		Destroyer:         workloadDestroyer,
+	})
 	if err := mgr.Add(convexRunnable); err != nil {
 		return nil, err
 	}
@@ -339,10 +339,18 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		return nil, fmt.Errorf("building pod executor: %w", err)
 	}
 
-	apiServer := api.New(
-		mgr.GetClient(), apiListenAddr, convexRunnable.CurrentDeployToken,
-		gatewaySigningSecret, convexRunnable, proxy, podExecutor, workloadCreator, workloadDestroyer, workloadNamespace,
-	)
+	apiServer := api.New(api.Config{
+		Client:          mgr.GetClient(),
+		ListenAddr:      apiListenAddr,
+		Token:           convexRunnable.CurrentDeployToken,
+		GatewaySecret:   gatewaySigningSecret,
+		GatewayVerifier: convexRunnable,
+		Proxy:           proxy,
+		PodExecutor:     podExecutor,
+		Creator:         workloadCreator,
+		Destroyer:       workloadDestroyer,
+		Namespace:       workloadNamespace,
+	})
 	if err := mgr.Add(apiServer); err != nil {
 		return nil, err
 	}
