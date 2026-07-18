@@ -195,24 +195,29 @@ func (s *Server) requireDeployToken(next http.Handler) http.Handler {
 	})
 }
 
-// requireGatewayToken guards the browser-facing /gw/* routes. Two paths:
+// requireGatewayToken guards the browser-facing /gw/* routes. Two paths,
+// tried in this order — deliberately token-first, not cookie-first:
 //
-//   - Fast path: a valid signed session cookie from a prior exchange is
-//     present — verified entirely locally, no Convex call. This is what
-//     makes sub-resource requests work (a proxied app's own HTML/JS loading
-//     its assets from other /gw/... URLs that never saw the original
-//     one-time token).
-//   - Exchange path: no cookie (or an invalid one), so this must be a fresh
-//     one-time token from Convex (?token=... — a browser reaching this
-//     route via top-level navigation/new-tab can't attach a custom
-//     Authorization header, so the token has to ride in the URL). The
-//     operator hands it to Convex to verify+consume (the only party that
-//     can enforce true single-use), and on success mints its own session
-//     cookie scoped to this exact workload, then redirects to the same URL
-//     with ?token= stripped — the freshly-set cookie authorizes that
-//     redirected request via the fast path above, so the exchange never
-//     leaves the one-time token sitting in the address bar, browser
-//     history, or a bookmark.
+//   - Exchange path: a ?token= query param is present, so it's always
+//     revalidated against Convex (the only party that can enforce true
+//     single-use), regardless of any cookie already on the request. A
+//     browser reaching this route via top-level navigation/new-tab can't
+//     attach a custom Authorization header, so the token has to ride in
+//     the URL. On success, the operator mints its own session cookie
+//     scoped to this exact workload — overwriting whatever cookie was
+//     already there — then redirects to the same URL with ?token=
+//     stripped, so the exchange never leaves the one-time token sitting in
+//     the address bar, browser history, or a bookmark. On failure, this
+//     renders the unauthenticated page even if a valid cookie was also
+//     present: a token in the URL is a deliberate re-authentication
+//     attempt and must never be silently absorbed by whatever session
+//     happens to already be in the browser — e.g. on a shared machine, a
+//     second person's own (possibly rejected) token must never be
+//     answered using the first person's still-valid cookie.
+//   - Fast path: no token at all, so this must be a sub-resource request a
+//     proxied app's own HTML/JS triggers (it never sees the original
+//     one-time token) — authenticated from a valid signed session cookie,
+//     entirely locally, no Convex call.
 //
 // Both rejection paths render gateway.RenderUnauthenticatedPage rather than
 // a plain-text 401 — this route is reached by an actual browser navigation
@@ -222,18 +227,18 @@ func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 
-		if cookie, err := r.Cookie(gatewayCookieName); err == nil {
-			if _, err := gateway.Verify(s.gatewaySecret, s.namespace, name, cookie.Value); err == nil {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-
 		token := r.URL.Query().Get("token")
 		if token == "" {
+			if cookie, err := r.Cookie(gatewayCookieName); err == nil {
+				if _, err := gateway.Verify(s.gatewaySecret, s.namespace, name, cookie.Value); err == nil {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
 			gateway.RenderUnauthenticatedPage(w, r, name)
 			return
 		}
+
 		userID, err := s.gatewayVerifier.VerifyGatewayToken(r.Context(), token, s.namespace, name)
 		if err != nil {
 			gateway.RenderUnauthenticatedPage(w, r, name)

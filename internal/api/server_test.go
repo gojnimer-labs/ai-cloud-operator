@@ -521,6 +521,40 @@ func TestGatewayCookieAuthorizesDifferentEntrypointsOfSameWorkload(t *testing.T)
 	}
 }
 
+// TestGatewayInvalidTokenIsNotMaskedByExistingCookie guards against a real
+// reported vulnerability: requireGatewayToken used to check the session
+// cookie first and only fall back to ?token= when no cookie was present —
+// so once a valid cookie existed, any token value in the URL (wrong,
+// stale, or an attacker's) was silently ignored instead of being
+// revalidated. A token in the URL must always be checked for real,
+// regardless of what cookie is already on the request — see
+// requireGatewayToken's doc comment.
+func TestGatewayInvalidTokenIsNotMaskedByExistingCookie(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer apiServer.Close()
+
+	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
+	verifier.issue(testServiceName)
+
+	// Establish a legitimate, still-valid session cookie.
+	cookie := exchangeGatewayToken(t, s)
+
+	// A request carrying that valid cookie AND an invalid ?token= must
+	// still be rejected: presenting a token is a deliberate
+	// re-authentication attempt, not something an existing cookie should
+	// be able to paper over.
+	req := httptest.NewRequest(http.MethodGet, "/gw/"+testServiceName+"/http/?token=some-other-bogus-token", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	s.testHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when an invalid token accompanies a valid cookie, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGatewayCookieRejectedForDifferentWorkload(t *testing.T) {
 	s, _, _, _ := newTestServer(t)
 
