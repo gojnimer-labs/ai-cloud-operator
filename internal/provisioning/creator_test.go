@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -122,8 +123,9 @@ func TestCreateRejectsInvalidConfig(t *testing.T) {
 
 // TestRedeployOnlyTouchesSpecConfig is the concrete proof of the plan's
 // "Redeploy needs no new Deployment/Service-patching logic" claim's
-// prerequisite: Redeploy itself must only ever change Spec.Config, leaving
-// Name and every other field (including labels) exactly as they were.
+// prerequisite: Redeploy itself must only ever change Spec.Config (and,
+// per the LastRedeployedAt fix below, Spec.LastRedeployedAt), leaving Name
+// and every other field (including labels) exactly as they were.
 func TestRedeployOnlyTouchesSpecConfig(t *testing.T) {
 	c, _ := newFakeClient(t)
 	creator := provisioning.NewWorkloadCreator(c, testNamespace)
@@ -153,7 +155,7 @@ func TestRedeployOnlyTouchesSpecConfig(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	if updated.Name != testExistingName || updated.Spec.UserID != testUserID || updated.Spec.Subdomain != testSubdomain || updated.Spec.TemplateName != testTemplateID {
-		t.Fatalf("expected only Spec.Config to change, got %+v", updated.Spec)
+		t.Fatalf("expected only Spec.Config/LastRedeployedAt to change, got %+v", updated.Spec)
 	}
 	if updated.Labels["keep"] != "me" {
 		t.Fatalf("expected existing labels to be untouched, got %+v", updated.Labels)
@@ -161,12 +163,63 @@ func TestRedeployOnlyTouchesSpecConfig(t *testing.T) {
 	if updated.Spec.Config == nil {
 		t.Fatalf("expected Spec.Config to be set")
 	}
+	if updated.Spec.LastRedeployedAt == "" {
+		t.Fatalf("expected Spec.LastRedeployedAt to be set")
+	}
 	var gotConfig map[string]any
 	if err := json.Unmarshal(updated.Spec.Config.Raw, &gotConfig); err != nil {
 		t.Fatalf("unmarshaling config: %v", err)
 	}
 	if gotConfig[paramKeyWorkerConns] != float64(2048) {
 		t.Fatalf("expected workerConnections=2048, got %+v", gotConfig)
+	}
+}
+
+// TestRedeployWithIdenticalConfigStillChangesSpec is the regression test for
+// a workload observed live stuck reporting "redeploying" forever: a redeploy
+// whose new config is byte-identical to what's already stored used to be a
+// true no-op Kubernetes API write (no resourceVersion/generation bump, no
+// watch event), so the reconciler never ran again and never got a chance to
+// report the outcome back to Convex. Redeploy must produce a genuine
+// Spec-level change (LastRedeployedAt) on every call, regardless of whether
+// Config actually differs, so a real API server always bumps generation and
+// the reconciler always re-triggers.
+func TestRedeployWithIdenticalConfigStillChangesSpec(t *testing.T) {
+	c, _ := newFakeClient(t)
+	creator := provisioning.NewWorkloadCreator(c, testNamespace)
+
+	original := &appsv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: testExistingName, Namespace: testNamespace},
+		Spec:       appsv1alpha1.WorkloadSpec{TemplateName: testTemplateID},
+	}
+	if err := c.Create(context.Background(), original); err != nil {
+		t.Fatalf("seeding workload: %v", err)
+	}
+
+	identicalConfig := map[string]any{paramKeyWorkerConns: float64(1024)}
+	if err := creator.Redeploy(context.Background(), testExistingName, identicalConfig); err != nil {
+		t.Fatalf("first redeploy: %v", err)
+	}
+	var afterFirst appsv1alpha1.Workload
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testNamespace, Name: testExistingName}, &afterFirst); err != nil {
+		t.Fatalf("get after first redeploy: %v", err)
+	}
+
+	// A real API server has nanosecond resourceVersion/timestamp
+	// resolution, but guard against any flakiness from two calls landing
+	// in the same instant regardless.
+	time.Sleep(time.Millisecond)
+
+	if err := creator.Redeploy(context.Background(), testExistingName, identicalConfig); err != nil {
+		t.Fatalf("second redeploy with identical config: %v", err)
+	}
+	var afterSecond appsv1alpha1.Workload
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: testNamespace, Name: testExistingName}, &afterSecond); err != nil {
+		t.Fatalf("get after second redeploy: %v", err)
+	}
+
+	if afterFirst.Spec.LastRedeployedAt == afterSecond.Spec.LastRedeployedAt {
+		t.Fatalf("expected LastRedeployedAt to change even with identical config, got %q both times", afterFirst.Spec.LastRedeployedAt)
 	}
 }
 

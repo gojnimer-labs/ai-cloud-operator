@@ -80,6 +80,20 @@ type WorkloadSpec struct {
 	// and everything else about the CR stay exactly as they were.
 	// +optional
 	Suspended bool `json:"suspended,omitempty"`
+
+	// lastRedeployedAt is set to the current time on every redeploy claim,
+	// unconditionally — including when the new config is byte-identical to
+	// what's already stored. This exists purely to guarantee every redeploy
+	// produces a genuine spec-level change: without it, an identical-config
+	// redeploy is a true no-op write to the Kubernetes API (no
+	// resourceVersion or generation bump, no watch event), so the
+	// reconciler never runs again and never gets a chance to report the
+	// outcome back to Convex — a workload was observed permanently stuck
+	// reporting "redeploying" this exact way. A real timestamp here (rather
+	// than e.g. a random nonce) also doubles as genuinely useful
+	// information: when this workload was last redeployed.
+	// +optional
+	LastRedeployedAt string `json:"lastRedeployedAt,omitempty"`
 }
 
 // WorkloadStatus defines the observed state of Workload.

@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -120,8 +121,18 @@ func (wc *WorkloadCreator) Create(ctx context.Context, workloadID, templateName,
 // param-resolution/validation Create uses, against the CR's own already-set
 // TemplateName (redeploy never changes which template a workload runs).
 //
-// Only Spec.Config is touched — Name, Namespace, TemplateName, UserID,
-// Subdomain, and every label all stay exactly as they were.
+// Also unconditionally bumps Spec.LastRedeployedAt to the current time —
+// see that field's doc comment for why: without a guaranteed spec-level
+// change on every call, a redeploy whose new config happens to be
+// byte-identical to what's already stored is a true no-op Kubernetes API
+// write (no resourceVersion/generation bump, no watch event), so the
+// reconciler never runs again and never gets a chance to report the
+// outcome back to Convex. This was observed live leaving a workload
+// permanently stuck reporting "redeploying".
+//
+// Only Spec.Config and Spec.LastRedeployedAt are touched — Name, Namespace,
+// TemplateName, UserID, Subdomain, and every label all stay exactly as they
+// were.
 func (wc *WorkloadCreator) Redeploy(ctx context.Context, name string, config map[string]any) error {
 	var workload appsv1alpha1.Workload
 	if err := wc.client.Get(ctx, client.ObjectKey{Namespace: wc.namespace, Name: name}, &workload); err != nil {
@@ -141,6 +152,7 @@ func (wc *WorkloadCreator) Redeploy(ctx context.Context, name string, config map
 		return fmt.Errorf("%w: %s", ErrInvalidConfig, err.Error())
 	}
 	workload.Spec.Config = configRaw
+	workload.Spec.LastRedeployedAt = time.Now().UTC().Format(time.RFC3339Nano)
 
 	if err := wc.client.Update(ctx, &workload); err != nil {
 		return fmt.Errorf("updating workload %q: %w", name, err)
