@@ -146,13 +146,13 @@ func TestLoadOrRegisterReusesTokenWhenCatalogHashMatches(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/operators/heartbeat":
+		case pathOperatorsHeartbeat:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
 		case pathOperatorsRegister:
 			registerCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-new", DeployToken: "dp-new"})
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-new", DeployToken: testDeployTokenRotated})
 		}
 	}))
 	defer srv.Close()
@@ -187,13 +187,13 @@ func TestLoadOrRegisterReregistersWhenCatalogHashDiffers(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/operators/heartbeat":
+		case pathOperatorsHeartbeat:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
 		case pathOperatorsRegister:
 			registerCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-new", DeployToken: "dp-new"})
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-new", DeployToken: testDeployTokenRotated})
 		}
 	}))
 	defer srv.Close()
@@ -212,8 +212,8 @@ func TestLoadOrRegisterReregistersWhenCatalogHashDiffers(t *testing.T) {
 	if registerCalls.Load() != 1 {
 		t.Fatalf("expected exactly 1 re-registration when catalog hash differs, got %d", registerCalls.Load())
 	}
-	if runnable.CurrentDeployToken() != "dp-new" {
-		t.Fatalf("expected rotated deploy token dp-new, got %q", runnable.CurrentDeployToken())
+	if runnable.CurrentDeployToken() != testDeployTokenRotated {
+		t.Fatalf("expected rotated deploy token %q, got %q", testDeployTokenRotated, runnable.CurrentDeployToken())
 	}
 
 	persisted, ok, err := store.Load(context.Background())
@@ -233,7 +233,7 @@ func TestHeartbeatOnceReregistersOnRejection(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/operators/heartbeat":
+		case pathOperatorsHeartbeat:
 			heartbeatCalls.Add(1)
 			w.WriteHeader(http.StatusUnauthorized)
 		case pathOperatorsRegister:

@@ -62,8 +62,10 @@ func TestEstimatedResourcesNonZeroForEveryTemplate(t *testing.T) {
 // nondeterministic encoding — internal/convexclient.Runnable relies on exact
 // equality against a value persisted on a prior process's run.
 func TestHashIsDeterministic(t *testing.T) {
-	if Hash() != Hash() {
-		t.Fatalf("expected Hash to be deterministic across calls")
+	first := Hash()
+	second := Hash()
+	if first != second {
+		t.Fatalf("expected Hash to be deterministic across calls, got %q then %q", first, second)
 	}
 }
 

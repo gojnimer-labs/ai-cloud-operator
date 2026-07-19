@@ -34,11 +34,13 @@ import (
 // twice with a chance to drift out of sync.
 const (
 	pathOperatorsRegister       = "/operators/register"
+	pathOperatorsHeartbeat      = "/operators/heartbeat"
 	pathOperatorsClaim          = "/operators/workloads/claim"
 	pathOperatorsClaimOperation = "/operators/workloads/claim-operation"
 	pathOperatorsLifecycle      = "/operators/workloads/lifecycle"
 	testHeartbeatToken          = "hb-1"
 	testDeployTokenValue        = "dp-1"
+	testDeployTokenRotated      = "dp-new"
 	testOperatorName            = "op-1"
 	testWorkloadName            = "demo"
 	testNamespace               = "default"
