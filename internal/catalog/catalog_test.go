@@ -178,7 +178,7 @@ func TestResolveParamsRejectsMissingRequired(t *testing.T) {
 	tmpl := Template{
 		ID: "test",
 		Parameters: []Parameter{
-			{Key: paramKeyName, Required: true, Type: ParameterTypeString},
+			{Key: paramKeyName, Validation: Validation{Required: true}, Type: ParameterTypeString},
 		},
 	}
 	if _, err := ResolveParams(tmpl.Parameters, map[string]any{}); err == nil {
@@ -197,8 +197,7 @@ func TestResolveParamsSkipsRequiredAndValidationWhenHidden(t *testing.T) {
 		{
 			Key:        "advancedOption",
 			Type:       ParameterTypeString,
-			Required:   true,
-			Validation: &Validation{MaxLength: &maxLen},
+			Validation: Validation{Required: true, MaxLength: &maxLen},
 			Visibility: &Visibility{DependsOn: paramKeyMode, Op: VisibilityEquals, Value: "advanced"},
 		},
 	}
@@ -219,7 +218,7 @@ func TestResolveParamsSkipsRequiredAndValidationWhenHidden(t *testing.T) {
 func TestResolveParamsRejectsValidationViolations(t *testing.T) {
 	minV, maxV := 0.0, 10.0
 	numeric := []Parameter{
-		{Key: paramKeyCount, Type: ParameterTypeNumber, DataSource: DataSource{Kind: DataSourceStatic}, Validation: &Validation{Min: &minV, Max: &maxV}},
+		{Key: paramKeyCount, Type: ParameterTypeNumber, DataSource: DataSource{Kind: DataSourceStatic}, Validation: Validation{Min: &minV, Max: &maxV}},
 	}
 	if _, err := ResolveParams(numeric, map[string]any{paramKeyCount: float64(50)}); err == nil {
 		t.Fatalf("expected an error for a value above Max")
@@ -229,7 +228,7 @@ func TestResolveParamsRejectsValidationViolations(t *testing.T) {
 	}
 
 	pattern := []Parameter{
-		{Key: paramKeyName, Type: ParameterTypeString, DataSource: DataSource{Kind: DataSourceStatic}, Validation: &Validation{Regex: "^[a-z]+$"}},
+		{Key: paramKeyName, Type: ParameterTypeString, DataSource: DataSource{Kind: DataSourceStatic}, Validation: Validation{Regex: "^[a-z]+$"}},
 	}
 	if _, err := ResolveParams(pattern, map[string]any{paramKeyName: "Not Valid!"}); err == nil {
 		t.Fatalf("expected an error for a regex mismatch")

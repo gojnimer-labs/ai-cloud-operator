@@ -77,7 +77,6 @@ var Nginx = Template{
 				{Label: "Warn", Value: logLevelWarn},
 				{Label: "Error", Value: logLevelError},
 			},
-			Required:   false,
 			DataSource: DataSource{Kind: DataSourceStatic},
 			Type:       ParameterTypeSelect,
 		},
@@ -86,12 +85,11 @@ var Nginx = Template{
 			Description: "Passed through as an env var for illustration.",
 			Key:         "workerConnections",
 			Label:       "Worker connections",
-			Required:    false,
 			DataSource:  DataSource{Kind: DataSourceStatic},
 			Type:        ParameterTypeNumber,
-			// Demonstrates the new Validation field — an out-of-range worker
+			// Demonstrates the Validation field — an out-of-range worker
 			// connection count is rejected rather than silently accepted.
-			Validation: &Validation{Min: ptrFloat64(0), Max: ptrFloat64(65536)},
+			Validation: Validation{Min: ptrFloat64(0), Max: ptrFloat64(65536)},
 		},
 	},
 }

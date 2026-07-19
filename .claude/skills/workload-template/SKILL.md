@@ -25,8 +25,8 @@ A "template" is a pre-built container spec a user can pick via
    plain `json.Unmarshal` into `map[string]any`, so **numbers arrive as
    `float64`**, not `int`.
 4. `catalog.ResolveParams(tmpl.Parameters, rawParams)` — applies defaults, then
-   evaluates `Visibility`, then checks `Required`/`Validation` on whatever's
-   still visible (see below).
+   evaluates `Visibility`, then checks `Validation` (including
+   `Validation.Required`) on whatever's still visible (see below).
 5. `tmpl.Build(resolvedParams)` → `catalog.Rendered{Containers, InitContainers,
    Volumes, ServicePorts}`.
 6. The reconciler does a **direct, unconditional assignment** — no merging, no
@@ -85,6 +85,7 @@ type Visibility struct {
 }
 
 type Validation struct {
+	Required  bool     // whether a value must be present when the parameter is visible
 	Min, Max  *float64 // numeric range
 	Regex     string   // string pattern
 	MaxLength *int     // string length
@@ -94,11 +95,10 @@ type Parameter struct {
 	Key, Label, Description string
 	Type        ParameterType // ParameterTypeString | Number | Boolean | Select
 	DataSource  DataSource
-	Required    bool
 	Default     any            // omitted if nil; applied only when caller didn't supply the key
 	Options     []SelectOption // only for ParameterTypeSelect
 	Visibility  *Visibility    // nil = always visible/enforced
-	Validation  *Validation    // nil = no constraint beyond Required
+	Validation  Validation     // always present, unlike Visibility — Required needs a value regardless
 }
 
 type Rendered struct {
@@ -147,24 +147,24 @@ what `Build` receives, in two passes:
 pass 1 (defaults): resolved = copy(raw); for each p where resolved[p.Key] is
   absent and p.Default != nil: resolved[p.Key] = p.Default
 
-pass 2 (visibility, then required, then validation) — needs pass 1's full map
-  since Visibility can depend on another parameter's resolved/defaulted value:
+pass 2 (visibility, then validation) — needs pass 1's full map since
+  Visibility can depend on another parameter's resolved/defaulted value:
   for each p:
-    if p.Visibility != nil and it evaluates to "not visible": skip Required
-      and Validation entirely for this p (its value, if any, is left in the
-      map untouched — not stripped)
-    if p.Required and resolved[p.Key] is missing/nil/"": error
-    if p.Validation != nil and a value is present: check Min/Max (numeric) or
-      Regex/MaxLength (string), error on violation
+    if p.Visibility != nil and it evaluates to "not visible": skip Validation
+      (including p.Validation.Required) entirely for this p (its value, if
+      any, is left in the map untouched — not stripped)
+    if p.Validation.Required and resolved[p.Key] is missing/nil/"": error
+    if a value is present: check Min/Max (numeric) or Regex/MaxLength
+      (string), error on violation
 ```
 
 **Gotcha**: a hidden parameter (its `Visibility` condition doesn't hold) is
 never enforced as required or validated — nothing rendered a form field for
 it, so demanding a value would be unsatisfiable. A *visible* required
 parameter still treats `""`/`nil` as "missing" (not just absent) — don't mark
-a parameter `Required: true` unless a real value is guaranteed by the time
-`Build` runs (see `profileDownloadUrl` below: not required, because a restore
-may not even be requested).
+a parameter `Validation.Required: true` unless a real value is guaranteed by
+the time `Build` runs (see `profileDownloadUrl` below: not required, because
+a restore may not even be requested).
 
 Helpers already in `internal/catalog/registry.go`, available package-wide —
 use them instead of re-deriving:
@@ -185,8 +185,8 @@ there's no version field on the deploy request. It exists so Convex-side
 presets (a saved parameter set built against a template at some point) can
 detect that the schema has since moved, entirely on the Convex side. When you
 change an existing template's `Parameters` (add/remove/rename a key, change a
-`Required`/`Type`/`Visibility` in a way that could break a saved preset),
-bump `Version`. Adding a brand-new template starts at `"1.0.0"`.
+`Validation.Required`/`Type`/`Visibility` in a way that could break a saved
+preset), bump `Version`. Adding a brand-new template starts at `"1.0.0"`.
 
 ## Worked example: a "redis" template
 
@@ -261,16 +261,14 @@ var Redis = Template{
 			Description: "Passed as --maxmemory.",
 			Key:         "maxMemory",
 			Label:       "Max memory",
-			Required:    false,
 			DataSource:  DataSource{Kind: DataSourceStatic},
 			Type:        ParameterTypeString,
-			Validation:  &Validation{Regex: `^\d+(kb|mb|gb)$`},
+			Validation:  Validation{Regex: `^\d+(kb|mb|gb)$`},
 		},
 		{
 			Description: "Optional; passed as --requirepass. Leave blank for no auth (acceptable for a private in-cluster instance).",
 			Key:         "password",
 			Label:       "Password",
-			Required:    false,
 			DataSource:  DataSource{Kind: DataSourceStatic},
 			Type:        ParameterTypeString,
 		},
@@ -365,8 +363,8 @@ Then: `go build ./... && go test ./internal/catalog/...`
   type `paramString`/`paramInt32` (or your own reader) expects, because
   real requests decode JSON numbers as `float64`. Follow `nginx.go`'s
   `workerConnections` example.
-- **`Required: true` + `""`/`nil` are both treated as "missing"** by
-  `ResolveParams` — don't require a field that's legitimately optional at
+- **`Validation.Required: true` + `""`/`nil` are both treated as "missing"**
+  by `ResolveParams` — don't require a field that's legitimately optional at
   Build time. Combine with `Visibility` when a field is only ever relevant
   conditionally (see `profileDownloadUrl` below) rather than leaving it
   optional-in-name-only.
@@ -400,7 +398,8 @@ Then: `go build ./... && go test ./internal/catalog/...`
 - **Struct-literal field order**: existing `Template`/`Parameter` literals are
   mostly alphabetical by field name (`Build, Description, Entrypoints, ID,
   Icon, Name, Operations, Parameters, Version`; `DataSource, Default,
-  Description, Key, Label, Required, Type, Validation, Visibility`) — not
+  Description, Key, Label, Type, Validation, Visibility` — `Required` is no
+  longer a top-level `Parameter` field, it moved onto `Validation`) — not
   gofmt-enforced, just house style; match it for reviewability, but don't
   worry if a comment forces you to break it.
 

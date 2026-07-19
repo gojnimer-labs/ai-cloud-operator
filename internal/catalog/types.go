@@ -146,11 +146,15 @@ type Visibility struct {
 	Values []any `json:"values,omitempty"`
 }
 
-// Validation constrains a parameter's resolved value beyond presence
-// (Required). Every field is optional; nil/zero means "no constraint of
-// this kind." Only checked for parameters that are both visible and have a
-// value present — see ResolveParams.
+// Validation constrains a parameter's value: whether it must be present
+// (Required) and, if present, further constraints on it (Min/Max/Regex/
+// MaxLength — all optional, nil/zero meaning "no constraint of this kind").
+// Always present on the wire (unlike Visibility, a genuinely optional
+// pointer) since Required needs a value regardless — same "always-present
+// bundle" shape as DataSource. Only checked for parameters that are
+// currently visible — see ResolveParams.
 type Validation struct {
+	Required  bool     `json:"required"`
 	Min       *float64 `json:"min,omitempty"`
 	Max       *float64 `json:"max,omitempty"`
 	Regex     string   `json:"regex,omitempty"`
@@ -170,14 +174,13 @@ type Parameter struct {
 	Description string         `json:"description,omitempty"`
 	Type        ParameterType  `json:"type"`
 	DataSource  DataSource     `json:"dataSource"`
-	Required    bool           `json:"required"`
 	Default     any            `json:"default,omitempty"`
 	Options     []SelectOption `json:"options,omitempty"`
 	// Visibility, when set, hides this parameter (and exempts it from
-	// Required/Validation checks) unless the condition holds — see
-	// ResolveParams.
+	// Validation checks, including Validation.Required) unless the
+	// condition holds — see ResolveParams.
 	Visibility *Visibility `json:"visibility,omitempty"`
-	Validation *Validation `json:"validation,omitempty"`
+	Validation Validation  `json:"validation"`
 }
 
 // Rendered is what a template's Build function produces: the pieces the

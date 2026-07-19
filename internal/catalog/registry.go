@@ -104,11 +104,11 @@ func ResolveParams(params []Parameter, raw map[string]any) (map[string]any, erro
 
 		v, ok := resolved[p.Key]
 		present := ok && v != nil && v != ""
-		if p.Required && !present {
+		if p.Validation.Required && !present {
 			return nil, fmt.Errorf("missing required parameter %q", p.Key)
 		}
-		if p.Validation != nil && present {
-			if err := checkValidation(p.Validation, v); err != nil {
+		if present {
+			if err := checkValidation(&p.Validation, v); err != nil {
 				return nil, fmt.Errorf("parameter %q invalid: %w", p.Key, err)
 			}
 		}
