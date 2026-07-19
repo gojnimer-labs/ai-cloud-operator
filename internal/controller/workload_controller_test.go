@@ -578,6 +578,83 @@ var _ = Describe("Workload Controller", func() {
 		})
 	})
 
+	// Regression coverage for a real stuck-forever loop observed in
+	// production: a workload that hit a transient reconcileDeployment
+	// conflict at create time got its "failed" report reinterpreted by
+	// Convex as "active" (ai-cloud-v2's resolveLifecycleStatus), which left
+	// the row no longer in an in-flight status. The next, genuine "active"
+	// report then permanently 409'd as "stale" — with no special-casing,
+	// that requeued every statusRequeueInterval forever, generating
+	// unbounded ERROR logs and Convex traffic for a workload that was, in
+	// fact, perfectly healthy. Its own Context (rather than reusing "When a
+	// Workload reaches Running" above) because that Context's AfterEach
+	// unconditionally deletes a fixed-name Deployment/Service this test
+	// never creates under.
+	Context("When Convex reports a workload as already resolved (stale 409)", func() {
+		const (
+			resourceName      = "test-resource-lifecycle-stale"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
+			}
+			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+		})
+
+		It("settles ConvexLifecycleSynced instead of retrying forever", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			notifier := &fakeNotifier{lifecycleErr: convexclient.ErrLifecycleStale}
+			controllerReconciler := &WorkloadReconciler{
+				Client:       k8sClient,
+				ConvexClient: notifier,
+				Scheme:       k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.lifecycleCount()).To(Equal(0))
+
+			var deployment appsv1.Deployment
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &deployment)).To(Succeed())
+			deployment.Status.Replicas = 1
+			deployment.Status.ReadyReplicas = 1
+			Expect(k8sClient.Status().Update(ctx, &deployment)).To(Succeed())
+
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.lifecycleCount()).To(Equal(1))
+			// The whole point: a stale 409 must not schedule another
+			// attempt against a report that can never succeed.
+			Expect(result.RequeueAfter).To(BeZero())
+
+			var workload appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			cond := apimeta.FindStatusCondition(workload.Status.Conditions, conditionTypeConvexLifecycleSynced)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("AlreadyResolved"))
+
+			// A further reconcile with nothing changed must not retry —
+			// this is the unbounded-loop this test guards against.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.lifecycleCount()).To(Equal(1))
+		})
+	})
+
 	Context("When a Workload is suspended", func() {
 		const (
 			resourceName      = "test-resource-suspend"

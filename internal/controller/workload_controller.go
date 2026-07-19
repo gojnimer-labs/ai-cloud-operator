@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -342,14 +343,30 @@ func (r *WorkloadReconciler) syncConvexLifecyclePhase(ctx context.Context, workl
 		Type:               conditionTypeConvexLifecycleSynced,
 		ObservedGeneration: workload.Generation,
 	}
-	if err := r.notifyLifecycle(ctx, workload, phase, ""); err != nil {
-		condition.Status = metav1.ConditionFalse
-		condition.Reason = "NotifyFailed"
-		condition.Message = err.Error()
-	} else {
+	switch err := r.notifyLifecycle(ctx, workload, phase, ""); {
+	case err == nil:
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = "Notified"
 		condition.Message = fmt.Sprintf("Convex has been told this workload is %s", phase)
+	case errors.Is(err, convexclient.ErrLifecycleStale):
+		// Convex's row already reflects a resolved active/stopped state for
+		// this workload from an earlier report (e.g. a setFailed call during
+		// this same generation that ai-cloud-v2's resolveLifecycleStatus
+		// reinterpreted as "active" rather than a hard failure — see
+		// convex/workloads/mutations.ts#reportLifecycle). There's nothing
+		// left to tell Convex for this generation, and retrying this exact
+		// call can never succeed until a fresh redeploy/stop/resume moves
+		// the row back into an in-flight status — that call reports
+		// lifecycle again on its own once it lands. Marking this synced
+		// instead of retrying every statusRequeueInterval avoids an
+		// unwinnable retry loop that would otherwise run forever.
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "AlreadyResolved"
+		condition.Message = "Convex already reflects this workload's current phase from an earlier report"
+	default:
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = "NotifyFailed"
+		condition.Message = err.Error()
 	}
 	apimeta.SetStatusCondition(&workload.Status.Conditions, condition)
 	return condition.Status == metav1.ConditionTrue

@@ -35,6 +35,16 @@ import (
 // 410) — the caller should treat this as "re-register".
 var ErrUnauthorized = fmt.Errorf("convex rejected credential")
 
+// ErrLifecycleStale indicates ReportLifecycle's 409: Convex's row for this
+// workload isn't in an in-flight status right now, so this report can never
+// be applied as-is. Unlike a network blip or a 5xx, retrying the exact same
+// call will never succeed — the row only re-enters an in-flight status via
+// a fresh redeploy/stop/resume, which reports lifecycle again on its own.
+// The caller should treat this as "nothing further to do this generation,"
+// not as a transient failure worth requeuing over (see
+// WorkloadReconciler.syncConvexLifecyclePhase).
+var ErrLifecycleStale = fmt.Errorf("workload not in an in-flight status")
+
 // Config holds the operator's identity and how to reach Convex.
 type Config struct {
 	BaseURL          string
@@ -445,6 +455,9 @@ func (c *Client) ReportLifecycle(ctx context.Context, heartbeatToken, name, work
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusConflict {
+		return ErrLifecycleStale
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("report lifecycle returned status %d", resp.StatusCode)
 	}
