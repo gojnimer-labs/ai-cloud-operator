@@ -463,15 +463,15 @@ operation):
   "name": "Firefox Browser",
   "description": "Full Firefox browser accessible via web interface",
   "icon": "🦊",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "parameters": [
     {
       "key": "profileName",
       "label": "Profile name",
       "description": "Identifies which saved profile to restore, if any.",
       "type": "select",
-      "dataSource": { "kind": "dynamic", "sourceKey": "profiles_firefox" },
-      "validation": { "required": false },
+      "dataSource": { "kind": "fileOptions", "group": "profiles_firefox" },
+      "validation": { "required": true },
       "visibility": { "dependsOn": "restoreProfile", "op": "equals", "value": true }
     },
     {

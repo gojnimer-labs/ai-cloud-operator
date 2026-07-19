@@ -104,7 +104,14 @@ func browserParameters(profileSourceKey string) []Parameter {
 			// Only meaningful when a restore was actually requested — same
 			// condition as profileDownloadUrl below, so the picker doesn't invite
 			// a choice that deployWorkload will silently ignore because
-			// restoreProfile never got toggled on.
+			// restoreProfile never got toggled on. Required (not just visible):
+			// toggling "restore saved profile" on with no profile actually picked
+			// used to deploy silently anyway (ResolveParams/the frontend's zod
+			// schema both only exempt Required for a *hidden* parameter — once
+			// Visibility makes this one visible, an unset Required here was
+			// simply never enforced at all). Visibility's existing "hidden means
+			// exempt" rule still applies when restoreProfile is off.
+			Validation: Validation{Required: true},
 			Visibility: &Visibility{DependsOn: paramKeyRestoreProfile, Op: VisibilityEquals, Value: true},
 		},
 		{

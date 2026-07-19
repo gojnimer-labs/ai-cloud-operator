@@ -384,9 +384,12 @@ Then: `go build ./... && go test ./internal/catalog/...`
   `restoreProfile == true`.
 - **Dynamic-select parameters** (`DataSource{Kind: DataSourceDynamic,
   SourceKey: "..."}`): leave `Options` empty — Convex resolves the actual
-  choices per-request from its own database keyed by `SourceKey` (see
-  `profileName` in `browser.go`). The operator declares *that* a dynamic
-  select is needed and *which* source backs it, never the options themselves.
+  choices per-request from its own database keyed by `SourceKey`. The
+  operator declares *that* a dynamic select is needed and *which* source
+  backs it, never the options themselves. (No current template uses this —
+  `profileName` in `browser.go` looks similar but is actually
+  `DataSourceFileOptions`, the files-table-backed sibling: see that field's
+  own doc comment.)
 - **Reuse `internal/catalog/browser.go` helpers when they fit, don't force
   it**: `browserResources(cpu, memRequest, memLimit string)` is generic enough
   for any container despite the name (used above for redis). `browserProbe`
