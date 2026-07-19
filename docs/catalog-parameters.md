@@ -11,6 +11,13 @@ this repo — that one's for Go authors, this one's for API consumers.
 from the old shape" at the bottom) — nothing was removed conceptually, but
 field names and a couple of value shapes are different.
 
+**Update, still breaking**: `parameters[].required` moved — it's now
+`parameters[].validation.required`, a field on `validation` alongside
+`min`/`max`/`regex`/`maxLength` rather than a sibling of `validation`. Unlike
+`required` before, `validation` itself is now **always present** on every
+parameter (never omitted, even when nothing constrains it beyond presence) —
+see the updated shape below.
+
 ## Migration checklist for ai-cloud-v2
 
 Hand this section to whoever/whatever is doing the Convex-side work — it's
@@ -42,8 +49,9 @@ resolves `profileName`/system params), `convex/workloads/actions.ts#runCustomFun
 - [ ] Implement `visibility` evaluation: hide a parameter unless its
       `dependsOn` field's current value satisfies `op`/`value`/`values`. See
       **Visibility**.
-- [ ] Optional/nice-to-have: client-side `validation` checks (min/max/regex/
-      maxLength) before submitting — the operator still enforces these
+- [ ] Optional/nice-to-have: client-side `validation` checks (required/min/
+      max/regex/maxLength — `required` lives on `validation` now, not as a
+      sibling field) before submitting — the operator still enforces these
       authoritatively either way. See **Validation**.
 
 **3. Deploy flow**
@@ -161,11 +169,10 @@ One `Parameter`:
   "description": "...",              // optional, omitted if empty
   "type": "string",
   "dataSource": { "kind": "file" },
-  "required": false,
   "default": "...",                  // optional, any JSON type, omitted if unset
   "options": [ { "value": "...", "label": "..." } ], // only for type "select", omitted otherwise
   "visibility": { "dependsOn": "restoreProfile", "op": "equals", "value": true }, // optional
-  "validation": { "min": 0, "max": 65536 }            // optional
+  "validation": { "required": false, "min": 0, "max": 65536 } // always present — required lives here now
 }
 ```
 
@@ -174,11 +181,10 @@ One `Parameter`:
 | `key` | The config key — this is exactly the key you send in `deploy`'s `config` object. | Use verbatim. |
 | `type` | `"string"` \| `"number"` \| `"boolean"` \| `"select"` | Picks the form widget. |
 | `dataSource.kind` | `"static"` \| `"dynamic"` \| `"system"` | See **DataSource** below — this is the field that changed shape from the old API. |
-| `required` | Whether a value must be present **when the field is visible** (see Visibility). | Client-side form validation; the operator also enforces this authoritatively at deploy time. |
 | `default` | Value to send if the user hasn't touched the field. | Prefill the form / use as fallback if omitting the key entirely. |
 | `options` | Static choices, only present for `type: "select"` with `dataSource.kind: "static"`. | Render as the dropdown/radio options. Absent (not just empty) for a dynamic select — see below. |
 | `visibility` | Conditionally hides the field. | See **Visibility** below — evaluate this client-side to decide whether to render the field at all. |
-| `validation` | Value constraints beyond presence. | See **Validation** below. |
+| `validation` | Whether a value must be present **when the field is visible** (`required`, see Visibility), plus value constraints beyond presence (`min`/`max`/`regex`/`maxLength`). Always present, unlike `visibility`. | See **Validation** below. |
 
 ## DataSource — the field that replaced `source`
 
@@ -235,27 +241,31 @@ the operator itself enforces (see next point).
 
 **Important operator-side behavior**: when a parameter's visibility
 condition doesn't hold, the operator's validation (`ResolveParams`) skips
-*both* `required` and `validation` for it entirely — a hidden field is never
-treated as "missing" even if `required: true`. You don't have to replicate
-this specific leniency in Convex, but don't be stricter than the operator
-either (i.e., don't block a deploy client-side for a hidden required field
-being empty — the operator won't).
+`validation` for it entirely — a hidden field is never treated as "missing"
+even if `validation.required` is `true`. You don't have to replicate this
+specific leniency in Convex, but don't be stricter than the operator either
+(i.e., don't block a deploy client-side for a hidden required field being
+empty — the operator won't).
 
-## Validation — new field
+## Validation — always present, `required` lives here now
 
 ```jsonc
-"validation": { "min": 0, "max": 65536 }
-"validation": { "regex": "^[a-z]+$" }
-"validation": { "maxLength": 100 }
+"validation": { "required": true }
+"validation": { "required": false, "min": 0, "max": 65536 }
+"validation": { "required": false, "regex": "^[a-z]+$" }
+"validation": { "required": false, "maxLength": 100 }
 ```
 
-`min`/`max` apply to numeric values, `regex`/`maxLength` to strings — any
-subset may be present. **The operator is the authoritative enforcer**: it
-re-validates on every deploy request (`POST /workloads`) and rejects
-violations with `400` before creating anything. Convex/the frontend should
-still validate client-side for a decent UX (don't make the user wait for a
-round trip to learn their input's out of range), but doesn't need to worry
-about being the last line of defense.
+Unlike `visibility` (omitted when a parameter has none), `validation` is
+**always present** on every parameter — `required` needs a value regardless
+of whether anything else constrains the field. `min`/`max` apply to numeric
+values, `regex`/`maxLength` to strings — any subset of those four may be
+present alongside `required`. **The operator is the authoritative
+enforcer**: it re-validates on every deploy request (`POST /workloads`) and
+rejects violations with `400` before creating anything. Convex/the frontend
+should still validate client-side for a decent UX (don't make the user wait
+for a round trip to learn their input's out of range or missing), but
+doesn't need to worry about being the last line of defense.
 
 Error responses today are **plain text**, not JSON (`http.Error` with just a
 string body), so don't try to `JSON.parse` a 400 response. Current message
@@ -311,9 +321,10 @@ These are operations against an already-*running* workload (invoked via
 `POST /workloads/{name}/functions/{key}`, not the deploy
 endpoint), discovered through this same `/catalog` response. Their
 `parameters` follow every rule above identically (DataSource/Visibility/
-Validation/Required all apply the same way, including "none needed" — an
-empty/absent `parameters` array is entirely valid) — resolved and validated
-by the same `ResolveParams` function on the operator side.
+Validation, including `validation.required`, all apply the same way,
+including "none needed" — an empty/absent `parameters` array is entirely
+valid) — resolved and validated by the same `ResolveParams` function on the
+operator side.
 
 ### `refreshable`
 
@@ -419,7 +430,7 @@ system/dynamic parameters, no operations):
       "label": "Log level",
       "type": "select",
       "dataSource": { "kind": "static" },
-      "required": false,
+      "validation": { "required": false },
       "default": "info",
       "options": [
         { "value": "info", "label": "Info" },
@@ -433,9 +444,8 @@ system/dynamic parameters, no operations):
       "description": "Passed through as an env var for illustration.",
       "type": "number",
       "dataSource": { "kind": "static" },
-      "required": false,
       "default": 1024,
-      "validation": { "min": 0, "max": 65536 }
+      "validation": { "required": false, "min": 0, "max": 65536 }
     }
   ],
   "entrypoints": [
@@ -461,7 +471,7 @@ operation):
       "description": "Identifies which saved profile to restore, if any.",
       "type": "select",
       "dataSource": { "kind": "dynamic", "sourceKey": "profiles_firefox" },
-      "required": false,
+      "validation": { "required": false },
       "visibility": { "dependsOn": "restoreProfile", "op": "equals", "value": true }
     },
     {
@@ -469,7 +479,7 @@ operation):
       "label": "Restore saved profile",
       "type": "boolean",
       "dataSource": { "kind": "static" },
-      "required": false,
+      "validation": { "required": false },
       "default": false
     },
     {
@@ -477,7 +487,7 @@ operation):
       "label": "Profile download URL (system)",
       "type": "string",
       "dataSource": { "kind": "file" },
-      "required": false,
+      "validation": { "required": false },
       "visibility": { "dependsOn": "restoreProfile", "op": "equals", "value": true }
     }
   ],
@@ -496,14 +506,14 @@ operation):
           "description": "A name to identify this saved profile later, when restoring it into a future deploy.",
           "type": "string",
           "dataSource": { "kind": "static" },
-          "required": false
+          "validation": { "required": false }
         },
         {
           "key": "uploadUrl",
           "label": "Upload URL (system)",
           "type": "string",
           "dataSource": { "kind": "file" },
-          "required": true
+          "validation": { "required": true }
         }
       ],
       "refreshable": false
@@ -578,6 +588,10 @@ If you're updating existing Convex code rather than starting fresh:
   `dataSource.sourceKey`.
 - `parameters[].visibility`, `parameters[].validation` → **new**, both
   optional/absent on any parameter that doesn't need them.
+- `parameters[].required` → **moved**, now `parameters[].validation.required`
+  instead of a sibling of `validation`. Unlike before, `validation` is now
+  **always present** on every parameter (never omitted) — `required` needs a
+  value regardless of whether anything else constrains the field.
 - `templates[].version` → **new**, always present (never empty string in
   practice — every template sets it).
 - `templates[].customFunctions` → renamed to `templates[].operations` (same
@@ -631,7 +645,8 @@ If you're updating existing Convex code rather than starting fresh:
 
 `internal/catalog/types.go` (struct definitions + doc comments),
 `internal/catalog/registry.go` (`ResolveParams`'s exact two-pass
-visibility/required/validation logic), `internal/catalog/{nginx,browser,
-firefox,chrome}.go` (the real template definitions), `internal/api/server.go`
+visibility/validation logic, including `Validation.Required`),
+`internal/catalog/{nginx,browser,firefox,chrome}.go` (the real template
+definitions), `internal/api/server.go`
 (`handleCatalog`/`handleDeploy`/`handleRunFunction`) — all in
 `github.com/gojnimer-labs/ai-cloud-operator`.

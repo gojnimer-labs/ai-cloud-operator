@@ -101,7 +101,6 @@ func browserParameters(profileSourceKey string) []Parameter {
 			// convex/workloads/actions.ts#deployWorkload).
 			Type:       ParameterTypeSelect,
 			DataSource: DataSource{Kind: DataSourceFileOptions, Group: profileSourceKey},
-			Required:   false,
 			// Only meaningful when a restore was actually requested — same
 			// condition as profileDownloadUrl below, so the picker doesn't invite
 			// a choice that deployWorkload will silently ignore because
@@ -113,7 +112,6 @@ func browserParameters(profileSourceKey string) []Parameter {
 			Label:      "Restore saved profile",
 			Type:       ParameterTypeBoolean,
 			DataSource: DataSource{Kind: DataSourceStatic},
-			Required:   false,
 			Default:    false,
 		},
 		{
@@ -125,7 +123,6 @@ func browserParameters(profileSourceKey string) []Parameter {
 				Direction:   DirectionDownload,
 				SourceParam: paramKeyProfileName,
 			},
-			Required: false,
 			// Only meaningful when a restore was actually requested — machine
 			// enforcement of what used to be just this doc comment's say-so.
 			Visibility: &Visibility{DependsOn: paramKeyRestoreProfile, Op: VisibilityEquals, Value: true},
@@ -211,7 +208,6 @@ func backupStateFunction(profilePath, containerName, profileSourceKey string) Op
 				Description: "A name to identify this saved profile later, when restoring it into a future deploy.",
 				Type:        ParameterTypeString,
 				DataSource:  DataSource{Kind: DataSourceStatic},
-				Required:    false,
 			},
 			{
 				Key:   paramKeyUploadURL,
@@ -222,7 +218,7 @@ func backupStateFunction(profilePath, containerName, profileSourceKey string) Op
 					Direction: DirectionUpload,
 					Group:     profileSourceKey,
 				},
-				Required: true,
+				Validation: Validation{Required: true},
 			},
 		},
 		// The success result carries a stable, namespaced message key
