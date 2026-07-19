@@ -275,7 +275,7 @@ func TestNginxBuildUsesResolvedParams(t *testing.T) {
 
 func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 	tmpl, _ := Get(templateIDFirefox)
-	rendered, err := tmpl.Build(map[string]any{"profileDownloadUrl": "https://example.com/profile.tar.gz"})
+	rendered, err := tmpl.Build(map[string]any{paramKeyProfileURL: "https://example.com/profile.tar.gz"})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 func TestBrowserProfileDownloadURLDeclaresDownloadDirection(t *testing.T) {
 	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
 		tmpl, _ := Get(id)
-		source := findParameter(t, tmpl.Parameters, "profileDownloadUrl").DataSource
+		source := findParameter(t, tmpl.Parameters, paramKeyProfileURL).DataSource
 		if source.Kind != DataSourceFile || source.Direction != DirectionDownload ||
 			source.SourceParam != paramKeyProfileName {
 			t.Fatalf("%s: unexpected profileDownloadUrl data source: %+v", id, source)
@@ -505,7 +505,7 @@ func TestWebtopBuildIncludesSharedMemoryVolume(t *testing.T) {
 	}
 	found := false
 	for _, v := range rendered.Volumes {
-		if v.Name == "dshm" && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
+		if v.Name == dshmVolumeName && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
 			found = true
 		}
 	}
@@ -516,7 +516,7 @@ func TestWebtopBuildIncludesSharedMemoryVolume(t *testing.T) {
 
 func TestWebtopBuildPassesProfileDownloadURL(t *testing.T) {
 	tmpl, _ := Get(templateIDWebtop)
-	rendered, err := tmpl.Build(map[string]any{"profileDownloadUrl": "https://example.com/desktop.tar.gz"})
+	rendered, err := tmpl.Build(map[string]any{paramKeyProfileURL: "https://example.com/desktop.tar.gz"})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

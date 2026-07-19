@@ -46,8 +46,16 @@ const (
 	profileSourceKeyWebtop  = "profiles_" + templateIDWebtop
 
 	portNameHTTP       = "http"
+	portNameHTTPS      = "https"
 	entrypointLabelWeb = "Web"
 	browserHTTPPort    = int32(3000)
+	browserHTTPSPort   = int32(3001)
+
+	// dshmVolumeName names the memory-backed /dev/shm EmptyDir every
+	// KasmVNC/Electron-based template (chrome, webtop) mounts — desktop
+	// apps and Chromium both need real shared memory, more than the tiny
+	// default Kubernetes gives a container's /dev/shm.
+	dshmVolumeName = "dshm"
 
 	browserConfigMountPath = "/config"
 	configVolumeName       = "config"
@@ -75,6 +83,7 @@ const (
 	paramKeyRestoreProfile = "restoreProfile"
 	paramKeyLabel          = "label"
 	paramKeyProfileName    = "profileName"
+	paramKeyProfileURL     = "profileDownloadUrl"
 
 	// initialTemplateVersion is every template's Version until its
 	// Parameters change for the first time — see Template.Version.
@@ -124,7 +133,7 @@ func browserParameters(profileSourceKey string) []Parameter {
 			Default:    false,
 		},
 		{
-			Key:   "profileDownloadUrl",
+			Key:   paramKeyProfileURL,
 			Label: "Profile download URL (system)",
 			Type:  ParameterTypeString,
 			DataSource: DataSource{

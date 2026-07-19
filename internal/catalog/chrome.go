@@ -26,7 +26,7 @@ import (
 // image/profile path.
 var Chrome = Template{
 	Build: func(params map[string]any) (Rendered, error) {
-		profileDownloadURL := paramString(params, "profileDownloadUrl", "")
+		profileDownloadURL := paramString(params, paramKeyProfileURL, "")
 
 		return Rendered{
 			Containers: []corev1.Container{
@@ -41,13 +41,13 @@ var Chrome = Template{
 					Name:          templateIDChrome,
 					Ports: []corev1.ContainerPort{
 						{ContainerPort: browserHTTPPort, Name: portNameHTTP},
-						{ContainerPort: 3001, Name: "https"},
+						{ContainerPort: browserHTTPSPort, Name: portNameHTTPS},
 					},
 					ReadinessProbe: browserProbe(15),
 					Resources:      browserResources("1000m", "1500Mi", "3Gi"),
 					VolumeMounts: []corev1.VolumeMount{
 						{MountPath: browserConfigMountPath, Name: configVolumeName},
-						{MountPath: "/dev/shm", Name: "dshm"},
+						{MountPath: "/dev/shm", Name: dshmVolumeName},
 					},
 				},
 			},
@@ -60,7 +60,7 @@ var Chrome = Template{
 			Volumes: []corev1.Volume{
 				{Name: configVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 				{
-					Name: "dshm",
+					Name: dshmVolumeName,
 					VolumeSource: corev1.VolumeSource{
 						EmptyDir: &corev1.EmptyDirVolumeSource{
 							Medium:    corev1.StorageMediumMemory,

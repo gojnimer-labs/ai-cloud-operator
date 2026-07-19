@@ -27,7 +27,7 @@ import (
 // operator's own /gw/* gateway instead of per-workload ingress resources.
 var Firefox = Template{
 	Build: func(params map[string]any) (Rendered, error) {
-		profileDownloadURL := paramString(params, "profileDownloadUrl", "")
+		profileDownloadURL := paramString(params, paramKeyProfileURL, "")
 
 		return Rendered{
 			Containers: []corev1.Container{
@@ -42,7 +42,7 @@ var Firefox = Template{
 					Name:          templateIDFirefox,
 					Ports: []corev1.ContainerPort{
 						{ContainerPort: browserHTTPPort, Name: portNameHTTP},
-						{ContainerPort: 3001, Name: "https"},
+						{ContainerPort: browserHTTPSPort, Name: portNameHTTPS},
 					},
 					ReadinessProbe: browserProbe(15),
 					Resources:      browserResources("1000m", "1500Mi", "3Gi"),

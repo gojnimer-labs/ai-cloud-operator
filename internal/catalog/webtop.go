@@ -57,7 +57,7 @@ var webtopFlavors = []SelectOption{
 var Webtop = Template{
 	Build: func(params map[string]any) (Rendered, error) {
 		flavor := paramString(params, "flavor", "latest")
-		profileDownloadURL := paramString(params, "profileDownloadUrl", "")
+		profileDownloadURL := paramString(params, paramKeyProfileURL, "")
 
 		return Rendered{
 			Containers: []corev1.Container{
@@ -72,13 +72,13 @@ var Webtop = Template{
 					Name:          templateIDWebtop,
 					Ports: []corev1.ContainerPort{
 						{ContainerPort: browserHTTPPort, Name: portNameHTTP},
-						{ContainerPort: 3001, Name: "https"},
+						{ContainerPort: browserHTTPSPort, Name: portNameHTTPS},
 					},
 					ReadinessProbe: browserProbe(15),
 					Resources:      browserResources("1500m", "2Gi", "4Gi"),
 					VolumeMounts: []corev1.VolumeMount{
 						{MountPath: browserConfigMountPath, Name: configVolumeName},
-						{MountPath: "/dev/shm", Name: "dshm"},
+						{MountPath: "/dev/shm", Name: dshmVolumeName},
 					},
 				},
 			},
@@ -91,7 +91,7 @@ var Webtop = Template{
 			Volumes: []corev1.Volume{
 				{Name: configVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 				{
-					Name: "dshm",
+					Name: dshmVolumeName,
 					VolumeSource: corev1.VolumeSource{
 						EmptyDir: &corev1.EmptyDirVolumeSource{
 							Medium:    corev1.StorageMediumMemory,
