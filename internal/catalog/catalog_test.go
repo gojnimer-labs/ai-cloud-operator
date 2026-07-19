@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -106,7 +108,7 @@ func TestEstimatedResourcesMatchesHardcodedBrowserValues(t *testing.T) {
 }
 
 func TestGetReturnsKnownTemplates(t *testing.T) {
-	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome} {
+	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome, templateIDWebtop} {
 		if _, ok := Get(id); !ok {
 			t.Fatalf("expected template %q to be registered", id)
 		}
@@ -320,7 +322,7 @@ func TestBrowserRequiresProfileNameWhenRestoreProfileIsOn(t *testing.T) {
 }
 
 func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
-	for _, id := range []string{templateIDFirefox, templateIDChrome} {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
 		tmpl, _ := Get(id)
 		fn, ok := GetOperation(tmpl, "backup_state")
 		if !ok {
@@ -353,7 +355,7 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 // workloads/actions.ts#deployWorkload), so a missing/wrong value here would
 // silently break restore.
 func TestBrowserProfileDownloadURLDeclaresDownloadDirection(t *testing.T) {
-	for _, id := range []string{templateIDFirefox, templateIDChrome} {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
 		tmpl, _ := Get(id)
 		source := findParameter(t, tmpl.Parameters, "profileDownloadUrl").DataSource
 		if source.Kind != DataSourceFile || source.Direction != DirectionDownload ||
@@ -466,5 +468,96 @@ func TestFirefoxBuildWithoutProfileURLStartsFresh(t *testing.T) {
 		if env.Name == envProfileDownloadURL && env.Value != "" {
 			t.Fatalf("expected empty PROFILE_DOWNLOAD_URL when not provided, got %q", env.Value)
 		}
+	}
+}
+
+func TestWebtopBuildDefaultsFlavorToLatest(t *testing.T) {
+	tmpl, _ := Get(templateIDWebtop)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := rendered.Containers[0].Image; got != "lscr.io/linuxserver/webtop:latest" {
+		t.Fatalf("expected default flavor image lscr.io/linuxserver/webtop:latest, got %q", got)
+	}
+}
+
+func TestWebtopBuildUsesResolvedFlavor(t *testing.T) {
+	tmpl, _ := Get(templateIDWebtop)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{"flavor": "ubuntu-kde"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := rendered.Containers[0].Image; got != "lscr.io/linuxserver/webtop:ubuntu-kde" {
+		t.Fatalf("expected flavor-specific image, got %q", got)
+	}
+}
+
+func TestWebtopBuildIncludesSharedMemoryVolume(t *testing.T) {
+	tmpl, _ := Get(templateIDWebtop)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	found := false
+	for _, v := range rendered.Volumes {
+		if v.Name == "dshm" && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a memory-backed dshm volume, got %+v", rendered.Volumes)
+	}
+}
+
+func TestWebtopBuildPassesProfileDownloadURL(t *testing.T) {
+	tmpl, _ := Get(templateIDWebtop)
+	rendered, err := tmpl.Build(map[string]any{"profileDownloadUrl": "https://example.com/desktop.tar.gz"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	found := false
+	for _, env := range rendered.InitContainers[0].Env {
+		if env.Name == envProfileDownloadURL && env.Value == "https://example.com/desktop.tar.gz" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected PROFILE_DOWNLOAD_URL env var on init container, got %+v", rendered.InitContainers[0].Env)
+	}
+}
+
+func TestWebtopBuildWithoutProfileURLStartsFresh(t *testing.T) {
+	tmpl, _ := Get(templateIDWebtop)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for _, env := range rendered.InitContainers[0].Env {
+		if env.Name == envProfileDownloadURL && env.Value != "" {
+			t.Fatalf("expected empty PROFILE_DOWNLOAD_URL when not provided, got %q", env.Value)
+		}
+	}
+}
+
+// TestWebtopUsesDistinctProfileSourceKeyFromBrowsers guards the same
+// no-shared-group invariant as TestFirefoxAndChromeUseDistinctProfileSourceKeys,
+// extended to webtop: a whole-desktop backup and a single browser's profile
+// backup must never land in the same files-table group.
+func TestWebtopUsesDistinctProfileSourceKeyFromBrowsers(t *testing.T) {
+	webtop, _ := Get(templateIDWebtop)
+	firefox, _ := Get(templateIDFirefox)
+	chrome, _ := Get(templateIDChrome)
+
+	webtopGroup := findParameter(t, webtop.Parameters, paramKeyProfileName).DataSource.Group
+	firefoxGroup := findParameter(t, firefox.Parameters, paramKeyProfileName).DataSource.Group
+	chromeGroup := findParameter(t, chrome.Parameters, paramKeyProfileName).DataSource.Group
+
+	if webtopGroup == "" || webtopGroup == firefoxGroup || webtopGroup == chromeGroup {
+		t.Fatalf("expected webtop's profileName group %q to be distinct and non-empty (firefox=%q chrome=%q)", webtopGroup, firefoxGroup, chromeGroup)
 	}
 }

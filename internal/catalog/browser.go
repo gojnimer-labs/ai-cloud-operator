@@ -33,15 +33,17 @@ const (
 	templateIDNginx   = "nginx"
 	templateIDFirefox = "firefox"
 	templateIDChrome  = "chrome"
+	templateIDWebtop  = "webtop"
 
-	// profileSourceKeyFirefox/profileSourceKeyChrome are each browser's
-	// files-table group — computed once here and reused by both
-	// browserParameters (the restore picker's DataSource.Group) and
+	// profileSourceKeyFirefox/profileSourceKeyChrome/profileSourceKeyWebtop
+	// are each template's files-table group — computed once here and reused
+	// by both browserParameters (the restore picker's DataSource.Group) and
 	// backupStateFunction (the uploadUrl param's DataSource.Group, and the
 	// FileResult a successful backup produces), so the two never drift
 	// apart the way separate ad hoc string concats at each call site could.
 	profileSourceKeyFirefox = "profiles_" + templateIDFirefox
 	profileSourceKeyChrome  = "profiles_" + templateIDChrome
+	profileSourceKeyWebtop  = "profiles_" + templateIDWebtop
 
 	portNameHTTP       = "http"
 	entrypointLabelWeb = "Web"

@@ -32,6 +32,7 @@ var templates = []Template{
 	Nginx,
 	Firefox,
 	Chrome,
+	Webtop,
 }
 
 // List returns all catalog templates, in a stable order.
