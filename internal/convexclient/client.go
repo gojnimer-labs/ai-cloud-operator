@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
 )
 
@@ -76,6 +77,11 @@ type registerRequest struct {
 	ExternalURL      string         `json:"externalUrl"`
 	EnrollmentSecret string         `json:"enrollmentSecret"`
 	Metadata         map[string]any `json:"metadata,omitempty"`
+	// Catalog is this operator's full template registry (internal/catalog.List())
+	// — Convex persists it (operators.catalog/catalogReportedAt) and uses it
+	// at claim time to verify the claiming operator actually supports the
+	// exact templateId+templateVersion a workload row was requested against.
+	Catalog []catalog.Template `json:"catalog"`
 }
 
 type registerResponse struct {
@@ -92,6 +98,7 @@ func (c *Client) Register(ctx context.Context) (tokenstore.Tokens, error) {
 		ExternalURL:      c.config.ExternalURL,
 		EnrollmentSecret: c.config.EnrollmentSecret,
 		Metadata:         c.config.Metadata,
+		Catalog:          catalog.List(),
 	})
 	if err != nil {
 		return tokenstore.Tokens{}, fmt.Errorf("marshaling register request: %w", err)

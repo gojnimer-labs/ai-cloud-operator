@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
 )
 
 // Shared fixture values across this package's tests (client_test.go and
@@ -74,6 +75,39 @@ func TestRegisterReturnsIssuedTokens(t *testing.T) {
 	}
 	if tokens.HeartbeatToken != testHeartbeatToken || tokens.DeployToken != testDeployTokenValue {
 		t.Fatalf("unexpected tokens: %+v", tokens)
+	}
+}
+
+// TestRegisterSendsCurrentCatalog is the concrete proof that Register's
+// request body carries the operator's full template catalog — the wire
+// shape Convex's operators.catalog persistence and claim-time template-
+// version gate depend on (see internal/catalog.List's json tags).
+func TestRegisterSendsCurrentCatalog(t *testing.T) {
+	var req registerRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue})
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	if _, err := c.Register(context.Background()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	want, err := json.Marshal(catalog.List())
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+	got, err := json.Marshal(req.Catalog)
+	if err != nil {
+		t.Fatalf("marshal got: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("expected register request's catalog to match catalog.List(), got %s want %s", got, want)
 	}
 }
 

@@ -17,6 +17,9 @@ limitations under the License.
 package catalog
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"regexp"
@@ -34,6 +37,20 @@ var templates = []Template{
 // List returns all catalog templates, in a stable order.
 func List() []Template {
 	return templates
+}
+
+// Hash returns a deterministic fingerprint of the full catalog — sha256 of
+// its JSON encoding (the same wire-relevant fields GET /catalog and
+// operator registration already send; Build/Run are excluded via their
+// json:"-" tags). internal/convexclient.Runnable persists this alongside
+// its registration tokens and compares it at startup to detect that this
+// operator's own catalog changed (e.g. a Template.Version bump) since it
+// last registered with Convex, since a token Secret surviving a restart
+// would otherwise mask that indefinitely.
+func Hash() string {
+	data, _ := json.Marshal(templates)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // Get looks up a template by ID.

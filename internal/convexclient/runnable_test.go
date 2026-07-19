@@ -132,6 +132,97 @@ func TestLoadOrRegisterFallsBackWhenNoPersistedToken(t *testing.T) {
 	if persisted.HeartbeatToken != testHeartbeatToken {
 		t.Fatalf("expected persisted heartbeat token hb-1, got %q", persisted.HeartbeatToken)
 	}
+	if persisted.CatalogHash != catalog.Hash() {
+		t.Fatalf("expected persisted catalog hash to match the current catalog, got %q", persisted.CatalogHash)
+	}
+}
+
+// TestLoadOrRegisterReusesTokenWhenCatalogHashMatches confirms the
+// unchanged-catalog case still short-circuits into pure reuse — no register
+// call — when the persisted CatalogHash matches the running binary's
+// current catalog.
+func TestLoadOrRegisterReusesTokenWhenCatalogHashMatches(t *testing.T) {
+	var registerCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/operators/heartbeat":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+		case pathOperatorsRegister:
+			registerCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-new", DeployToken: "dp-new"})
+		}
+	}))
+	defer srv.Close()
+
+	store := newFakeTokenStore(t)
+	if err := store.Save(context.Background(), tokenstore.Tokens{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue, CatalogHash: catalog.Hash()}); err != nil {
+		t.Fatalf("seeding store: %v", err)
+	}
+	enrollment, _ := newFakeEnrollmentWatcher(t)
+	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	runnable := NewRunnable(RunnableConfig{Client: convexClient, Store: store, Enrollment: enrollment, HeartbeatInterval: time.Hour})
+
+	if err := runnable.loadOrRegister(context.Background()); err != nil {
+		t.Fatalf("loadOrRegister: %v", err)
+	}
+	if registerCalls.Load() != 0 {
+		t.Fatalf("expected no re-registration when catalog hash is unchanged, got %d calls", registerCalls.Load())
+	}
+	if runnable.CurrentDeployToken() != testDeployTokenValue {
+		t.Fatalf("expected the persisted deploy token to be reused, got %q", runnable.CurrentDeployToken())
+	}
+}
+
+// TestLoadOrRegisterReregistersWhenCatalogHashDiffers is the core new
+// behavior: a persisted token that's still perfectly valid (heartbeat
+// succeeds) must still trigger a fresh Register call when this operator's
+// own compiled-in catalog no longer matches what was last reported — e.g. a
+// developer bumped a Template's Version and redeployed the binary, but the
+// token Secret survived the restart.
+func TestLoadOrRegisterReregistersWhenCatalogHashDiffers(t *testing.T) {
+	var registerCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/operators/heartbeat":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+		case pathOperatorsRegister:
+			registerCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-new", DeployToken: "dp-new"})
+		}
+	}))
+	defer srv.Close()
+
+	store := newFakeTokenStore(t)
+	if err := store.Save(context.Background(), tokenstore.Tokens{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue, CatalogHash: "stale-hash"}); err != nil {
+		t.Fatalf("seeding store: %v", err)
+	}
+	enrollment, _ := newFakeEnrollmentWatcher(t)
+	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	runnable := NewRunnable(RunnableConfig{Client: convexClient, Store: store, Enrollment: enrollment, HeartbeatInterval: time.Hour})
+
+	if err := runnable.loadOrRegister(context.Background()); err != nil {
+		t.Fatalf("loadOrRegister: %v", err)
+	}
+	if registerCalls.Load() != 1 {
+		t.Fatalf("expected exactly 1 re-registration when catalog hash differs, got %d", registerCalls.Load())
+	}
+	if runnable.CurrentDeployToken() != "dp-new" {
+		t.Fatalf("expected rotated deploy token dp-new, got %q", runnable.CurrentDeployToken())
+	}
+
+	persisted, ok, err := store.Load(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("expected freshly-registered token to be persisted, ok=%v err=%v", ok, err)
+	}
+	if persisted.CatalogHash != catalog.Hash() {
+		t.Fatalf("expected the freshly persisted CatalogHash to match the current catalog, got %q", persisted.CatalogHash)
+	}
 }
 
 // TestHeartbeatOnceReregistersOnRejection exercises the "convex rejected our

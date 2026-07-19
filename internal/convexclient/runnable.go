@@ -209,17 +209,22 @@ func (r *Runnable) checkEnrollmentSecret(ctx context.Context) {
 }
 
 // loadOrRegister tries to reuse a persisted token (validating it with one
-// heartbeat call) and falls back to fresh registration if none exists or the
-// stored token is rejected.
+// heartbeat call, and confirming this operator's own catalog hasn't changed
+// since it was issued) and falls back to fresh registration if none exists,
+// the stored token is rejected, or the catalog has changed.
 func (r *Runnable) loadOrRegister(ctx context.Context) error {
 	log := logf.FromContext(ctx)
 	if tokens, ok, err := r.store.Load(ctx); err == nil && ok {
 		if _, _, err := r.client.Heartbeat(ctx, tokens.HeartbeatToken, nil); err == nil {
-			log.Info("reusing persisted operator token")
-			r.setTokens(tokens)
-			return nil
+			if tokens.CatalogHash == catalog.Hash() {
+				log.Info("reusing persisted operator token")
+				r.setTokens(tokens)
+				return nil
+			}
+			log.Info("catalog changed since last registration, re-registering")
+		} else {
+			log.Info("persisted operator token rejected by convex, re-registering")
 		}
-		log.Info("persisted operator token rejected by convex, re-registering")
 	} else if err != nil {
 		log.Error(err, "failed to load persisted token, will register fresh")
 	}
@@ -232,6 +237,7 @@ func (r *Runnable) register(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	tokens.CatalogHash = catalog.Hash()
 	if err := r.store.Save(ctx, tokens); err != nil {
 		return err
 	}

@@ -38,17 +38,25 @@ const SecretName = "ai-cloud-operator-token"
 const (
 	keyHeartbeatToken = "heartbeatToken"
 	keyDeployToken    = "deployToken"
+	keyCatalogHash    = "catalogHash"
 )
 
-// Tokens holds the pair of bearer tokens minted at registration time.
+// Tokens holds the pair of bearer tokens minted at registration time, plus
+// the catalog fingerprint (see internal/catalog.Hash) this operator last
+// successfully registered with Convex.
 //
 // HeartbeatToken is presented BY the operator when calling Convex's
 // heartbeat endpoint; Convex only ever stores its hash.
 // DeployToken is presented BY Convex when calling the operator's inbound
 // HTTP API; the operator only ever stores its hash (see internal/api).
+// CatalogHash lets Runnable.loadOrRegister detect, at startup, that the
+// compiled-in catalog differs from what was last reported — the persisted
+// token Secret otherwise survives a restart and would silently reuse a
+// stale registration.
 type Tokens struct {
 	HeartbeatToken string
 	DeployToken    string
+	CatalogHash    string
 }
 
 // create cannot be scoped by resourceNames in Kubernetes RBAC (the object
@@ -86,6 +94,7 @@ func (s *Store) Load(ctx context.Context) (Tokens, bool, error) {
 	tokens := Tokens{
 		HeartbeatToken: string(secret.Data[keyHeartbeatToken]),
 		DeployToken:    string(secret.Data[keyDeployToken]),
+		CatalogHash:    string(secret.Data[keyCatalogHash]),
 	}
 	if tokens.HeartbeatToken == "" || tokens.DeployToken == "" {
 		return Tokens{}, false, nil
@@ -110,6 +119,7 @@ func (s *Store) Save(ctx context.Context, tokens Tokens) error {
 		secret.Data = map[string][]byte{
 			keyHeartbeatToken: []byte(tokens.HeartbeatToken),
 			keyDeployToken:    []byte(tokens.DeployToken),
+			keyCatalogHash:    []byte(tokens.CatalogHash),
 		}
 		if err := s.client.Create(ctx, secret); err != nil {
 			return fmt.Errorf("creating token secret: %w", err)
@@ -123,6 +133,7 @@ func (s *Store) Save(ctx context.Context, tokens Tokens) error {
 		}
 		secret.Data[keyHeartbeatToken] = []byte(tokens.HeartbeatToken)
 		secret.Data[keyDeployToken] = []byte(tokens.DeployToken)
+		secret.Data[keyCatalogHash] = []byte(tokens.CatalogHash)
 		if err := s.client.Update(ctx, secret); err != nil {
 			return fmt.Errorf("updating token secret: %w", err)
 		}

@@ -272,8 +272,12 @@ shapes, if you want to pattern-match on them for nicer error display:
 ```
 
 Every `Template` carries a manually-bumped version string. **The operator
-never reads or enforces this itself** — it's purely informational, entirely
-for Convex's benefit. Recommended usage for presets:
+never enforces this itself** — it's purely informational, entirely for
+Convex's benefit. (The operator does read it, bundled into a whole-catalog
+fingerprint it reports at registration time and compares against on every
+restart, purely to decide when it needs to re-register itself with Convex —
+it still never compares or enforces it against anything at deploy time.)
+Recommended usage for presets:
 
 1. When a preset is saved, store the `version` of the template it was built
    against alongside it.

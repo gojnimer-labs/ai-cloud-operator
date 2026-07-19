@@ -51,7 +51,7 @@ func TestSaveThenLoadRoundTrips(t *testing.T) {
 	store := newFakeStore(t)
 	ctx := context.Background()
 
-	want := Tokens{HeartbeatToken: "heartbeat-1", DeployToken: "deploy-1"}
+	want := Tokens{HeartbeatToken: "heartbeat-1", DeployToken: "deploy-1", CatalogHash: "hash-1"}
 	if err := store.Save(ctx, want); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -72,10 +72,10 @@ func TestSaveTwiceUpdatesExistingSecret(t *testing.T) {
 	store := newFakeStore(t)
 	ctx := context.Background()
 
-	if err := store.Save(ctx, Tokens{HeartbeatToken: "h1", DeployToken: "d1"}); err != nil {
+	if err := store.Save(ctx, Tokens{HeartbeatToken: "h1", DeployToken: "d1", CatalogHash: "hash-1"}); err != nil {
 		t.Fatalf("first save: %v", err)
 	}
-	if err := store.Save(ctx, Tokens{HeartbeatToken: "h2", DeployToken: "d2"}); err != nil {
+	if err := store.Save(ctx, Tokens{HeartbeatToken: "h2", DeployToken: "d2", CatalogHash: "hash-2"}); err != nil {
 		t.Fatalf("second save: %v", err)
 	}
 
@@ -86,7 +86,7 @@ func TestSaveTwiceUpdatesExistingSecret(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ok=true")
 	}
-	want := Tokens{HeartbeatToken: "h2", DeployToken: "d2"}
+	want := Tokens{HeartbeatToken: "h2", DeployToken: "d2", CatalogHash: "hash-2"}
 	if got != want {
 		t.Fatalf("got %+v, want %+v (rotation should overwrite, not accumulate)", got, want)
 	}

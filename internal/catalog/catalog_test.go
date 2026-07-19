@@ -58,6 +58,31 @@ func TestEstimatedResourcesNonZeroForEveryTemplate(t *testing.T) {
 	}
 }
 
+// TestHashIsDeterministic guards against Hash accidentally depending on
+// nondeterministic encoding — internal/convexclient.Runnable relies on exact
+// equality against a value persisted on a prior process's run.
+func TestHashIsDeterministic(t *testing.T) {
+	if Hash() != Hash() {
+		t.Fatalf("expected Hash to be deterministic across calls")
+	}
+}
+
+// TestHashChangesWhenCatalogContentChanges is the core guarantee Runnable
+// depends on: any change to the registered templates' wire-relevant content
+// (e.g. a template's Version bump) must change Hash's output, or a stale
+// persisted token would never trigger a re-register.
+func TestHashChangesWhenCatalogContentChanges(t *testing.T) {
+	original := templates
+	before := Hash()
+	defer func() { templates = original }()
+
+	templates = append(append([]Template{}, original...), Template{ID: "synthetic", Version: "9.9.9"})
+
+	if Hash() == before {
+		t.Fatalf("expected Hash to change when catalog content changes")
+	}
+}
+
 // TestEstimatedResourcesMatchesHardcodedBrowserValues pins the exact figures
 // browserResources("1000m", "1500Mi", "3Gi") should sum to, so a future
 // change to those hardcoded values is a deliberate, visible diff here rather

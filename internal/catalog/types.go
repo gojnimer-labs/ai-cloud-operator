@@ -302,12 +302,15 @@ type Template struct {
 	Icon        string `json:"icon"`
 	// Version is a plain, manually-bumped string (semver-shaped by
 	// convention, e.g. "1.0.0") — bump it whenever this template's
-	// Parameters change. Purely informational: the operator never reads or
-	// enforces it itself. It exists so Convex-side presets (a saved
-	// parameter set built against this template at some point in time) can
-	// detect that the schema they were built against has since moved,
-	// entirely on the Convex side — the operator has no opinion on what a
-	// mismatch should mean.
+	// Parameters change. Purely informational: the operator never enforces
+	// it itself. It exists so Convex-side presets (a saved parameter set
+	// built against this template at some point in time) can detect that
+	// the schema they were built against has since moved, entirely on the
+	// Convex side — the operator has no opinion on what a mismatch should
+	// mean. Also folded into Hash()'s fingerprint of the whole catalog (see
+	// registry.go), which internal/convexclient uses only to decide when to
+	// re-register with Convex after a restart, not to gate anything
+	// deploy-related.
 	Version    string      `json:"version"`
 	Parameters []Parameter `json:"parameters"`
 	// Entrypoints lists every web entrypoint this template's Service
