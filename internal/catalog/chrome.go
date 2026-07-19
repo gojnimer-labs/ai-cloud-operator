@@ -77,6 +77,6 @@ var Chrome = Template{
 	ID:          templateIDChrome,
 	Icon:        "🌐",
 	Name:        "Chrome Browser",
-	Version:     "1.1.0",
+	Version:     "1.1.1",
 	Parameters:  browserParameters(profileSourceKeyChrome),
 }

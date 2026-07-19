@@ -68,6 +68,6 @@ var Firefox = Template{
 	ID:          templateIDFirefox,
 	Icon:        "🦊",
 	Name:        "Firefox Browser",
-	Version:     "1.1.0",
+	Version:     "1.1.1",
 	Parameters:  browserParameters(profileSourceKeyFirefox),
 }

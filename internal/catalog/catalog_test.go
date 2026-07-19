@@ -291,6 +291,34 @@ func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 	}
 }
 
+// TestBrowserRequiresProfileNameWhenRestoreProfileIsOn is a regression test
+// for a real bug: profileName had no Validation set at all (Go zero value,
+// Required: false), so toggling restoreProfile on without ever picking a
+// profile deployed anyway — Visibility's "hidden means exempt" rule was
+// working correctly, there was just nothing to be exempt *from*.
+func TestBrowserRequiresProfileNameWhenRestoreProfileIsOn(t *testing.T) {
+	for _, id := range []string{templateIDFirefox, templateIDChrome} {
+		tmpl, _ := Get(id)
+
+		if _, err := ResolveParams(tmpl.Parameters, map[string]any{paramKeyRestoreProfile: true}); err == nil {
+			t.Fatalf("%s: expected an error for restoreProfile=true with no profileName selected", id)
+		}
+
+		if _, err := ResolveParams(tmpl.Parameters, map[string]any{
+			paramKeyRestoreProfile: true,
+			paramKeyProfileName:    "some-row-id",
+		}); err != nil {
+			t.Fatalf("%s: expected a selected profileName to resolve cleanly, got: %v", id, err)
+		}
+
+		// restoreProfile off (or simply absent, its own default): profileName
+		// stays hidden and exempt, same as before this fix.
+		if _, err := ResolveParams(tmpl.Parameters, map[string]any{}); err != nil {
+			t.Fatalf("%s: expected no error when restoreProfile is left at its default, got: %v", id, err)
+		}
+	}
+}
+
 func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 	for _, id := range []string{templateIDFirefox, templateIDChrome} {
 		tmpl, _ := Get(id)
