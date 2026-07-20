@@ -84,6 +84,36 @@ const (
 	conditionTypeConvexSynced          = "ConvexSynced"
 	conditionTypeConvexLifecycleSynced = "ConvexLifecycleSynced"
 
+	// Condition Reason values below are the stable, machine-readable half of
+	// every status condition this controller sets — Message stays free-form
+	// English (debug detail for kubectl/logs), but Reason is what a
+	// consumer (ai-cloud-v2's Convex backend, then its frontend) keys a
+	// translated string off, the same way ai-cloud-operator's own
+	// catalog function results already use a "stable, namespaced message
+	// key" (see docs/catalog-parameters.md). Kept as PascalCase identifiers
+	// rather than the dot-namespaced form used elsewhere in this repo:
+	// metav1.Condition.Reason is validated by the apiserver against
+	// `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`, which rejects dots.
+	// Centralizing these here doesn't change any of their wire values —
+	// every string below already existed inline at each call site.
+	reasonWorkloadSuspended     = "WorkloadSuspended"
+	reasonDeploymentReady       = "DeploymentReady"
+	reasonDeploymentProgressing = "DeploymentProgressing"
+	reasonNotifyFailed          = "NotifyFailed"
+	reasonNotified              = "Notified"
+	reasonAlreadyResolved       = "AlreadyResolved"
+	reasonReconcileError        = "ReconcileError"
+	// reasonInvalidSpec/reasonUnknownTemplate split out of the generic
+	// ReconcileError bucket: these two are the common, user-caused
+	// misconfigurations from render() (bad/missing spec.image, unknown
+	// spec.templateName) — worth a distinct translated message on the
+	// frontend instead of a generic "reconcile failed." Every other
+	// reconcile failure (deployment/service apply, status update, template
+	// param resolution) stays under ReconcileError — see setFailed's own
+	// doc comment for why those aren't split out too.
+	reasonInvalidSpec     = "InvalidSpec"
+	reasonUnknownTemplate = "UnknownTemplate"
+
 	// lifecyclePhaseActive/lifecyclePhaseFailed/lifecyclePhaseStopped are the
 	// phase values sent to WorkloadNotifier.ReportLifecycle — see
 	// convex/workloads/mutations.ts's reportLifecycle in ai-cloud-v2 for the
@@ -180,7 +210,14 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	rendered, err := r.render(&workload)
 	if err != nil {
-		return r.setFailed(ctx, &workload, fmt.Errorf("rendering workload: %w", err))
+		reason := reasonReconcileError
+		switch {
+		case errors.Is(err, errImageRequired):
+			reason = reasonInvalidSpec
+		case errors.Is(err, errUnknownTemplate):
+			reason = reasonUnknownTemplate
+		}
+		return r.setFailedWithReason(ctx, &workload, reason, fmt.Errorf("rendering workload: %w", err))
 	}
 
 	if err := r.reconcileDeployment(ctx, &workload, selectorLabels, objectLabels, rendered); err != nil {
@@ -240,19 +277,19 @@ func (r *WorkloadReconciler) updateStatus(ctx context.Context, workload *appsv1a
 	case workload.Spec.Suspended && deployment.Status.ReadyReplicas == 0:
 		workload.Status.Phase = appsv1alpha1.PhaseStopped
 		readyCondition.Status = metav1.ConditionFalse
-		readyCondition.Reason = "WorkloadSuspended"
+		readyCondition.Reason = reasonWorkloadSuspended
 		readyCondition.Message = "workload is intentionally stopped (spec.suspended=true)"
 		lifecycleSynced = r.syncConvexLifecyclePhase(ctx, workload, lifecyclePhaseStopped)
 	case desiredReplicas > 0 && deployment.Status.ReadyReplicas >= desiredReplicas:
 		workload.Status.Phase = appsv1alpha1.PhaseRunning
 		readyCondition.Status = metav1.ConditionTrue
-		readyCondition.Reason = "DeploymentReady"
+		readyCondition.Reason = reasonDeploymentReady
 		readyCondition.Message = "backing Deployment has reached the desired ready replica count"
 		lifecycleSynced = r.syncConvexLifecyclePhase(ctx, workload, lifecyclePhaseActive)
 	default:
 		workload.Status.Phase = appsv1alpha1.PhaseDeploying
 		readyCondition.Status = metav1.ConditionFalse
-		readyCondition.Reason = "DeploymentProgressing"
+		readyCondition.Reason = reasonDeploymentProgressing
 		readyCondition.Message = fmt.Sprintf("%d/%d replicas ready", deployment.Status.ReadyReplicas, desiredReplicas)
 	}
 
@@ -285,11 +322,11 @@ func (r *WorkloadReconciler) syncConvex(ctx context.Context, workload *appsv1alp
 	}
 	if err := r.notifyUpserted(ctx, workload); err != nil {
 		condition.Status = metav1.ConditionFalse
-		condition.Reason = "NotifyFailed"
+		condition.Reason = reasonNotifyFailed
 		condition.Message = err.Error()
 	} else {
 		condition.Status = metav1.ConditionTrue
-		condition.Reason = "Notified"
+		condition.Reason = reasonNotified
 		condition.Message = "Convex has this workload's current ownership info"
 	}
 	apimeta.SetStatusCondition(&workload.Status.Conditions, condition)
@@ -346,7 +383,7 @@ func (r *WorkloadReconciler) syncConvexLifecyclePhase(ctx context.Context, workl
 	switch err := r.notifyLifecycle(ctx, workload, phase, ""); {
 	case err == nil:
 		condition.Status = metav1.ConditionTrue
-		condition.Reason = "Notified"
+		condition.Reason = reasonNotified
 		condition.Message = fmt.Sprintf("Convex has been told this workload is %s", phase)
 	case errors.Is(err, convexclient.ErrLifecycleStale):
 		// Convex's row already reflects a resolved active/stopped state for
@@ -361,11 +398,11 @@ func (r *WorkloadReconciler) syncConvexLifecyclePhase(ctx context.Context, workl
 		// instead of retrying every statusRequeueInterval avoids an
 		// unwinnable retry loop that would otherwise run forever.
 		condition.Status = metav1.ConditionTrue
-		condition.Reason = "AlreadyResolved"
+		condition.Reason = reasonAlreadyResolved
 		condition.Message = "Convex already reflects this workload's current phase from an earlier report"
 	default:
 		condition.Status = metav1.ConditionFalse
-		condition.Reason = "NotifyFailed"
+		condition.Reason = reasonNotifyFailed
 		condition.Message = err.Error()
 	}
 	apimeta.SetStatusCondition(&workload.Status.Conditions, condition)
@@ -430,9 +467,21 @@ func (r *WorkloadReconciler) reconcileDelete(ctx context.Context, workload *apps
 }
 
 // setFailed marks the Workload as Failed and surfaces the reconcile error via
-// a status condition, then returns it so the manager still applies its normal
-// exponential-backoff requeue.
+// a status condition (Reason=ReconcileError, the generic bucket — see
+// setFailedWithReason for the handful of call sites that distinguish a
+// specific, common failure mode instead), then returns it so the manager
+// still applies its normal exponential-backoff requeue.
 func (r *WorkloadReconciler) setFailed(ctx context.Context, workload *appsv1alpha1.Workload, reconcileErr error) (ctrl.Result, error) {
+	return r.setFailedWithReason(ctx, workload, reasonReconcileError, reconcileErr)
+}
+
+// setFailedWithReason is setFailed with an explicit Condition Reason instead
+// of always ReconcileError — used where the caller can already tell this
+// failure apart from the generic bucket (e.g. render()'s
+// errImageRequired/errUnknownTemplate) and that distinction is worth
+// surfacing as its own translated message on the frontend rather than a
+// generic "reconcile failed."
+func (r *WorkloadReconciler) setFailedWithReason(ctx context.Context, workload *appsv1alpha1.Workload, reason string, reconcileErr error) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	log.Error(reconcileErr, "reconcile failed")
 
@@ -441,7 +490,7 @@ func (r *WorkloadReconciler) setFailed(ctx context.Context, workload *appsv1alph
 	apimeta.SetStatusCondition(&workload.Status.Conditions, metav1.Condition{
 		Type:               appsv1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             "ReconcileError",
+		Reason:             reason,
 		Message:            reconcileErr.Error(),
 		ObservedGeneration: workload.Generation,
 	})
@@ -459,20 +508,30 @@ func (r *WorkloadReconciler) setFailed(ctx context.Context, workload *appsv1alph
 	return ctrl.Result{}, reconcileErr
 }
 
+// errImageRequired/errUnknownTemplate are sentinels render() wraps into its
+// returned error (via %w) so Reconcile can tell these two common,
+// user-caused misconfigurations apart via errors.Is and report a specific
+// Condition Reason instead of the generic ReconcileError bucket — see
+// reasonInvalidSpec/reasonUnknownTemplate.
+var (
+	errImageRequired   = errors.New("spec.image is required when spec.templateName is unset")
+	errUnknownTemplate = errors.New("unknown template")
+)
+
 // render produces the containers/volumes/service-ports for workload, either
 // by dispatching to a catalog template (when Spec.TemplateName is set) or by
 // falling back to the original raw image/containerPort/env fields.
 func (r *WorkloadReconciler) render(workload *appsv1alpha1.Workload) (catalog.Rendered, error) {
 	if workload.Spec.TemplateName == "" {
 		if workload.Spec.Image == "" {
-			return catalog.Rendered{}, fmt.Errorf("spec.image is required when spec.templateName is unset")
+			return catalog.Rendered{}, errImageRequired
 		}
 		return legacyRendered(workload), nil
 	}
 
 	tmpl, ok := catalog.Get(workload.Spec.TemplateName)
 	if !ok {
-		return catalog.Rendered{}, fmt.Errorf("unknown template %q", workload.Spec.TemplateName)
+		return catalog.Rendered{}, fmt.Errorf("%w %q", errUnknownTemplate, workload.Spec.TemplateName)
 	}
 
 	rawParams, err := configToParams(workload.Spec.Config)
