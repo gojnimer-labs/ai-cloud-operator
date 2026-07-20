@@ -181,13 +181,13 @@ func (s *Server) requireDeployToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || presented == "" {
-			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, codeAuthMissingToken, "missing bearer token")
 			return
 		}
 
 		expected := s.token()
 		if expected == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(expected)) != 1 {
-			http.Error(w, "invalid bearer token", http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, codeAuthInvalidToken, "invalid bearer token")
 			return
 		}
 
@@ -252,7 +252,7 @@ func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 			Exp:       time.Now().Add(gatewayCookieTTL).Unix(),
 		})
 		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, codeInternalError, "internal error")
 			return
 		}
 		http.SetCookie(w, &http.Cookie{
@@ -317,7 +317,7 @@ func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 
 	var req runFunctionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, codeRequestInvalidJSON, "invalid json body")
 		return
 	}
 
@@ -325,41 +325,41 @@ func (s *Server) handleRunFunction(w http.ResponseWriter, r *http.Request) {
 	var workload appsv1alpha1.Workload
 	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &workload); err != nil {
 		if apierrors.IsNotFound(err) {
-			http.Error(w, "workload not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, codeWorkloadNotFound, "workload not found")
 			return
 		}
-		http.Error(w, "failed to get workload: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, codeInternalError, "failed to get workload: "+err.Error())
 		return
 	}
 
 	tmpl, ok := catalog.Get(workload.Spec.TemplateName)
 	if !ok {
-		http.Error(w, fmt.Sprintf("unknown template %q", workload.Spec.TemplateName), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, codeCatalogTemplateUnknown, fmt.Sprintf("unknown template %q", workload.Spec.TemplateName))
 		return
 	}
 	fn, ok := catalog.GetOperation(tmpl, key)
 	if !ok {
-		http.Error(w, fmt.Sprintf("unknown function %q for template %q", key, tmpl.ID), http.StatusNotFound)
+		writeError(w, http.StatusNotFound, codeCatalogFunctionUnknown, fmt.Sprintf("unknown function %q for template %q", key, tmpl.ID))
 		return
 	}
 
 	resolvedParams, err := catalog.ResolveParams(fn.Parameters, req.Params)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, codeCatalogInvalidParams, err.Error())
 		return
 	}
 
 	podName, err := podexec.FindPod(ctx, s.client, namespace, name)
 	if err != nil {
 		log.Info("handleRunFunction: no running pod", "namespace", namespace, "name", name, "function", key, "error", err.Error())
-		http.Error(w, "workload has no running pod: "+err.Error(), http.StatusConflict)
+		writeError(w, http.StatusConflict, codeWorkloadNoRunningPod, "workload has no running pod: "+err.Error())
 		return
 	}
 
 	result, err := fn.Run(ctx, s.podExecutor, catalog.PodRef{Namespace: namespace, PodName: podName}, resolvedParams)
 	if err != nil {
 		log.Error(err, "handleRunFunction: function failed", "namespace", namespace, "name", name, "function", key)
-		http.Error(w, "function failed: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, codeCatalogFunctionFailed, "function failed: "+err.Error())
 		return
 	}
 
@@ -401,12 +401,12 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	var req deployRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Error(err, "handleDeploy: invalid json body")
-		http.Error(w, "invalid json body", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, codeRequestInvalidJSON, "invalid json body")
 		return
 	}
 
 	if req.TemplateName == "" && req.Image == "" {
-		http.Error(w, "image is required when templateName is unset", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, codeWorkloadImageRequired, "image is required when templateName is unset")
 		return
 	}
 	isTemplateDeploy := req.TemplateName != ""
@@ -418,12 +418,12 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		// same way there. userId has no catalog-side validation of its own,
 		// so it's still cheapest to check directly here.
 		if req.UserID == "" {
-			http.Error(w, "userId is required for a template deploy", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, codeWorkloadUserIDRequired, "userId is required for a template deploy")
 			return
 		}
 	} else {
 		if req.Name == "" {
-			http.Error(w, "name is required for a non-template deploy", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, codeWorkloadNameRequired, "name is required for a non-template deploy")
 			return
 		}
 		// Service.Name mirrors Workload.Name exactly (see
@@ -435,7 +435,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		// check only applies here.
 		if errs := validation.IsDNS1123Label(req.Name); len(errs) > 0 {
 			log.Info("handleDeploy: invalid name", "name", req.Name, "errors", errs)
-			http.Error(w, fmt.Sprintf("invalid name %q: %s", req.Name, strings.Join(errs, "; ")), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, codeWorkloadInvalidName, fmt.Sprintf("invalid name %q: %s", req.Name, strings.Join(errs, "; ")))
 			return
 		}
 	}
@@ -471,12 +471,15 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		workload, err = s.creator.Create(ctx, "", req.TemplateName, req.UserID, req.Subdomain, req.Config)
 		if err != nil {
 			switch {
-			case errors.Is(err, provisioning.ErrUnknownTemplate), errors.Is(err, provisioning.ErrInvalidConfig):
+			case errors.Is(err, provisioning.ErrUnknownTemplate):
 				log.Info("handleDeploy: rejected by WorkloadCreator", "templateName", req.TemplateName, "error", err.Error())
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, http.StatusBadRequest, codeCatalogTemplateUnknown, err.Error())
+			case errors.Is(err, provisioning.ErrInvalidConfig):
+				log.Info("handleDeploy: rejected by WorkloadCreator", "templateName", req.TemplateName, "error", err.Error())
+				writeError(w, http.StatusBadRequest, codeWorkloadInvalidConfig, err.Error())
 			default:
 				log.Error(err, "handleDeploy: failed to create workload", "templateName", req.TemplateName)
-				http.Error(w, "failed to create workload: "+err.Error(), http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, codeInternalError, "failed to create workload: "+err.Error())
 			}
 			return
 		}
@@ -485,7 +488,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		if req.Config != nil {
 			raw, err := json.Marshal(req.Config)
 			if err != nil {
-				http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
+				writeError(w, http.StatusBadRequest, codeWorkloadInvalidConfig, "invalid config: "+err.Error())
 				return
 			}
 			configRaw = &apiextensionsv1.JSON{Raw: raw}
@@ -508,7 +511,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			log.Error(err, "handleDeploy: failed to apply workload", "name", req.Name, "namespace", s.namespace)
-			http.Error(w, "failed to apply workload: "+err.Error(), http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, codeInternalError, "failed to apply workload: "+err.Error())
 			return
 		}
 	}
@@ -530,10 +533,10 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	var workload appsv1alpha1.Workload
 	if err := s.client.Get(r.Context(), client.ObjectKey{Namespace: namespace, Name: name}, &workload); err != nil {
 		if apierrors.IsNotFound(err) {
-			http.Error(w, "workload not found", http.StatusNotFound)
+			writeError(w, http.StatusNotFound, codeWorkloadNotFound, "workload not found")
 			return
 		}
-		http.Error(w, "failed to get workload: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, codeInternalError, "failed to get workload: "+err.Error())
 		return
 	}
 
@@ -549,7 +552,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
 	if err := s.destroyer.Destroy(r.Context(), name); err != nil {
-		http.Error(w, "failed to delete workload: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, codeInternalError, "failed to delete workload: "+err.Error())
 		return
 	}
 
