@@ -270,8 +270,8 @@ type OperationResult struct {
 // upload URL — see the firefox/chrome backup_state operation), and
 // implement Run to do the actual work via the injected PodExecutor. The
 // frontend discovers these the same way it discovers deploy-time
-// parameters: they're part of the catalog response (see
-// internal/api/server.go#handleCatalog).
+// parameters: they're part of the Template Convex receives at register time
+// (see internal/convexclient.Client.Register).
 type Operation struct {
 	Key         string      `json:"key"`
 	Label       string      `json:"label"`

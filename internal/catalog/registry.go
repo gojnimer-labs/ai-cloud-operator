@@ -41,9 +41,9 @@ func List() []Template {
 }
 
 // Hash returns a deterministic fingerprint of the full catalog — sha256 of
-// its JSON encoding (the same wire-relevant fields GET /catalog and
-// operator registration already send; Build/Run are excluded via their
-// json:"-" tags). internal/convexclient.Runnable persists this alongside
+// its JSON encoding (the same wire-relevant fields operator registration
+// already sends; Build/Run are excluded via their json:"-" tags).
+// internal/convexclient.Runnable persists this alongside
 // its registration tokens and compares it at startup to detect that this
 // operator's own catalog changed (e.g. a Template.Version bump) since it
 // last registered with Convex, since a token Secret surviving a restart

@@ -157,7 +157,6 @@ func (s *Server) testHandler() http.Handler {
 	mux.Handle("GET /workloads/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
 	mux.Handle("DELETE /workloads/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
 	mux.Handle("GET /gw/{name}/{entrypoint}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
-	mux.Handle("GET /catalog", s.requireDeployToken(http.HandlerFunc(s.handleCatalog)))
 	mux.Handle("POST /workloads/{name}/functions/{key}", s.requireDeployToken(http.HandlerFunc(s.handleRunFunction)))
 	return mux
 }
@@ -583,65 +582,6 @@ func TestGatewayCookieRejectedWhenExpired(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for an expired cookie with no fallback token, got %d", rec.Code)
-	}
-}
-
-func TestCatalogRequiresDeployToken(t *testing.T) {
-	s, _, _, _ := newTestServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/catalog", nil)
-	rec := httptest.NewRecorder()
-	s.testHandler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", rec.Code)
-	}
-}
-
-func TestCatalogListsKnownTemplates(t *testing.T) {
-	s, _, _, _ := newTestServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/catalog", nil)
-	req.Header.Set("Authorization", "Bearer "+testDeployToken)
-	rec := httptest.NewRecorder()
-	s.testHandler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var templates []struct {
-		ID         string `json:"id"`
-		Version    string `json:"version"`
-		Parameters []struct {
-			Key        string `json:"key"`
-			DataSource struct {
-				Kind string `json:"kind"`
-			} `json:"dataSource"`
-		} `json:"parameters"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &templates); err != nil {
-		t.Fatalf("decoding catalog response: %v", err)
-	}
-	if want := len(catalog.List()); len(templates) != want {
-		t.Fatalf("expected %d templates, got %d", want, len(templates))
-	}
-
-	for _, tmpl := range templates {
-		if tmpl.Version == "" {
-			t.Fatalf("expected template %q to carry a non-empty version", tmpl.ID)
-		}
-		if tmpl.ID == testFirefoxTemplateID {
-			foundFile := false
-			for _, p := range tmpl.Parameters {
-				if p.Key == "profileDownloadUrl" && p.DataSource.Kind == "file" {
-					foundFile = true
-				}
-			}
-			if !foundFile {
-				t.Fatalf("expected firefox template to expose profileDownloadUrl as a file-sourced parameter")
-			}
-		}
 	}
 }
 

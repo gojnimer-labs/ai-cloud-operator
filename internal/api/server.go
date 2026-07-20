@@ -142,7 +142,6 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.Handle("GET /workloads/{name}", s.requireDeployToken(http.HandlerFunc(s.handleGet)))
 	mux.Handle("DELETE /workloads/{name}", s.requireDeployToken(http.HandlerFunc(s.handleDelete)))
 	mux.Handle("GET /gw/{name}/{entrypoint}/{subpath...}", s.requireGatewayToken(s.proxy.Handler()))
-	mux.Handle("GET /catalog", s.requireDeployToken(http.HandlerFunc(s.handleCatalog)))
 	mux.Handle("POST /workloads/{name}/functions/{key}", s.requireDeployToken(http.HandlerFunc(s.handleRunFunction)))
 
 	s.httpServer = &http.Server{
@@ -282,16 +281,6 @@ func (s *Server) requireGatewayToken(next http.Handler) http.Handler {
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
-}
-
-// handleCatalog returns the full template registry, including
-// system-sourced parameters (e.g. profileDownloadUrl) — Convex needs to know
-// those keys exist so it can compute and inject them, and the frontend is
-// expected to only render dataSource.kind:"static"/"dynamic" parameters as
-// form fields, never "system" ones.
-func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(catalog.List())
 }
 
 type runFunctionRequest struct {

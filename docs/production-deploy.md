@@ -30,7 +30,7 @@ kubectl set env deployment/ai-cloud-operator-controller-manager -n ai-cloud-oper
   OPERATOR_EXTERNAL_URL=https://operator.example.com
 ```
 
-`kubectl set env` overrides these directly on the Deployment's pod template (regardless that they were originally wired via `configMapKeyRef`) and triggers a rollout automatically. `OPERATOR_EXTERNAL_URL` must be the URL you'll expose this operator at once step 4 (ingress) is wired up — Convex calls back into it for deploy/delete/catalog/gateway-verify, and browsers use it for `/gw/*` routes.
+`kubectl set env` overrides these directly on the Deployment's pod template (regardless that they were originally wired via `configMapKeyRef`) and triggers a rollout automatically. `OPERATOR_EXTERNAL_URL` must be the URL you'll expose this operator at once step 4 (ingress) is wired up — Convex calls back into it for deploy/delete/gateway-verify, and browsers use it for `/gw/*` routes.
 
 `WORKLOAD_NAMESPACE` is the single Kubernetes namespace every workload this
 operator manages gets deployed into — not something Convex chooses or sends
