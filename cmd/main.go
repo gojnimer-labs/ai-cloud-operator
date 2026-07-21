@@ -47,6 +47,7 @@ import (
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/controller"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/convexclient"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/gateway"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/metrics"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/podexec"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/provisioning"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
@@ -351,6 +352,27 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		Capacity:          capacityTracker,
 	})
 	if err := mgr.Add(convexRunnable); err != nil {
+		return nil, err
+	}
+
+	// metricsReportInterval is deliberately its own, much coarser knob than
+	// HEARTBEAT_INTERVAL — see internal/metrics.Reporter's doc comment for
+	// why usage reporting is a segregated responsibility from
+	// heartbeat/claim-discovery, not just a segregated HTTP route.
+	metricsReportInterval := 5 * time.Minute
+	if raw := os.Getenv("METRICS_REPORT_INTERVAL"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, errors.New("invalid METRICS_REPORT_INTERVAL: " + err.Error())
+		}
+		metricsReportInterval = parsed
+	}
+	metricsCollector, err := metrics.NewCollector(mgr.GetClient(), mgr.GetConfig(), workloadNamespace)
+	if err != nil {
+		return nil, fmt.Errorf("building metrics collector: %w", err)
+	}
+	metricsReporter := metrics.NewReporter(metricsCollector, convexRunnable, metricsReportInterval)
+	if err := mgr.Add(metricsReporter); err != nil {
 		return nil, err
 	}
 

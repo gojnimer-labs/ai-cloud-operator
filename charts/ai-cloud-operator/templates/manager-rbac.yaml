@@ -31,6 +31,12 @@ rules:
   - watch
 - apiGroups:
   - ""
+  resources:
+  - nodes/proxy
+  verbs:
+  - get
+- apiGroups:
+  - ""
   resourceNames:
   - ai-cloud-operator-gateway-key
   resources:

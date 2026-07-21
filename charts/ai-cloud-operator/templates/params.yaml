@@ -7,6 +7,7 @@ metadata:
 data:
   CONVEX_BASE_URL: {{ .Values.params.convexBaseUrl | quote }}
   HEARTBEAT_INTERVAL: {{ .Values.params.heartbeatInterval | quote }}
+  METRICS_REPORT_INTERVAL: {{ .Values.params.metricsReportInterval | quote }}
   OPERATOR_EXTERNAL_URL: {{ .Values.params.operatorExternalUrl | quote }}
   OPERATOR_NAME: {{ .Values.params.operatorName | quote }}
   WORKLOAD_NAMESPACE: {{ .Values.params.workloadNamespace | quote }}
