@@ -19,43 +19,48 @@ package convexclient
 import (
 	"context"
 	"fmt"
-
-	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"os"
+	"strings"
 )
 
-// EnrollmentSecretName is the Secret (created out-of-band per cluster, never
-// checked into git — see docs/production-deploy.md) that holds
-// ENROLLMENT_SECRET. The operator reads its initial value from the env var
-// the Deployment populates from this same Secret, then polls the Secret
-// itself thereafter so a rotation doesn't require restarting the pod.
-const EnrollmentSecretName = "ai-cloud-operator-env"
-
-const enrollmentSecretKey = "ENROLLMENT_SECRET"
-
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get,resourceNames=ai-cloud-operator-env
+// EnrollmentSecretPath is where the Deployment mounts the ENROLLMENT_SECRET
+// Secret as a volume (see config/manager/manager.yaml and
+// charts/ai-cloud-operator/templates/deployment.yaml) — deliberately a
+// volume, not an env var: env vars only resolve once at container start, so
+// an env var alone can't support checkEnrollmentSecret's out-of-band
+// rotation detection, and reading the Kubernetes API by name (the previous
+// approach) required this operator to know, and be granted RBAC on, the
+// Secret's exact object name — which the chart's existingSecretName value
+// could silently disagree with. A mounted volume sidesteps both: kubelet
+// refreshes the file's content on its own sync cycle whenever the backing
+// Secret changes (as long as no subPath is used, which would disable that),
+// and this operator never needs to know — or have RBAC for — the Secret's
+// Kubernetes object name at all, only this fixed path.
+const EnrollmentSecretPath = "/etc/ai-cloud-operator/enrollment/ENROLLMENT_SECRET"
 
 // EnrollmentSecretWatcher reads the current ENROLLMENT_SECRET value straight
-// from its Secret, so callers can detect an out-of-band rotation (a human
-// re-running the kubectl create secret step) without a pod restart.
+// from the mounted volume, so callers can detect an out-of-band rotation (a
+// human updating the backing Secret) without a pod restart.
 type EnrollmentSecretWatcher struct {
-	client    client.Client
-	namespace string
+	path string
 }
 
-// NewEnrollmentSecretWatcher returns a watcher reading EnrollmentSecretName
-// in namespace.
-func NewEnrollmentSecretWatcher(c client.Client, namespace string) *EnrollmentSecretWatcher {
-	return &EnrollmentSecretWatcher{client: c, namespace: namespace}
-}
-
-// Current returns the enrollment secret's present value. An empty string
-// means the key (or the Secret itself) doesn't exist.
-func (w *EnrollmentSecretWatcher) Current(ctx context.Context) (string, error) {
-	var secret corev1.Secret
-	err := w.client.Get(ctx, client.ObjectKey{Name: EnrollmentSecretName, Namespace: w.namespace}, &secret)
-	if err != nil {
-		return "", fmt.Errorf("getting enrollment secret: %w", err)
+// NewEnrollmentSecretWatcher returns a watcher reading path. An empty path
+// defaults to EnrollmentSecretPath — tests pass an explicit temp-file path
+// instead.
+func NewEnrollmentSecretWatcher(path string) *EnrollmentSecretWatcher {
+	if path == "" {
+		path = EnrollmentSecretPath
 	}
-	return string(secret.Data[enrollmentSecretKey]), nil
+	return &EnrollmentSecretWatcher{path: path}
+}
+
+// Current returns the enrollment secret's present value, trimmed of the
+// trailing newline Kubernetes Secret volumes commonly carry.
+func (w *EnrollmentSecretWatcher) Current(_ context.Context) (string, error) {
+	data, err := os.ReadFile(w.path)
+	if err != nil {
+		return "", fmt.Errorf("reading enrollment secret file: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }

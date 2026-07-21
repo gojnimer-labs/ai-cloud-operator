@@ -1,6 +1,6 @@
 ---
 name: convex-integration
-description: Use when adding or changing how this operator talks to Convex, or when the operator needs to persist its own Kubernetes Secret. Covers two patterns — (1) operator-managed Secrets with narrowly-scoped RBAC (Load/Save, LoadOrGenerate, read-only Current), (2) adding a new Convex HTTP endpoint to internal/convexclient. Trigger phrases: "add a new Convex endpoint", "operator needs to call a new Convex API", "add a self-managed Secret", "new RBAC-scoped secret", "persist a token/key in a Secret".
+description: Use when adding or changing how this operator talks to Convex, or when the operator needs to persist its own Kubernetes Secret. Covers two patterns — (1) operator-managed Secrets with narrowly-scoped RBAC (Load/Save, LoadOrGenerate), (2) adding a new Convex HTTP endpoint to internal/convexclient. Also explains why ENROLLMENT_SECRET (read-only Current) deliberately does NOT follow the RBAC pattern — it's a mounted volume, no Kubernetes API access at all. Trigger phrases: "add a new Convex endpoint", "operator needs to call a new Convex API", "add a self-managed Secret", "new RBAC-scoped secret", "persist a token/key in a Secret".
 ---
 
 # Convex integration patterns
@@ -11,7 +11,7 @@ files before copying — this doc is a map, not a replacement.
 
 ## 1. Operator-managed Secrets with narrowly-scoped RBAC
 
-Three existing variants, all sharing the `labels.ManagedBy`/`ManagedByValue`
+Two existing variants, both sharing the `labels.ManagedBy`/`ManagedByValue`
 constants from `internal/labels/labels.go` (extracted after a duplication bug
 — never inline this label pair again):
 
@@ -19,7 +19,21 @@ constants from `internal/labels/labels.go` (extracted after a duplication bug
 |---|---|---|---|---|
 | `Load` / `Save` | `internal/tokenstore/tokenstore.go` | `ai-cloud-operator-token` | `create`; `get;update` scoped | Value is issued by an external party (Convex) and MUST be persisted exactly as given back, so the operator doesn't re-register every restart. |
 | `LoadOrGenerate` | `internal/gateway/keystore.go` | `ai-cloud-operator-gateway-key` | `create`; `get;update` scoped | Nothing outside this operator instance needs to know the value — the operator mints it itself on first use rather than making a human provision it. Must handle the create-race between replicas (see below). |
-| `Current` (read-only) | `internal/convexclient/enrollment.go` | `ai-cloud-operator-env` | `get` scoped only, no `create`/`update` | Value is human/GitOps-managed out-of-band (never checked into git). The operator only ever reads it, polling so a rotation doesn't require a pod restart. |
+
+`ENROLLMENT_SECRET`'s `Current` (`internal/convexclient/enrollment.go`) looks
+like it should be a third, read-only variant of this same pattern — it isn't,
+deliberately. It used to be (a `get`-scoped Kubernetes API read against a
+hardcoded Secret name, `ai-cloud-operator-env`), until that hardcoded name
+diverged from what the Helm chart's `existingSecretName` value actually let
+operators configure and broke enrollment rotation in production. It's now a
+plain `os.ReadFile` against a fixed path
+(`convexclient.EnrollmentSecretPath`) that the Deployment mounts the Secret
+into as a volume (see `config/manager/manager.yaml` and
+`charts/ai-cloud-operator/templates/deployment.yaml`'s `enrollment-secret`
+volume) — no `client.Client`, no RBAC marker, no Secret *name* anywhere in
+Go code at all. Don't add one back for a future read-only case without a
+specific reason a volume mount doesn't work (e.g. needing to read a Secret
+in a different namespace, which a volume mount can't do).
 
 ### The RBAC convention
 
@@ -42,17 +56,17 @@ Verified against `config/rbac/role.yaml` (regenerated, not hand-edited): each
 package gets its own `resourceNames`-scoped rule, and the unscoped `create`
 verbs across all secret-owning packages collapse into one shared rule (kubebuilder/controller-gen merges identical apiGroup+verb combos — it also
 merged the `secrets` and `pods/exec` unscoped `create` rules together). Other
-`+kubebuilder:rbac` markers exist beyond the three Secret examples —
+`+kubebuilder:rbac` markers exist beyond the two Secret examples —
 `internal/podexec/exec.go` (`pods` get/list/watch, `pods/exec` create),
 `internal/gateway/proxy.go` (`services/proxy`), and
 `internal/controller/workload_controller.go` (Workload CR, Deployments,
 Services, Events) — same convention, just not Secret-shaped.
 
-### Adding a fourth Secret-backed store
+### Adding a third Secret-backed store
 
-1. New package (or file in an existing one) with a `SecretName`/`KeySecretName` const and a `Store`/`Watcher` struct holding `client client.Client` + `namespace string`.
-2. Pick the variant: issued-and-must-persist → `Load`/`Save`; self-generate → `LoadOrGenerate` (handle `apierrors.IsAlreadyExists` on the create race — see keystore.go's comment on replicas converging on whichever create wins); human/GitOps-owned, read-only → `Current`.
-3. Stamp `labels.ManagedBy: labels.ManagedByValue` on any Secret this operator creates (not on ones it only reads, like enrollment).
+1. New package (or file in an existing one) with a `SecretName`/`KeySecretName` const and a `Store` struct holding `client client.Client` + `namespace string`.
+2. Pick the variant: issued-and-must-persist → `Load`/`Save`; self-generate → `LoadOrGenerate` (handle `apierrors.IsAlreadyExists` on the create race — see keystore.go's comment on replicas converging on whichever create wins). For a human/GitOps-owned, read-only value, prefer a mounted volume + `os.ReadFile` (like `enrollment.go`) over a `client.Client` Get — no RBAC needed, and it comes with free rotation-without-restart via kubelet's own volume refresh.
+3. Stamp `labels.ManagedBy: labels.ManagedByValue` on any Secret this operator creates.
 4. Add the `+kubebuilder:rbac` marker comment directly above the type, verbs split exactly as above:
    ```go
    // +kubebuilder:rbac:groups="",resources=secrets,verbs=create

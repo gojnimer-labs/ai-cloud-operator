@@ -22,12 +22,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -67,28 +67,21 @@ func newFakeTokenStore(t *testing.T) *tokenstore.Store {
 	return tokenstore.New(c, "operator-ns")
 }
 
-// newFakeEnrollmentWatcher returns a watcher over a fake client, plus that
-// client so tests can mutate the Secret afterward to simulate a rotation. No
-// Secret is seeded — Current() returns an error until one is created, same
-// as a cluster where ai-cloud-operator-env hasn't been created yet.
-func newFakeEnrollmentWatcher(t *testing.T) (*EnrollmentSecretWatcher, client.Client) {
+// newFakeEnrollmentWatcher returns a watcher over a temp file standing in
+// for the mounted enrollment-secret volume, plus that file's path so tests
+// can rewrite it afterward to simulate a rotation. No file is created
+// initially — Current() returns an error until one is written, same as a
+// cluster where the volume's backing Secret hasn't been created yet.
+func newFakeEnrollmentWatcher(t *testing.T) (*EnrollmentSecretWatcher, string) {
 	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		t.Fatalf("adding scheme: %v", err)
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	return NewEnrollmentSecretWatcher(c, "operator-ns"), c
+	path := filepath.Join(t.TempDir(), "ENROLLMENT_SECRET")
+	return NewEnrollmentSecretWatcher(path), path
 }
 
-func putEnrollmentSecret(t *testing.T, c client.Client, value string) {
+func putEnrollmentSecret(t *testing.T, path string, value string) {
 	t.Helper()
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: EnrollmentSecretName, Namespace: "operator-ns"},
-		Data:       map[string][]byte{enrollmentSecretKey: []byte(value)},
-	}
-	if err := c.Create(context.Background(), secret); err != nil {
-		t.Fatalf("seeding enrollment secret: %v", err)
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatalf("seeding enrollment secret file: %v", err)
 	}
 }
 
@@ -287,12 +280,12 @@ func TestCheckEnrollmentSecretReregistersOnChange(t *testing.T) {
 	defer srv.Close()
 
 	store := newFakeTokenStore(t)
-	enrollment, fakeClient := newFakeEnrollmentWatcher(t)
+	enrollment, secretPath := newFakeEnrollmentWatcher(t)
 	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, EnrollmentSecret: "old-secret"})
 	runnable := NewRunnable(RunnableConfig{Client: convexClient, Store: store, Enrollment: enrollment, HeartbeatInterval: time.Hour})
 	runnable.setTokens(tokenstore.Tokens{HeartbeatToken: "hb-1", DeployToken: "dp-1"})
 
-	putEnrollmentSecret(t, fakeClient, "new-secret")
+	putEnrollmentSecret(t, secretPath, "new-secret")
 
 	runnable.checkEnrollmentSecret(context.Background())
 
@@ -321,11 +314,11 @@ func TestCheckEnrollmentSecretNoopWhenUnchanged(t *testing.T) {
 	defer srv.Close()
 
 	store := newFakeTokenStore(t)
-	enrollment, fakeClient := newFakeEnrollmentWatcher(t)
+	enrollment, secretPath := newFakeEnrollmentWatcher(t)
 	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, EnrollmentSecret: "same-secret"})
 	runnable := NewRunnable(RunnableConfig{Client: convexClient, Store: store, Enrollment: enrollment, HeartbeatInterval: time.Hour})
 
-	putEnrollmentSecret(t, fakeClient, "same-secret")
+	putEnrollmentSecret(t, secretPath, "same-secret")
 
 	runnable.checkEnrollmentSecret(context.Background())
 
@@ -335,9 +328,8 @@ func TestCheckEnrollmentSecretNoopWhenUnchanged(t *testing.T) {
 }
 
 // TestCheckEnrollmentSecretNoopWhenSecretMissing guards the common startup
-// window before ai-cloud-operator-env exists at all (or momentarily during a
-// Get error) — it must not treat "can't read the Secret" as "rotate to
-// empty".
+// window before the enrollment-secret volume's file exists at all — it must
+// not treat "can't read the file" as "rotate to empty".
 func TestCheckEnrollmentSecretNoopWhenSecretMissing(t *testing.T) {
 	var registerCalls atomic.Int32
 
