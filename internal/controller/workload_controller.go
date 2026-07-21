@@ -220,11 +220,32 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.setFailedWithReason(ctx, &workload, reason, fmt.Errorf("rendering workload: %w", err))
 	}
 
+	// A conflict from CreateOrUpdate's read-modify-write (409, "the object
+	// has been modified; please apply your changes to the latest version and
+	// try again") is routine, not a real failure — e.g. another concurrent
+	// reconcile of this same Workload, or the Deployment/Service being
+	// deleted/recreated out-of-band (a human debugging via kubectl/Headlamp)
+	// between our own Get and Update. Returning it bare lets
+	// controller-runtime's normal requeue-with-backoff retry immediately,
+	// almost always succeeding on the very next attempt — critically,
+	// WITHOUT going through setFailed, which would report a non-retryable
+	// "failed" to Convex for something that was never actually broken. That
+	// report is also one-way: reportLifecycle only accepts a phase report
+	// against an in-flight status, so once Convex marks a row "failed" for
+	// this, a later genuine "active" report (once the Deployment really
+	// does become ready) is rejected as stale and the row is stuck at
+	// "failed" forever, even though nothing was ever wrong.
 	if err := r.reconcileDeployment(ctx, &workload, selectorLabels, objectLabels, rendered); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{}, err
+		}
 		return r.setFailed(ctx, &workload, fmt.Errorf("reconciling deployment: %w", err))
 	}
 
 	if err := r.reconcileService(ctx, &workload, selectorLabels, objectLabels, rendered); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{}, err
+		}
 		return r.setFailed(ctx, &workload, fmt.Errorf("reconciling service: %w", err))
 	}
 
