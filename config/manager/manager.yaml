@@ -105,6 +105,11 @@ spec:
               configMapKeyRef:
                 name: params
                 key: HEARTBEAT_INTERVAL
+          - name: METRICS_REPORT_INTERVAL
+            valueFrom:
+              configMapKeyRef:
+                name: params
+                key: METRICS_REPORT_INTERVAL
           # GATEWAY_SIGNING_SECRET is intentionally absent here — it never
           # needs to be shared with anything outside this operator instance,
           # so the operator generates and persists it itself on first boot

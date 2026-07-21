@@ -28,6 +28,7 @@ import (
 
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/metrics"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
 )
 
@@ -599,6 +600,65 @@ func (c *Client) RemoveWorkload(ctx context.Context, heartbeatToken, name, names
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("remove workload returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+type metricsReportRequest struct {
+	Samples []metricSampleRequest `json:"samples"`
+}
+
+type metricSampleRequest struct {
+	Name      string  `json:"name"`
+	Metric    string  `json:"metric"`
+	Value     float64 `json:"value"`
+	SampledAt int64   `json:"sampledAt"`
+}
+
+// ReportMetrics posts a batch of usage samples to Convex's
+// POST /operators/metrics/report — deliberately a separate route from
+// Heartbeat/ReportLifecycle (see that route's own doc comment in
+// ai-cloud-v2's operators/http.ts), called on its own, longer-interval
+// ticker by internal/metrics.Reporter rather than piggybacked on every
+// heartbeat. Takes []metrics.Sample directly, the same way Heartbeat takes
+// *capacity.Snapshot, rather than a duplicated local type. A no-op (no
+// request made) for an empty batch, so a tick with nothing new to report
+// never costs a round trip.
+func (c *Client) ReportMetrics(ctx context.Context, heartbeatToken string, samples []metrics.Sample) error {
+	if len(samples) == 0 {
+		return nil
+	}
+
+	requestSamples := make([]metricSampleRequest, len(samples))
+	for i, s := range samples {
+		requestSamples[i] = metricSampleRequest{
+			Name:      s.Name,
+			Metric:    s.Metric,
+			Value:     s.Value,
+			SampledAt: s.SampledAt.UnixMilli(),
+		}
+	}
+
+	body, err := json.Marshal(metricsReportRequest{Samples: requestSamples})
+	if err != nil {
+		return fmt.Errorf("marshaling metrics report request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.BaseURL+"/operators/metrics/report", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("building metrics report request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+heartbeatToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("calling metrics report: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("metrics report returned status %d", resp.StatusCode)
 	}
 	return nil
 }

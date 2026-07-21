@@ -19,7 +19,7 @@ The image is all CI publishes for code; the manifests are published too, as one 
 kubectl apply -f https://github.com/gojnimer-labs/ai-cloud-operator/releases/latest/download/install.yaml
 ```
 
-This creates the namespace, CRDs, RBAC, the Deployment (image already pinned to the tag it was built from), the API Service, and a ConfigMap — `CONVEX_BASE_URL`/`OPERATOR_NAME`/`OPERATOR_EXTERNAL_URL` ship as empty placeholders; `WORKLOAD_NAMESPACE` and `HEARTBEAT_INTERVAL` ship with real defaults (`ai-cloud-workloads`, `30s`) since neither needs a per-cluster value to be meaningful. `HEARTBEAT_INTERVAL` is also the create/destroy/redeploy/stop/resume claim-discovery cadence — lower it (e.g. `15s`) if 30s feels sluggish for how quickly requests should be picked up.
+This creates the namespace, CRDs, RBAC, the Deployment (image already pinned to the tag it was built from), the API Service, and a ConfigMap — `CONVEX_BASE_URL`/`OPERATOR_NAME`/`OPERATOR_EXTERNAL_URL` ship as empty placeholders; `WORKLOAD_NAMESPACE`, `HEARTBEAT_INTERVAL`, and `METRICS_REPORT_INTERVAL` ship with real defaults (`ai-cloud-workloads`, `30s`, `5m`) since none of them need a per-cluster value to be meaningful. `HEARTBEAT_INTERVAL` is also the create/destroy/redeploy/stop/resume claim-discovery cadence — lower it (e.g. `15s`) if 30s feels sluggish for how quickly requests should be picked up. `METRICS_REPORT_INTERVAL` is deliberately unrelated and much coarser — how often per-workload usage samples (network bytes in/out, see internal/metrics) get batched and reported to Convex for the dashboard, reported over its own segregated route rather than piggybacked on the heartbeat.
 
 ### 2. Set this instance's config
 

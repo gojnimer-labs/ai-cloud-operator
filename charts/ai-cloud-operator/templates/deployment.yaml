@@ -62,6 +62,22 @@ spec:
             configMapKeyRef:
               key: WORKLOAD_NAMESPACE
               name: {{ include "ai-cloud-operator.fullname" . }}-params
+        # HEARTBEAT_INTERVAL/METRICS_REPORT_INTERVAL: previously missing here
+        # even though the params ConfigMap (templates/params.yaml) always
+        # had HEARTBEAT_INTERVAL — a Helm-deployed operator silently fell
+        # back to the Go binary's own hardcoded default instead of whatever
+        # params.heartbeatInterval said, unnoticed only because they happen
+        # to match. Wiring both explicitly now.
+        - name: HEARTBEAT_INTERVAL
+          valueFrom:
+            configMapKeyRef:
+              key: HEARTBEAT_INTERVAL
+              name: {{ include "ai-cloud-operator.fullname" . }}-params
+        - name: METRICS_REPORT_INTERVAL
+          valueFrom:
+            configMapKeyRef:
+              key: METRICS_REPORT_INTERVAL
+              name: {{ include "ai-cloud-operator.fullname" . }}-params
         # GATEWAY_SIGNING_SECRET is deliberately absent — the operator
         # generates and persists its own on first boot instead of asking
         # this chart to mint and hand it one (see internal/gateway.KeyStore

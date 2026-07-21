@@ -24,9 +24,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/metrics"
 )
 
 // Shared fixture values across this package's tests (client_test.go and
@@ -543,5 +545,73 @@ func TestRemoveWorkloadSendsExpectedPayload(t *testing.T) {
 	}
 	if got.Name != testWorkloadName || got.Namespace != testNamespace {
 		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestReportMetricsSendsExpectedPayload(t *testing.T) {
+	var got metricsReportRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/operators/metrics/report" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != testBearerHeartbeatToken {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sampledAt := time.Now()
+	c := New(Config{BaseURL: srv.URL})
+	err := c.ReportMetrics(context.Background(), testHeartbeatToken, []metrics.Sample{
+		{Name: testWorkloadName, Metric: metrics.MetricNetworkRxBytes, Value: 1024, SampledAt: sampledAt},
+	})
+	if err != nil {
+		t.Fatalf("report metrics: %v", err)
+	}
+	if len(got.Samples) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(got.Samples))
+	}
+	sample := got.Samples[0]
+	if sample.Name != testWorkloadName || sample.Metric != metrics.MetricNetworkRxBytes || sample.Value != 1024 {
+		t.Fatalf("unexpected sample payload: %+v", sample)
+	}
+	if sample.SampledAt != sampledAt.UnixMilli() {
+		t.Fatalf("expected sampledAt %d, got %d", sampledAt.UnixMilli(), sample.SampledAt)
+	}
+}
+
+func TestReportMetricsEmptyBatchIsNoRequest(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	if err := c.ReportMetrics(context.Background(), testHeartbeatToken, nil); err != nil {
+		t.Fatalf("report metrics: %v", err)
+	}
+	if called {
+		t.Fatalf("expected no HTTP request for an empty batch")
+	}
+}
+
+func TestReportMetricsNonOKIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL})
+	err := c.ReportMetrics(context.Background(), testHeartbeatToken, []metrics.Sample{
+		{Name: testWorkloadName, Metric: metrics.MetricNetworkRxBytes, Value: 1, SampledAt: time.Now()},
+	})
+	if err == nil {
+		t.Fatal("expected an error on non-200 response")
 	}
 }

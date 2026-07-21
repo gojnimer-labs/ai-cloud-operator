@@ -70,6 +70,7 @@ metricsService:
 params:
   convexBaseUrl: ""
   heartbeatInterval: 30s
+  metricsReportInterval: 5m
   operatorExternalUrl: ""
   operatorName: ""
   workloadNamespace: ai-cloud-workloads

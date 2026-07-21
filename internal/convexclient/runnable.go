@@ -25,6 +25,7 @@ import (
 
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/metrics"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/provisioning"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
 )
@@ -154,6 +155,18 @@ func (r *Runnable) ReportLifecycle(ctx context.Context, name, workloadID, phase,
 	token := r.tokens.HeartbeatToken
 	r.mu.RUnlock()
 	return r.client.ReportLifecycle(ctx, token, name, workloadID, phase, reason, retryable)
+}
+
+// ReportMetrics implements internal/metrics.ConvexReporter, always
+// presenting whatever heartbeat token is current — the same token-access
+// pattern as every other method here, so internal/metrics.Reporter never
+// needs to know about tokens/auth at all, only that it's talking to
+// something that can report a batch of samples.
+func (r *Runnable) ReportMetrics(ctx context.Context, samples []metrics.Sample) error {
+	r.mu.RLock()
+	token := r.tokens.HeartbeatToken
+	r.mu.RUnlock()
+	return r.client.ReportMetrics(ctx, token, samples)
 }
 
 // VerifyGatewayToken implements internal/api.GatewayVerifier, always
