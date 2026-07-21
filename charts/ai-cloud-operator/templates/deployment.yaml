@@ -21,17 +21,15 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: manager
         # Deployment-shaped env values (CONVEX_BASE_URL/OPERATOR_NAME/
-        # OPERATOR_EXTERNAL_URL, and ENROLLMENT_SECRET when chart-managed)
-        # only take effect on process start, unlike ENROLLMENT_SECRET
-        # rotations picked up by internal/convexclient's
-        # EnrollmentSecretWatcher poll loop when it lives in a Secret this
-        # chart doesn't own. Checksums here force a rollout on `helm
-        # upgrade` whenever the chart-owned copies actually change, the
-        # same job kustomize's configMapGenerator hash-suffix trick did.
+        # OPERATOR_EXTERNAL_URL) only take effect on process start. This
+        # checksum forces a rollout on `helm upgrade` whenever the
+        # chart-owned params ConfigMap actually changes, the same job
+        # kustomize's configMapGenerator hash-suffix trick did.
+        # ENROLLMENT_SECRET needs no equivalent here — it's mounted as a
+        # volume (see the enrollment-secret volumeMount below), which
+        # kubelet keeps refreshing live, so a content change never needs a
+        # rollout to take effect.
         checksum/params: {{ include (print $.Template.BasePath "/params.yaml") . | sha256sum }}
-        {{- if not .Values.enrollmentSecret.existingSecretName }}
-        checksum/enrollment-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- end }}
     spec:
       containers:
       - args: {{- toYaml .Values.controllerManager.manager.args | nindent 8 }}
@@ -64,16 +62,6 @@ spec:
             configMapKeyRef:
               key: WORKLOAD_NAMESPACE
               name: {{ include "ai-cloud-operator.fullname" . }}-params
-        - name: ENROLLMENT_SECRET
-          valueFrom:
-            secretKeyRef:
-              {{- if .Values.enrollmentSecret.existingSecretName }}
-              name: {{ .Values.enrollmentSecret.existingSecretName }}
-              key: {{ .Values.enrollmentSecret.existingSecretKey }}
-              {{- else }}
-              name: {{ include "ai-cloud-operator.fullname" . }}-enrollment-secret
-              key: ENROLLMENT_SECRET
-              {{- end }}
         # GATEWAY_SIGNING_SECRET is deliberately absent — the operator
         # generates and persists its own on first boot instead of asking
         # this chart to mint and hand it one (see internal/gateway.KeyStore
@@ -104,6 +92,14 @@ spec:
           }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
+        volumeMounts:
+        # /etc/ai-cloud-operator/enrollment/ENROLLMENT_SECRET —
+        # convexclient.EnrollmentSecretPath. No subPath, so kubelet keeps
+        # refreshing this file's content whenever the backing Secret
+        # changes.
+        - name: enrollment-secret
+          mountPath: /etc/ai-cloud-operator/enrollment
+          readOnly: true
       nodeSelector: {{- toYaml .Values.controllerManager.nodeSelector | nindent 8 }}
       securityContext: {{- toYaml .Values.controllerManager.podSecurityContext | nindent
         8 }}
@@ -112,3 +108,18 @@ spec:
       tolerations: {{- toYaml .Values.controllerManager.tolerations | nindent 8 }}
       topologySpreadConstraints: {{- toYaml .Values.controllerManager.topologySpreadConstraints
         | nindent 8 }}
+      volumes:
+      - name: enrollment-secret
+        secret:
+          {{- if .Values.enrollmentSecret.existingSecretName }}
+          secretName: {{ .Values.enrollmentSecret.existingSecretName }}
+          # existingSecretKey lets an existing Secret use any key name for
+          # the token — remapped here to the fixed filename
+          # convexclient.EnrollmentSecretPath reads, since a volume mount
+          # otherwise names each file after its Secret key.
+          items:
+          - key: {{ .Values.enrollmentSecret.existingSecretKey }}
+            path: ENROLLMENT_SECRET
+          {{- else }}
+          secretName: {{ include "ai-cloud-operator.fullname" . }}-enrollment-secret
+          {{- end }}

@@ -257,18 +257,30 @@ func main() {
 // report workload lifecycle events back to Convex.
 func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclient.Runnable, error) {
 	convexBaseURL := os.Getenv("CONVEX_BASE_URL")
-	enrollmentSecret := os.Getenv("ENROLLMENT_SECRET")
 	operatorName := os.Getenv("OPERATOR_NAME")
 	operatorExternalURL := os.Getenv("OPERATOR_EXTERNAL_URL")
 	podNamespace := os.Getenv("POD_NAMESPACE")
 	workloadNamespace := os.Getenv("WORKLOAD_NAMESPACE")
 
-	missingRequiredEnv := convexBaseURL == "" || enrollmentSecret == "" || operatorName == "" ||
+	missingRequiredEnv := convexBaseURL == "" || operatorName == "" ||
 		operatorExternalURL == "" || podNamespace == "" || workloadNamespace == ""
 	if missingRequiredEnv {
 		return nil, errors.New(
-			"CONVEX_BASE_URL, ENROLLMENT_SECRET, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, " +
+			"CONVEX_BASE_URL, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, " +
 				"POD_NAMESPACE, and WORKLOAD_NAMESPACE must all be set")
+	}
+
+	// ENROLLMENT_SECRET comes from a mounted volume, not an env var — see
+	// convexclient.EnrollmentSecretPath — so the same watcher used for the
+	// initial value below is reused for checkEnrollmentSecret's ongoing
+	// rotation checks, rather than reading it two different ways.
+	enrollment := convexclient.NewEnrollmentSecretWatcher("")
+	enrollmentSecret, err := enrollment.Current(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading initial enrollment secret: %w", err)
+	}
+	if enrollmentSecret == "" {
+		return nil, errors.New("enrollment secret file is empty")
 	}
 
 	// GATEWAY_SIGNING_SECRET is never shared with Convex or anyone else — it
@@ -332,7 +344,7 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 			ExternalURL:      operatorExternalURL,
 		}),
 		Store:             tokenstore.New(mgr.GetClient(), podNamespace),
-		Enrollment:        convexclient.NewEnrollmentSecretWatcher(mgr.GetClient(), podNamespace),
+		Enrollment:        enrollment,
 		HeartbeatInterval: heartbeatInterval,
 		Creator:           workloadCreator,
 		Destroyer:         workloadDestroyer,

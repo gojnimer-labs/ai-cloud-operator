@@ -184,11 +184,11 @@ func (r *Runnable) Start(ctx context.Context) error {
 	}
 }
 
-// checkEnrollmentSecret compares the live ENROLLMENT_SECRET Secret against
-// what this operator last registered with, re-registering immediately on a
-// mismatch — e.g. an operator re-running the kubectl create secret step to
-// rotate the value doesn't need to also restart the operator pod for it to
-// take effect.
+// checkEnrollmentSecret compares the live mounted ENROLLMENT_SECRET value
+// against what this operator last registered with, re-registering
+// immediately on a mismatch — e.g. an operator rotating the backing Secret
+// doesn't need to also restart the operator pod for it to take effect (see
+// EnrollmentSecretPath).
 func (r *Runnable) checkEnrollmentSecret(ctx context.Context) {
 	log := logf.FromContext(ctx)
 

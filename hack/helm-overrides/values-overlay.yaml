@@ -26,7 +26,10 @@ controllerManager:
 
 # ENROLLMENT_SECRET must be set for the operator to register with Convex
 # (see docs/production-deploy.md) but this chart never wants to be the
-# thing holding it in cleartext in your Git repo. Two ways to provide it:
+# thing holding it in cleartext in your Git repo. Two ways to provide it —
+# either way it's mounted into the pod as a volume, not an env var (see
+# templates/deployment.yaml's enrollment-secret volumeMount), so
+# existingSecretName can point at any Secret you like, under any name:
 enrollmentSecret:
   # Preferred: point at a Secret you already manage outside this chart
   # (SealedSecret, External Secrets Operator, manual kubectl apply — however

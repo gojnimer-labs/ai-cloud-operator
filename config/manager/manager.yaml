@@ -105,24 +105,14 @@ spec:
               configMapKeyRef:
                 name: params
                 key: HEARTBEAT_INTERVAL
-          # Created out-of-band per cluster, never checked into git — see
-          # docs/production-deploy.md. Not a kustomize-generated resource, so
-          # its name here is the literal final name kubectl must create it
-          # with (no namePrefix rewriting applies to it). The operator also
-          # polls this same Secret via the API (internal/convexclient's
-          # EnrollmentSecretWatcher) so a rotation takes effect without
-          # restarting the pod.
-          #
           # GATEWAY_SIGNING_SECRET is intentionally absent here — it never
           # needs to be shared with anything outside this operator instance,
           # so the operator generates and persists it itself on first boot
           # (see internal/gateway.KeyStore) instead of asking a human to mint
           # one.
-          - name: ENROLLMENT_SECRET
-            valueFrom:
-              secretKeyRef:
-                name: ai-cloud-operator-env
-                key: ENROLLMENT_SECRET
+          #
+          # ENROLLMENT_SECRET is deliberately NOT an env var — see the
+          # enrollment-secret volumeMount below instead.
         ports:
         - containerPort: 8081
           name: health
@@ -157,7 +147,25 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+        # /etc/ai-cloud-operator/enrollment/ENROLLMENT_SECRET —
+        # convexclient.EnrollmentSecretPath. No subPath, so kubelet keeps
+        # refreshing this file's content whenever the backing Secret
+        # changes, which is what lets checkEnrollmentSecret detect an
+        # out-of-band rotation without a pod restart.
+        - name: enrollment-secret
+          mountPath: /etc/ai-cloud-operator/enrollment
+          readOnly: true
+      volumes:
+      # Created out-of-band per cluster, never checked into git — see
+      # docs/production-deploy.md. Not a kustomize-generated resource, so
+      # this name is the literal final name kubectl must create it with (no
+      # namePrefix rewriting applies to it). The operator never needs to
+      # know this Secret's own object name — only this fixed mount path —
+      # so, unlike an env var's secretKeyRef, this volume source is free to
+      # point at any Secret without any Go code or RBAC change.
+      - name: enrollment-secret
+        secret:
+          secretName: ai-cloud-operator-env
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

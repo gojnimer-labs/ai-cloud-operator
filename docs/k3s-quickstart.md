@@ -97,8 +97,10 @@ with `npx convex env get ENROLLMENT_SECRET` from `ai-cloud-v2` if unsure.)
 No `GATEWAY_SIGNING_SECRET` to create — the operator generates and persists
 its own on first boot. And if you ever need to rotate `ENROLLMENT_SECRET`
 later, `kubectl create secret ... -o yaml --dry-run=client | kubectl apply
--f -` (or `kubectl edit secret`) is enough on its own; the operator polls
-this Secret and re-registers automatically, no `rollout restart` needed.
+-f -` (or `kubectl edit secret`) is enough on its own — this Secret is
+mounted into the pod as a volume, and the operator re-checks it on every
+heartbeat, so it re-registers automatically within a couple of minutes, no
+`rollout restart` needed.
 
 ## 7. Wire the ingress
 
