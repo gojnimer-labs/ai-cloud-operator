@@ -60,8 +60,15 @@ type WorkloadNotifier interface {
 	// apps.aicloud.dev/workload-id label's value, when present) is passed
 	// alongside name so Convex can still resolve the row even before this
 	// Workload's first successful upsert has recorded its name — see
-	// setFailed and syncConvexLifecyclePhase.
-	ReportLifecycle(ctx context.Context, name, workloadID, phase, reason string) error
+	// setFailed and syncConvexLifecyclePhase. retryable marks a "failed"
+	// report as transient/self-diagnosed rather than a genuine, terminal
+	// reconcile error: Convex releases the claim back to any tag-matching
+	// operator immediately instead of waiting out a lease (see
+	// checkUnschedulable, the one caller that ever passes true — setFailed's
+	// reconcile-error reports always pass false, since a bad spec/unknown
+	// template isn't something a different operator could succeed at
+	// either).
+	ReportLifecycle(ctx context.Context, name, workloadID, phase, reason string, retryable bool) error
 }
 
 // WorkloadReconciler reconciles a Workload object.
@@ -148,6 +155,16 @@ const (
 	// manually: `kubectl patch workload <name> --type=merge -p
 	// '{"metadata":{"finalizers":[]}}'`.
 	workloadFinalizer = "apps.aicloud.dev/workload-finalizer"
+
+	// unschedulableGracePeriod bounds how long a Pod may sit with
+	// PodScheduled=False/Reason=Unschedulable before checkUnschedulable
+	// gives up on ever placing it on this cluster and releases the claim
+	// for another operator to try — long enough that a normal scheduling
+	// blip (a burst of other pods landing first, a node briefly cordoned)
+	// never triggers it, short enough to be meaningfully faster than
+	// Convex's own ~60min blind lease exhaustion (see releaseClaim in
+	// ai-cloud-v2's convex/workloads/mutations.ts).
+	unschedulableGracePeriod = 3 * time.Minute
 )
 
 // +kubebuilder:rbac:groups=apps.aicloud.dev,resources=workloads,verbs=get;list;watch;create;update;patch;delete
@@ -249,6 +266,11 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.setFailed(ctx, &workload, fmt.Errorf("reconciling service: %w", err))
 	}
 
+	if r.checkUnschedulable(ctx, &workload, selectorLabels) {
+		// Claim released and this Workload deleted — nothing left to do.
+		return ctrl.Result{}, nil
+	}
+
 	convexSynced := r.syncConvex(ctx, &workload)
 
 	var deployment appsv1.Deployment
@@ -269,6 +291,74 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// checkUnschedulable looks for a Pod belonging to workload that's been stuck
+// failing to schedule (PodScheduled=False, Reason=Unschedulable) for longer
+// than unschedulableGracePeriod — a strong signal this cluster can never fit
+// it (e.g. a template requesting more CPU than any node here will ever have
+// free), which this reconciler's own indefinite retry-forever loop
+// (statusRequeueInterval, no timeout of its own) has no way to detect on its
+// own. Only checked once past Suspended/already-Running — a suspended
+// workload has no desired pods, and an already-Running one already proved
+// it schedules fine here (a later eviction is out of scope for this check).
+//
+// On a genuine, sustained detection: reports a retryable failure to Convex
+// (see WorkloadNotifier.ReportLifecycle's retryable doc — releases the
+// claim to any other tag-matching operator immediately, rather than waiting
+// out Convex's own ~60min blind lease exhaustion) and, once that lands,
+// deletes this Workload so this cluster stops retrying it forever and its
+// Deployment/Service are freed (garbage-collected via owner references).
+// The report must land before the delete: reportDestroyed (fired by the
+// delete, via notifyRemoved) looks the row up by (operatorId, name) — since
+// the retryable report already cleared both on Convex's row, that lookup
+// safely no-ops instead of incorrectly patching a reopened row to
+// "destroyed".
+//
+// Best-effort like every other Convex notify in this file: a failed report
+// or delete just means the same stuck Pod condition is still there on the
+// next reconcile, naturally retrying this whole sequence — no separate
+// retry bookkeeping needed. Returns whether the claim was released (and
+// this Workload deleted), telling Reconcile there's nothing further to do
+// this pass.
+func (r *WorkloadReconciler) checkUnschedulable(ctx context.Context, workload *appsv1alpha1.Workload, selectorLabels map[string]string) bool {
+	if workload.Spec.Suspended || desiredReplicaCount(workload) == 0 || workload.Status.Phase == appsv1alpha1.PhaseRunning {
+		return false
+	}
+
+	log := logf.FromContext(ctx)
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(workload.Namespace), client.MatchingLabels(selectorLabels)); err != nil {
+		log.Error(err, "listing pods to check scheduling status")
+		return false
+	}
+
+	var stuckMessage string
+	for _, pod := range pods.Items {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodScheduled &&
+				cond.Status == corev1.ConditionFalse &&
+				cond.Reason == corev1.PodReasonUnschedulable &&
+				time.Since(cond.LastTransitionTime.Time) >= unschedulableGracePeriod {
+				stuckMessage = cond.Message
+			}
+		}
+	}
+	if stuckMessage == "" {
+		return false
+	}
+
+	reason := fmt.Sprintf("insufficient cluster capacity: %s", stuckMessage)
+	if err := r.notifyLifecycle(ctx, workload, lifecyclePhaseFailed, reason, true); err != nil {
+		return false
+	}
+	if err := r.Delete(ctx, workload); err != nil && !apierrors.IsNotFound(err) {
+		log.Error(err, "deleting workload after releasing unschedulable claim")
+		return false
+	}
+	log.Info("released claim: workload will never schedule on this cluster", "reason", reason)
+	return true
 }
 
 // updateStatus computes workload's Phase and Ready condition from
@@ -401,7 +491,7 @@ func (r *WorkloadReconciler) syncConvexLifecyclePhase(ctx context.Context, workl
 		Type:               conditionTypeConvexLifecycleSynced,
 		ObservedGeneration: workload.Generation,
 	}
-	switch err := r.notifyLifecycle(ctx, workload, phase, ""); {
+	switch err := r.notifyLifecycle(ctx, workload, phase, "", false); {
 	case err == nil:
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = reasonNotified
@@ -433,14 +523,15 @@ func (r *WorkloadReconciler) syncConvexLifecyclePhase(ctx context.Context, workl
 // notifyLifecycle reports a create/redeploy attempt's terminal-for-now
 // phase to Convex, passing both this Workload's real name and (when
 // present) its apps.aicloud.dev/workload-id label — see
-// WorkloadNotifier.ReportLifecycle for why both are sent.
-func (r *WorkloadReconciler) notifyLifecycle(ctx context.Context, workload *appsv1alpha1.Workload, phase, reason string) error {
+// WorkloadNotifier.ReportLifecycle for why both are sent, and for why
+// retryable is almost always false here.
+func (r *WorkloadReconciler) notifyLifecycle(ctx context.Context, workload *appsv1alpha1.Workload, phase, reason string, retryable bool) error {
 	if r.ConvexClient == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, convexNotifyTimeout)
 	defer cancel()
-	err := r.ConvexClient.ReportLifecycle(ctx, workload.Name, workload.Labels[labels.WorkloadID], phase, reason)
+	err := r.ConvexClient.ReportLifecycle(ctx, workload.Name, workload.Labels[labels.WorkloadID], phase, reason, retryable)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to notify convex of workload lifecycle", "phase", phase)
 	}
@@ -524,7 +615,7 @@ func (r *WorkloadReconciler) setFailedWithReason(ctx context.Context, workload *
 	// which retries this call naturally on the next reconcile attempt if it
 	// didn't land — there's no separate condition tracked for it the way
 	// syncConvexLifecyclePhase tracks the success path.
-	_ = r.notifyLifecycle(ctx, workload, lifecyclePhaseFailed, reconcileErr.Error())
+	_ = r.notifyLifecycle(ctx, workload, lifecyclePhaseFailed, reconcileErr.Error(), false)
 
 	return ctrl.Result{}, reconcileErr
 }

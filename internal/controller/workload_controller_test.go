@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -50,6 +51,7 @@ type lifecycleReport struct {
 	workloadID string
 	phase      string
 	reason     string
+	retryable  bool
 }
 
 // fakeNotifier records UpsertWorkload/RemoveWorkload/ReportLifecycle calls
@@ -81,10 +83,10 @@ func (f *fakeNotifier) RemoveWorkload(_ context.Context, name, namespace string)
 	return f.removeErr
 }
 
-func (f *fakeNotifier) ReportLifecycle(_ context.Context, name, workloadID, phase, reason string) error {
+func (f *fakeNotifier) ReportLifecycle(_ context.Context, name, workloadID, phase, reason string, retryable bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.lifecycles = append(f.lifecycles, lifecycleReport{name: name, workloadID: workloadID, phase: phase, reason: reason})
+	f.lifecycles = append(f.lifecycles, lifecycleReport{name: name, workloadID: workloadID, phase: phase, reason: reason, retryable: retryable})
 	return f.lifecycleErr
 }
 
@@ -740,6 +742,125 @@ var _ = Describe("Workload Controller", func() {
 
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
 			Expect(workload.Status.Phase).NotTo(Equal(appsv1alpha1.PhaseFailed))
+		})
+	})
+
+	Context("When a Workload's Pod is stuck Unschedulable", func() {
+		const (
+			resourceName      = "test-resource-unschedulable"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
+			}
+			Expect(k8sClient.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(resourceNamespace))).To(Succeed())
+			_ = k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})
+			_ = k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})
+		})
+
+		// stuckPod creates a Pod carrying workload's selector labels (so
+		// checkUnschedulable's List(MatchingLabels) finds it) with a
+		// PodScheduled=False/Unschedulable condition transitioned at
+		// transitionedAt.
+		stuckPod := func(workload *appsv1alpha1.Workload, transitionedAt time.Time) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: resourceName + "-",
+					Namespace:    resourceNamespace,
+					Labels: map[string]string{
+						labelName:        workload.Name,
+						labelInstance:    string(workload.UID),
+						labels.ManagedBy: labels.ManagedByValue,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: testImage}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			pod.Status.Conditions = []corev1.PodCondition{{
+				LastTransitionTime: metav1.NewTime(transitionedAt),
+				Message:            "0/3 nodes are available: 3 Insufficient cpu.",
+				Reason:             corev1.PodReasonUnschedulable,
+				Status:             corev1.ConditionFalse,
+				Type:               corev1.PodScheduled,
+			}}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+
+		It("releases the claim (retryable) and deletes the Workload once the grace period elapses", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			notifier := &fakeNotifier{}
+			controllerReconciler := &WorkloadReconciler{
+				Client:       k8sClient,
+				ConvexClient: notifier,
+				Scheme:       k8sClient.Scheme(),
+			}
+
+			// First reconcile creates the Deployment/Service; envtest runs no
+			// real scheduler, so no Pod exists yet — nothing to detect.
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.lifecycleCount()).To(Equal(0))
+
+			var workload appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			stuckPod(&workload, time.Now().Add(-(unschedulableGracePeriod + time.Minute)))
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(notifier.lifecycleCount()).To(Equal(1))
+			report := notifier.lastLifecycle()
+			Expect(report.phase).To(Equal(lifecyclePhaseFailed))
+			Expect(report.retryable).To(BeTrue())
+			Expect(report.reason).To(ContainSubstring("insufficient cluster capacity"))
+
+			// Delete only sets DeletionTimestamp (workloadFinalizer holds it
+			// open) — confirms release-then-delete actually fired.
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			Expect(workload.DeletionTimestamp.IsZero()).To(BeFalse())
+		})
+
+		It("does not release the claim while still within the grace period", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			notifier := &fakeNotifier{}
+			controllerReconciler := &WorkloadReconciler{
+				Client:       k8sClient,
+				ConvexClient: notifier,
+				Scheme:       k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			var workload appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			stuckPod(&workload, time.Now().Add(-30*time.Second))
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notifier.lifecycleCount()).To(Equal(0))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			Expect(workload.DeletionTimestamp.IsZero()).To(BeTrue())
 		})
 	})
 

@@ -141,16 +141,19 @@ func (r *Runnable) RemoveWorkload(ctx context.Context, name, namespace string) e
 }
 
 // ReportLifecycle implements internal/controller.WorkloadNotifier, always
-// presenting whatever heartbeat token is current. Reconcile-loop-originated
-// reports are outside the retryable-release design added for
-// processClaimable/processPendingOperations below — the reconciler's own
-// exponential-backoff requeue already handles retrying these, so this stays
-// non-retryable, preserving its exact prior behavior.
-func (r *Runnable) ReportLifecycle(ctx context.Context, name, workloadID, phase, reason string) error {
+// presenting whatever heartbeat token is current. retryable is threaded
+// straight through to the underlying claimed-workload retryable-release
+// design shared with processClaimable/processPendingOperations below — most
+// reconcile-loop-originated reports still pass false (the reconciler's own
+// exponential-backoff requeue already handles retrying those), but
+// checkUnschedulable's self-diagnosed capacity failure passes true so
+// Convex releases the claim to another operator immediately instead of
+// waiting out a lease.
+func (r *Runnable) ReportLifecycle(ctx context.Context, name, workloadID, phase, reason string, retryable bool) error {
 	r.mu.RLock()
 	token := r.tokens.HeartbeatToken
 	r.mu.RUnlock()
-	return r.client.ReportLifecycle(ctx, token, name, workloadID, phase, reason, false)
+	return r.client.ReportLifecycle(ctx, token, name, workloadID, phase, reason, retryable)
 }
 
 // VerifyGatewayToken implements internal/api.GatewayVerifier, always
