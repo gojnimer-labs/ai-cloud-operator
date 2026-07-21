@@ -27,7 +27,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -652,6 +655,91 @@ var _ = Describe("Workload Controller", func() {
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(notifier.lifecycleCount()).To(Equal(1))
+		})
+	})
+
+	// Regression coverage for the actual root cause behind the stale-409
+	// scenario above: a resourceVersion conflict from reconcileDeployment/
+	// reconcileService's CreateOrUpdate (e.g. another concurrent reconcile of
+	// this same Workload, or a human deleting/recreating the Deployment
+	// out-of-band via kubectl/Headlamp) is routine and self-correcting on the
+	// very next reconcile — it must never be treated as a Workload failure or
+	// reported to Convex at all.
+	Context("When reconcileDeployment hits a resourceVersion conflict", func() {
+		const (
+			resourceName      = "test-resource-conflict"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
+			}
+			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+		})
+
+		It("requeues without calling setFailed or notifying Convex", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{Image: testImage},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			notifier := &fakeNotifier{}
+			// k8sClient is a plain client.New (no Watch support), but
+			// interceptor.NewClient requires client.WithWatch — build a
+			// second client against the same envtest apiserver instead of
+			// type-asserting k8sClient itself.
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			conflictingClient := interceptor.NewClient(watchClient, interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*appsv1.Deployment); ok {
+						return errors.NewConflict(
+							schema.GroupResource{Group: "apps", Resource: "deployments"},
+							obj.GetName(),
+							fmt.Errorf("the object has been modified; please apply your changes to the latest version and try again"),
+						)
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
+			controllerReconciler := &WorkloadReconciler{
+				Client:       conflictingClient,
+				ConvexClient: notifier,
+				Scheme:       k8sClient.Scheme(),
+			}
+
+			// First reconcile creates the Deployment fresh (no Update
+			// involved yet, so the interceptor doesn't fire).
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Force an actual spec diff so CreateOrUpdate's semantic-equality
+			// check decides an Update is needed on the next reconcile —
+			// otherwise it may see the Deployment already matches and never
+			// call Update at all, and the interceptor below would never fire.
+			var workload appsv1alpha1.Workload
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			two := int32(2)
+			workload.Spec.Replicas = &two
+			Expect(k8sClient.Update(ctx, &workload)).To(Succeed())
+
+			// Second reconcile hits CreateOrUpdate's Update path (the
+			// Deployment already exists and now needs its replica count
+			// changed) — the interceptor forces a conflict here.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(errors.IsConflict(err)).To(BeTrue())
+			Expect(notifier.lifecycleCount()).To(Equal(0))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &workload)).To(Succeed())
+			Expect(workload.Status.Phase).NotTo(Equal(appsv1alpha1.PhaseFailed))
 		})
 	})
 
