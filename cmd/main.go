@@ -363,6 +363,16 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		return nil, err
 	}
 
+	// metricsCollector is built here, ahead of convexRunnable, so the same
+	// instance can be wired into RunnableConfig.Usage below (feeding
+	// heartbeatOnce's live cluster/managed usage figures every 30s) as well
+	// as metricsReporter further down (its own, much coarser 5-minute
+	// network-bytes report) — one clientset, no duplicate construction.
+	metricsCollector, err := metrics.NewCollector(mgr.GetClient(), mgr.GetConfig(), workloadNamespace)
+	if err != nil {
+		return nil, fmt.Errorf("building metrics collector: %w", err)
+	}
+
 	convexRunnable := convexclient.NewRunnable(convexclient.RunnableConfig{
 		Client: convexclient.New(convexclient.Config{
 			BaseURL:          convexBaseURL,
@@ -378,6 +388,7 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		Creator:           workloadCreator,
 		Destroyer:         workloadDestroyer,
 		Capacity:          capacityTracker,
+		Usage:             metricsCollector,
 	})
 	if err := mgr.Add(convexRunnable); err != nil {
 		return nil, err
@@ -394,10 +405,6 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 			return nil, errors.New("invalid METRICS_REPORT_INTERVAL: " + err.Error())
 		}
 		metricsReportInterval = parsed
-	}
-	metricsCollector, err := metrics.NewCollector(mgr.GetClient(), mgr.GetConfig(), workloadNamespace)
-	if err != nil {
-		return nil, fmt.Errorf("building metrics collector: %w", err)
 	}
 	metricsReporter := metrics.NewReporter(metricsCollector, convexRunnable, metricsReportInterval)
 	if err := mgr.Add(metricsReporter); err != nil {

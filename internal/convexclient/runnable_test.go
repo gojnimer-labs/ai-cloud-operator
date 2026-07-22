@@ -37,6 +37,7 @@ import (
 	appsv1alpha1 "github.com/gojnimer-labs/ai-cloud-operator/api/v1alpha1"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/catalog"
+	"github.com/gojnimer-labs/ai-cloud-operator/internal/metrics"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/provisioning"
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/tokenstore"
 )
@@ -348,6 +349,124 @@ func TestHeartbeatOnceReregistersOnRejection(t *testing.T) {
 	}
 	if runnable.CurrentDeployToken() != "dp-2" {
 		t.Fatalf("expected rotated deploy token dp-2, got %q", runnable.CurrentDeployToken())
+	}
+}
+
+// fakeCapacitySnapshotter/fakeUsageCollector are the narrowest possible
+// stand-ins for capacitySnapshotter/usageCollector — heartbeatOnce needs
+// both to be non-nil to include resourceCapacity's live-usage fields at
+// all (see Client.Heartbeat's own doc comment on that gating), so a test
+// exercising the live-usage wiring needs both, not just a usageCollector.
+type fakeCapacitySnapshotter struct {
+	snap capacity.Snapshot
+}
+
+func (f fakeCapacitySnapshotter) Snapshot(context.Context) (capacity.Snapshot, error) {
+	return f.snap, nil
+}
+
+type fakeUsageCollector struct {
+	usage metrics.UsageSnapshot
+	err   error
+}
+
+func (f fakeUsageCollector) CollectUsage(context.Context) (metrics.UsageSnapshot, error) {
+	return f.usage, f.err
+}
+
+// TestHeartbeatOnceSendsLiveUsageFromUsageCollector confirms
+// RunnableConfig.Usage's CollectUsage result reaches Convex in the same
+// heartbeat as the existing requests-based Capacity snapshot — the two are
+// independent inputs (see heartbeatOnce), but both need to be present for
+// Client.Heartbeat to include either.
+func TestHeartbeatOnceSendsLiveUsageFromUsageCollector(t *testing.T) {
+	var got heartbeatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case pathOperatorsHeartbeat:
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decoding heartbeat request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+		}
+	}))
+	defer srv.Close()
+
+	store := newFakeTokenStore(t)
+	enrollment, _ := newFakeEnrollmentWatcher(t)
+	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	runnable := NewRunnable(RunnableConfig{
+		Client:     convexClient,
+		Store:      store,
+		Enrollment: enrollment,
+		Capacity:   fakeCapacitySnapshotter{snap: capacity.Snapshot{AllocatableMilliCPU: 4000, UsedMilliCPU: 500}},
+		Usage: fakeUsageCollector{usage: metrics.UsageSnapshot{
+			ClusterUsedMilliCPU: 2500,
+			ManagedUsedMilliCPU: 900,
+			NodesReporting:      4,
+			NodesTotal:          5,
+		}},
+	})
+	runnable.setTokens(tokenstore.Tokens{HeartbeatToken: testHeartbeatToken})
+
+	runnable.heartbeatOnce(context.Background())
+
+	if got.ResourceCapacity == nil {
+		t.Fatalf("expected resourceCapacity to be sent")
+	}
+	rc := got.ResourceCapacity
+	if rc.ClusterUsedMilliCPU == nil || *rc.ClusterUsedMilliCPU != 2500 {
+		t.Fatalf("unexpected ClusterUsedMilliCPU: %+v", rc.ClusterUsedMilliCPU)
+	}
+	if rc.ManagedUsedMilliCPU == nil || *rc.ManagedUsedMilliCPU != 900 {
+		t.Fatalf("unexpected ManagedUsedMilliCPU: %+v", rc.ManagedUsedMilliCPU)
+	}
+	if rc.NodesReporting == nil || *rc.NodesReporting != 4 || rc.NodesTotal == nil || *rc.NodesTotal != 5 {
+		t.Fatalf("unexpected NodesReporting/NodesTotal: %+v/%+v", rc.NodesReporting, rc.NodesTotal)
+	}
+	if rc.UsedMilliCPU != 500 {
+		t.Fatalf("expected requests-based UsedMilliCPU to still be reported unchanged, got %d", rc.UsedMilliCPU)
+	}
+}
+
+// TestHeartbeatOnceOmitsLiveUsageWhenCollectUsageErrors confirms a failed
+// live-usage collection is fail-open — same posture as a failed Capacity
+// Snapshot — and never blocks the heartbeat itself or the unrelated
+// requests-based capacity numbers.
+func TestHeartbeatOnceOmitsLiveUsageWhenCollectUsageErrors(t *testing.T) {
+	var got heartbeatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding heartbeat request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+	}))
+	defer srv.Close()
+
+	store := newFakeTokenStore(t)
+	enrollment, _ := newFakeEnrollmentWatcher(t)
+	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	runnable := NewRunnable(RunnableConfig{
+		Client:     convexClient,
+		Store:      store,
+		Enrollment: enrollment,
+		Capacity:   fakeCapacitySnapshotter{snap: capacity.Snapshot{AllocatableMilliCPU: 4000, UsedMilliCPU: 500}},
+		Usage:      fakeUsageCollector{err: errors.New("kubelet unreachable")},
+	})
+	runnable.setTokens(tokenstore.Tokens{HeartbeatToken: testHeartbeatToken})
+
+	runnable.heartbeatOnce(context.Background())
+
+	if got.ResourceCapacity == nil {
+		t.Fatalf("expected resourceCapacity to still be sent using the requests-based snapshot alone")
+	}
+	if got.ResourceCapacity.ClusterUsedMilliCPU != nil {
+		t.Fatalf("expected live-usage fields to be omitted when CollectUsage errors, got: %+v", got.ResourceCapacity)
+	}
+	if got.ResourceCapacity.UsedMilliCPU != 500 {
+		t.Fatalf("expected requests-based UsedMilliCPU unaffected by the CollectUsage error, got %d", got.ResourceCapacity.UsedMilliCPU)
 	}
 }
 

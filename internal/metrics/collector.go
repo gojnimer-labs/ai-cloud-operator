@@ -103,11 +103,37 @@ func NewCollector(c client.Client, cfg *rest.Config, namespace string) (*Collect
 // reads — hand-declared rather than importing that package, which would
 // pull in a large, mostly-unused API surface for three fields.
 type nodeStatsSummary struct {
+	Node *nodeStats `json:"node,omitempty"`
 	Pods []podStats `json:"pods"`
+}
+
+// nodeStats is the kubelet's whole-node reading — CPU/Memory share the same
+// shape as a pod's own per-pod reading below, so cpuStats/memoryStats are
+// reused for both.
+type nodeStats struct {
+	CPU    *cpuStats    `json:"cpu,omitempty"`
+	Memory *memoryStats `json:"memory,omitempty"`
+}
+
+// UsageNanoCores is a pointer for the same reason RxBytes/TxBytes below are:
+// the kubelet omits it when no reading is available yet.
+type cpuStats struct {
+	UsageNanoCores *uint64 `json:"usageNanoCores,omitempty"`
+}
+
+// WorkingSetBytes, deliberately not UsageBytes: UsageBytes includes
+// evictable page cache and overstates real memory pressure — confirmed
+// against a live cluster, where summed UsageBytes came out ~35Gi against
+// `kubectl top nodes`' ~18Gi, while summed WorkingSetBytes reconciled at
+// ~19.3Gi. Never decode UsageBytes for a usage figure.
+type memoryStats struct {
+	WorkingSetBytes *uint64 `json:"workingSetBytes,omitempty"`
 }
 
 type podStats struct {
 	PodRef  podReference  `json:"podRef"`
+	CPU     *cpuStats     `json:"cpu,omitempty"`
+	Memory  *memoryStats  `json:"memory,omitempty"`
 	Network *networkStats `json:"network,omitempty"`
 }
 
@@ -127,6 +153,40 @@ type networkStats struct {
 type podKey struct {
 	namespace string
 	name      string
+}
+
+// nodeStatsTimeout bounds each individual node's stats/summary round trip in
+// CollectUsage. Unlike Collect (its own 5-minute ticker), CollectUsage is
+// called from every 30s heartbeat tick (see
+// convexclient.Runnable.heartbeatOnce) — one unreachable node must never be
+// able to stall a heartbeat by more than this long.
+const nodeStatsTimeout = 3 * time.Second
+
+// UsageSnapshot is one live, kubelet-sourced usage reading — see
+// CollectUsage. Distinct from capacity.Snapshot: that struct is
+// requests-vs-allocatable and gates scheduling; this one is live
+// usage-vs-allocatable, display-only, and never read for gating.
+type UsageSnapshot struct {
+	// ClusterUsedMilliCPU/ClusterUsedMemoryBytes sum every reachable Node's
+	// own .node.cpu.usageNanoCores/.node.memory.workingSetBytes — the whole
+	// cluster, not just nodes hosting a managed pod, matching
+	// capacity.Tracker's own all-Nodes Allocatable* sum.
+	ClusterUsedMilliCPU    int64
+	ClusterUsedMemoryBytes int64
+	// ManagedUsedMilliCPU/ManagedUsedMemoryBytes sum live
+	// .pods[].cpu.usageNanoCores/.pods[].memory.workingSetBytes for exactly
+	// the Pods capacity.Tracker's own UsedMilliCPU/UsedMemoryBytes counts
+	// *requests* for (same namespace + labels.ManagedBy scope) — read from
+	// the same per-node stats/summary payload Collect's network samples
+	// already come from; no second fetch.
+	ManagedUsedMilliCPU    int64
+	ManagedUsedMemoryBytes int64
+	// NodesReporting/NodesTotal let a caller tell a full reading from a
+	// degraded one (some nodes unreachable) — ClusterUsed*/ManagedUsed*
+	// alone would otherwise silently understate usage with no signal that
+	// they're partial.
+	NodesReporting int
+	NodesTotal     int
 }
 
 // Collect returns one Sample per (managed pod, metric) currently read —
@@ -184,6 +244,68 @@ func (c *Collector) Collect(ctx context.Context) ([]Sample, error) {
 		}
 	}
 	return samples, nil
+}
+
+// CollectUsage returns a live UsageSnapshot by querying every Node's kubelet
+// stats/summary endpoint once — cluster-wide, unlike Collect (which only
+// visits nodes hosting a managed pod), since ClusterUsed* needs every
+// node's own .node reading regardless of what's scheduled there. Each
+// node's round trip is bounded by nodeStatsTimeout; a node that errors or
+// times out is logged and its contribution simply omitted from the sum
+// (reflected in NodesReporting vs NodesTotal) — the same best-effort
+// posture Collect already has toward an unreachable node, stricter here
+// since this runs on every 30s heartbeat tick rather than the 5-minute
+// metrics ticker. Only List failures for Nodes/Pods themselves (cached
+// reads, not network calls) return a non-nil error.
+func (c *Collector) CollectUsage(ctx context.Context) (UsageSnapshot, error) {
+	log := logf.FromContext(ctx)
+
+	var nodes corev1.NodeList
+	if err := c.client.List(ctx, &nodes); err != nil {
+		return UsageSnapshot{}, fmt.Errorf("listing nodes: %w", err)
+	}
+
+	var pods corev1.PodList
+	if err := c.client.List(ctx, &pods, client.InNamespace(c.namespace), client.MatchingLabels{labels.ManagedBy: labels.ManagedByValue}); err != nil {
+		return UsageSnapshot{}, fmt.Errorf("listing managed pods: %w", err)
+	}
+	managed := make(map[podKey]struct{}, len(pods.Items))
+	for _, pod := range pods.Items {
+		managed[podKey{namespace: pod.Namespace, name: pod.Name}] = struct{}{}
+	}
+
+	snap := UsageSnapshot{NodesTotal: len(nodes.Items)}
+	for _, n := range nodes.Items {
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeStatsTimeout)
+		summary, err := c.fetchNodeSummary(nodeCtx, n.Name)
+		cancel()
+		if err != nil {
+			log.Error(err, "fetching kubelet stats summary for live usage", "node", n.Name)
+			continue
+		}
+		snap.NodesReporting++
+
+		if summary.Node != nil {
+			if summary.Node.CPU != nil && summary.Node.CPU.UsageNanoCores != nil {
+				snap.ClusterUsedMilliCPU += int64(*summary.Node.CPU.UsageNanoCores / 1_000_000)
+			}
+			if summary.Node.Memory != nil && summary.Node.Memory.WorkingSetBytes != nil {
+				snap.ClusterUsedMemoryBytes += int64(*summary.Node.Memory.WorkingSetBytes)
+			}
+		}
+		for _, ps := range summary.Pods {
+			if _, ok := managed[podKey{namespace: ps.PodRef.Namespace, name: ps.PodRef.Name}]; !ok {
+				continue
+			}
+			if ps.CPU != nil && ps.CPU.UsageNanoCores != nil {
+				snap.ManagedUsedMilliCPU += int64(*ps.CPU.UsageNanoCores / 1_000_000)
+			}
+			if ps.Memory != nil && ps.Memory.WorkingSetBytes != nil {
+				snap.ManagedUsedMemoryBytes += int64(*ps.Memory.WorkingSetBytes)
+			}
+		}
+	}
+	return snap, nil
 }
 
 func (c *Collector) fetchNodeSummary(ctx context.Context, nodeName string) (*nodeStatsSummary, error) {

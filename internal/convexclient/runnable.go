@@ -38,6 +38,14 @@ type capacitySnapshotter interface {
 	Snapshot(ctx context.Context) (capacity.Snapshot, error)
 }
 
+// usageCollector is the narrow slice of metrics.Collector's API this package
+// depends on for live-usage figures — narrowed the same way
+// capacitySnapshotter narrows capacity.Tracker, so tests can substitute a
+// stub without a real kubelet.
+type usageCollector interface {
+	CollectUsage(ctx context.Context) (metrics.UsageSnapshot, error)
+}
+
 const (
 	// maxClaimsPerTick/maxPendingOperationsPerTick bound how much claimable
 	// work a single heartbeat tick picks up — matching Convex's own
@@ -73,6 +81,7 @@ type Runnable struct {
 	creator           *provisioning.WorkloadCreator
 	destroyer         *provisioning.WorkloadDestroyer
 	capacity          capacitySnapshotter
+	usage             usageCollector
 
 	mu     sync.RWMutex
 	tokens tokenstore.Tokens
@@ -99,6 +108,12 @@ type RunnableConfig struct {
 	// (every candidate is treated as fitting), matching the fail-open
 	// posture tests and any future no-Convex mode rely on.
 	Capacity capacitySnapshotter
+	// Usage, when set, feeds heartbeatOnce's live cluster/managed usage
+	// figures (see metrics.Collector.CollectUsage) — display-only, unlike
+	// Capacity, never consulted by processClaimable's self-gate. Nil omits
+	// the live figures from every heartbeat, same fail-open spirit as a nil
+	// Capacity.
+	Usage usageCollector
 }
 
 // NewRunnable builds a Runnable from cfg.
@@ -111,6 +126,7 @@ func NewRunnable(cfg RunnableConfig) *Runnable {
 		creator:           cfg.Creator,
 		destroyer:         cfg.Destroyer,
 		capacity:          cfg.Capacity,
+		usage:             cfg.Usage,
 	}
 }
 
@@ -236,7 +252,7 @@ func (r *Runnable) checkEnrollmentSecret(ctx context.Context) {
 func (r *Runnable) loadOrRegister(ctx context.Context) error {
 	log := logf.FromContext(ctx)
 	if tokens, ok, err := r.store.Load(ctx); err == nil && ok {
-		if _, _, err := r.client.Heartbeat(ctx, tokens.HeartbeatToken, nil); err == nil {
+		if _, _, err := r.client.Heartbeat(ctx, tokens.HeartbeatToken, nil, nil); err == nil {
 			switch {
 			case tokens.CatalogHash != catalog.Hash():
 				log.Info("catalog changed since last registration, re-registering")
@@ -297,7 +313,22 @@ func (r *Runnable) heartbeatOnce(ctx context.Context) {
 		}
 	}
 
-	claimable, pendingOps, err := r.client.Heartbeat(ctx, heartbeatToken, snap)
+	// live is independent of snap — a failed or unconfigured live-usage
+	// collection never blocks or invalidates the (unrelated, requests-based)
+	// snap above; see metrics.Collector.CollectUsage's own doc comment for
+	// why a single unreachable node only undercounts rather than erroring
+	// this call outright.
+	var live *metrics.UsageSnapshot
+	if r.usage != nil {
+		u, err := r.usage.CollectUsage(ctx)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "failed to compute live usage snapshot; heartbeating without one this tick")
+		} else {
+			live = &u
+		}
+	}
+
+	claimable, pendingOps, err := r.client.Heartbeat(ctx, heartbeatToken, snap, live)
 	if err != nil {
 		log := logf.FromContext(ctx)
 		if err != ErrUnauthorized {
