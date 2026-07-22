@@ -9,17 +9,10 @@ rules:
   - ""
   resources:
   - events
+  - namespaces
   verbs:
   - create
   - patch
-- apiGroups:
-  - ""
-  resources:
-  - namespaces
-  - pods/exec
-  - secrets
-  verbs:
-  - create
 - apiGroups:
   - ""
   resources:
@@ -35,6 +28,13 @@ rules:
   - nodes/proxy
   verbs:
   - get
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  - secrets
+  verbs:
+  - create
 - apiGroups:
   - ""
   resourceNames:

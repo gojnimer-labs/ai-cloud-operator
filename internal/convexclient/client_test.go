@@ -115,6 +115,109 @@ func TestRegisterSendsCurrentCatalog(t *testing.T) {
 	}
 }
 
+// TestRegisterSendsVersionWhenSet is the concrete proof that Register's
+// request body carries Config.Version under the "operatorVersion" key
+// Convex's registerSchema expects (see convex/operators/http.ts).
+func TestRegisterSendsVersionWhenSet(t *testing.T) {
+	var req registerRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue})
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, Version: "v1.2.3"})
+	if _, err := c.Register(context.Background()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if req.OperatorVersion != "v1.2.3" {
+		t.Fatalf("expected operatorVersion to be forwarded, got %q", req.OperatorVersion)
+	}
+}
+
+// TestRegisterOmitsVersionAndTagsWhenUnset pins that a Config with no
+// Version/Tags set (the kustomize install's default, and any install that
+// never sets OPERATOR_VERSION/OPERATOR_TAGS) sends neither field at all —
+// not zero-valued ones — so a previously admin-set tags value in Convex is
+// left untouched (see Config.Tags's doc comment / claim's "explicit
+// presence matters, not truthiness" contract).
+func TestRegisterOmitsVersionAndTagsWhenUnset(t *testing.T) {
+	var rawBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&rawBody); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue})
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	if _, err := c.Register(context.Background()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, ok := rawBody["operatorVersion"]; ok {
+		t.Fatalf("expected operatorVersion to be omitted, got %v", rawBody["operatorVersion"])
+	}
+	if _, ok := rawBody["tags"]; ok {
+		t.Fatalf("expected tags to be omitted, got %v", rawBody["tags"])
+	}
+}
+
+// TestRegisterSendsEmptyTagsExplicitly pins that an explicitly-empty
+// Config.Tags (OPERATOR_TAGS="") still sends "tags":[] rather than omitting
+// the field — Convex's claim mutation locks tagsSetByOperator on presence,
+// not on a non-empty value (see Config.Tags's doc comment).
+func TestRegisterSendsEmptyTagsExplicitly(t *testing.T) {
+	var rawBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&rawBody); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue})
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, Tags: []string{}})
+	if _, err := c.Register(context.Background()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	tags, ok := rawBody["tags"]
+	if !ok {
+		t.Fatal("expected tags to be present")
+	}
+	if list, ok := tags.([]any); !ok || len(list) != 0 {
+		t.Fatalf("expected tags to be an empty array, got %v", tags)
+	}
+}
+
+// TestRegisterSendsNonEmptyTags is the concrete proof that Register's
+// request body carries Config.Tags under the "tags" key Convex's
+// registerSchema expects.
+func TestRegisterSendsNonEmptyTags(t *testing.T) {
+	var req registerRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue})
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, Tags: []string{"gpu", "on-prem"}})
+	if _, err := c.Register(context.Background()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if req.Tags == nil || len(*req.Tags) != 2 || (*req.Tags)[0] != "gpu" || (*req.Tags)[1] != "on-prem" {
+		t.Fatalf("expected tags to be forwarded, got %+v", req.Tags)
+	}
+}
+
 func TestHeartbeatSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != testBearerHeartbeatToken {

@@ -28,6 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+const testNamespaceName = "ai-cloud-workloads"
+
 func newFakeClient(t *testing.T) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -40,24 +42,84 @@ func newFakeClient(t *testing.T) client.Client {
 func TestEnsureNamespaceCreatesWhenMissing(t *testing.T) {
 	c := newFakeClient(t)
 
-	if err := EnsureNamespace(context.Background(), c, "ai-cloud-workloads"); err != nil {
+	if err := EnsureNamespace(context.Background(), c, testNamespaceName); err != nil {
 		t.Fatalf("EnsureNamespace: %v", err)
 	}
 
 	var ns corev1.Namespace
-	if err := c.Get(context.Background(), client.ObjectKey{Name: "ai-cloud-workloads"}, &ns); err != nil {
+	if err := c.Get(context.Background(), client.ObjectKey{Name: testNamespaceName}, &ns); err != nil {
 		t.Fatalf("expected namespace to be created: %v", err)
+	}
+}
+
+// TestEnsureNamespaceSetsPodSecurityLabelsWhenMissing is the concrete proof
+// that a freshly-created workload namespace is pinned to "baseline" — see
+// podSecurityLabels' doc comment for why "restricted" (a plausible
+// cluster-wide default on a hardened distro) would otherwise silently
+// prevent every browser/desktop template's Pods from ever reaching Ready.
+func TestEnsureNamespaceSetsPodSecurityLabelsWhenMissing(t *testing.T) {
+	c := newFakeClient(t)
+
+	if err := EnsureNamespace(context.Background(), c, testNamespaceName); err != nil {
+		t.Fatalf("EnsureNamespace: %v", err)
+	}
+
+	var ns corev1.Namespace
+	if err := c.Get(context.Background(), client.ObjectKey{Name: testNamespaceName}, &ns); err != nil {
+		t.Fatalf("expected namespace to be created: %v", err)
+	}
+	for key, want := range podSecurityLabels {
+		if got := ns.Labels[key]; got != want {
+			t.Fatalf("expected label %q=%q, got %q", key, want, got)
+		}
 	}
 }
 
 func TestEnsureNamespaceNoOpsWhenAlreadyExists(t *testing.T) {
 	c := newFakeClient(t)
-	existing := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ai-cloud-workloads"}}
+	existing := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespaceName}}
 	if err := c.Create(context.Background(), existing); err != nil {
 		t.Fatalf("seeding namespace: %v", err)
 	}
 
-	if err := EnsureNamespace(context.Background(), c, "ai-cloud-workloads"); err != nil {
+	if err := EnsureNamespace(context.Background(), c, testNamespaceName); err != nil {
 		t.Fatalf("expected no error for an already-existing namespace, got: %v", err)
+	}
+}
+
+// TestEnsureNamespaceLabelsExistingNamespace is the concrete proof of the
+// out-of-band/pre-upgrade case: a namespace this operator (or a human)
+// already created before podSecurityLabels existed, with no PodSecurity
+// labels of its own, gets them patched on rather than being left as-is —
+// otherwise every existing install would stay stuck on whatever the
+// cluster's default PodSecurity level is, exactly the bug this whole
+// change fixes.
+func TestEnsureNamespaceLabelsExistingNamespace(t *testing.T) {
+	c := newFakeClient(t)
+	existing := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Labels: map[string]string{"kubernetes.io/metadata.name": testNamespaceName},
+		Name:   testNamespaceName,
+	}}
+	if err := c.Create(context.Background(), existing); err != nil {
+		t.Fatalf("seeding namespace: %v", err)
+	}
+
+	if err := EnsureNamespace(context.Background(), c, testNamespaceName); err != nil {
+		t.Fatalf("EnsureNamespace: %v", err)
+	}
+
+	var ns corev1.Namespace
+	if err := c.Get(context.Background(), client.ObjectKey{Name: testNamespaceName}, &ns); err != nil {
+		t.Fatalf("getting namespace: %v", err)
+	}
+	for key, want := range podSecurityLabels {
+		if got := ns.Labels[key]; got != want {
+			t.Fatalf("expected label %q=%q, got %q", key, want, got)
+		}
+	}
+	// The merge patch must add labels, not replace the whole map — an
+	// unrelated pre-existing label should survive untouched.
+	if got := ns.Labels["kubernetes.io/metadata.name"]; got != testNamespaceName {
+		t.Fatalf("expected pre-existing label to survive the patch, got %q", got)
 	}
 }

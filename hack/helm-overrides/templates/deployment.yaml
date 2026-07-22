@@ -78,6 +78,23 @@ spec:
             configMapKeyRef:
               key: METRICS_REPORT_INTERVAL
               name: {{ include "ai-cloud-operator.fullname" . }}-params
+        {{- if .Values.params.operatorTags }}
+        # Plain value, not configMapKeyRef — .Values.params.operatorTags
+        # isn't one of the params ConfigMap's keys (see values-overlay.yaml's
+        # comment on why). Omitted entirely when unset, matching the
+        # kustomize install's `optional: true` behavior for this same var
+        # (see config/manager/manager.yaml) — see cmd/main.go's
+        # os.LookupEnv-based "unset vs explicitly empty" distinction.
+        - name: OPERATOR_TAGS
+          value: {{ .Values.params.operatorTags | quote }}
+        {{- end }}
+        # Sourced directly from the chart's own AppVersion, not a values.yaml
+        # field — this is the Helm chart's actual release version, so there's
+        # nothing for an installer to configure here (unlike the kustomize
+        # install, which has no equivalent version concept and leaves
+        # OPERATOR_VERSION unset by default — see config/manager/params.env).
+        - name: OPERATOR_VERSION
+          value: {{ .Chart.AppVersion | quote }}
         # GATEWAY_SIGNING_SECRET is deliberately absent — the operator
         # generates and persists its own on first boot instead of asking
         # this chart to mint and hand it one (see internal/gateway.KeyStore

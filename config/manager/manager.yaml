@@ -110,6 +110,24 @@ spec:
               configMapKeyRef:
                 name: params
                 key: METRICS_REPORT_INTERVAL
+          # Both optional: true — the keys are commented out in params.env by
+          # default (see its own doc comments), and `optional: true` is what
+          # makes an absent ConfigMap key leave the env var unset entirely
+          # rather than failing the container's startup, so cmd/main.go's
+          # os.LookupEnv can tell "never configured" apart from "explicitly
+          # set to empty."
+          - name: OPERATOR_TAGS
+            valueFrom:
+              configMapKeyRef:
+                name: params
+                key: OPERATOR_TAGS
+                optional: true
+          - name: OPERATOR_VERSION
+            valueFrom:
+              configMapKeyRef:
+                name: params
+                key: OPERATOR_VERSION
+                optional: true
           # GATEWAY_SIGNING_SECRET is intentionally absent here — it never
           # needs to be shared with anything outside this operator instance,
           # so the operator generates and persists it itself on first boot

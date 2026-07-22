@@ -38,6 +38,16 @@ per-request. The operator creates it automatically on first boot if it
 doesn't already exist. Only override it (the same `kubectl set env` way) if
 you want workloads somewhere other than the default `ai-cloud-workloads`.
 
+`OPERATOR_TAGS` (optional, comma-separated, e.g. `gpu,on-prem`) reports this
+operator's own tags to Convex on every register call. Setting it — even to
+an empty value — locks that operator's tags against edits from the Convex
+admin UI; only a fresh register call (a pod restart with the var changed)
+can change them again. Leave it unset to keep managing tags from the admin
+UI instead. `OPERATOR_VERSION` is display-only on Convex's fleet table and
+isn't set here at all in this install path — the Helm chart sets it
+automatically from the chart's own `AppVersion` (see
+[argocd-helm-deploy.md](./argocd-helm-deploy.md)).
+
 ### 3. Create the Secret
 
 ```sh
