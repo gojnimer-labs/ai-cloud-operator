@@ -67,6 +67,22 @@ helper collapses to just the release name in that case, dropping the
 `<release>-ai-cloud-operator-...` double prefix you'd get with an unrelated
 release name).
 
+## Running two instances in one cluster
+
+Two operator instances (e.g. `prod` and `dev`) can coexist in the same
+cluster, but each release needs:
+
+- A **distinct `params.workloadNamespace`** (not just a distinct
+  `operatorName`) — e.g. `ai-cloud-workloads-prod` /
+  `ai-cloud-workloads-dev`. Reconciliation is scoped to that one namespace
+  per instance, so two releases sharing a `workloadNamespace` would still
+  fight over the same `Workload` objects.
+- `crds.enabled: false` on every release after the first. The
+  `workloads.apps.aicloud.dev` CRD is cluster-scoped and not templated per
+  release, so a second release trying to also install/own it hits a Helm
+  ownership conflict. The CRD schema is identical across releases, so
+  reusing the first release's CRD is safe.
+
 ## 3. ArgoCD Application
 
 ```yaml
