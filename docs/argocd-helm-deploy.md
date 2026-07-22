@@ -67,6 +67,38 @@ helper collapses to just the release name in that case, dropping the
 `<release>-ai-cloud-operator-...` double prefix you'd get with an unrelated
 release name).
 
+## Tracking development builds
+
+Every push to `development` publishes a real, pullable prerelease image +
+chart (`vX.Y.Z-dev.<sha>`, see the README's Releases section), plus two
+floating aliases onto that same build — `promote.yml`'s `alias-dev-tag`
+job — specifically so an ArgoCD Application can track "always the latest
+development build" without needing to know which commit's tag is newest:
+
+- `targetRevision: 0.0.0-dev` for the chart (a real SemVer prerelease
+  string, since ArgoCD's Helm source resolution validates `--version` as a
+  SemVer constraint before it ever hits the network — a plain `dev` fails
+  that validation).
+- `controllerManager.manager.image.tag: dev` for the image (no such
+  restriction on OCI image tags, so it stays a plain string).
+
+Point both at the same commit's build, e.g. for a `dev` Application variant
+of the config in step 3 below:
+
+```yaml
+    targetRevision: 0.0.0-dev
+    helm:
+      values: |
+        controllerManager:
+          manager:
+            image:
+              tag: dev
+```
+
+Don't use this for `prod` — it's unpinned and moves on every `development`
+push with no changelog/review gate, the opposite of what a stable instance
+wants.
+
 ## Running two instances in one cluster
 
 Two operator instances (e.g. `prod` and `dev`) can coexist in the same
@@ -96,7 +128,7 @@ spec:
   source:
     repoURL: ghcr.io/gojnimer-labs/charts
     chart: ai-cloud-operator
-    targetRevision: 0.1.7   # pin to whatever's current — see the repo's Releases page or `git tag -l 'v*' | sort -V | tail -1`; every merge to main gets a new one automatically (.github/workflows/auto-tag.yml)
+    targetRevision: 0.1.7   # pin to whatever's current — see the repo's Releases page or `git tag -l 'v*' | sort -V | tail -1`; every development -> main promotion PR merge gets a new one automatically (.github/workflows/promote.yml's tag-if-main job)
     helm:
       values: |
         params:
