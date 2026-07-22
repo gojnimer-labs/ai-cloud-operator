@@ -217,6 +217,18 @@ type resourceCapacityWire struct {
 	AllocatableMemoryBytes int64 `json:"allocatableMemoryBytes"`
 	UsedMilliCPU           int64 `json:"usedMilliCpu"`
 	UsedMemoryBytes        int64 `json:"usedMemoryBytes"`
+	// ClusterUsedMilliCPU/ClusterUsedMemoryBytes/ManagedUsedMilliCPU/
+	// ManagedUsedMemoryBytes/NodesReporting/NodesTotal are independently
+	// optional live-usage figures from metrics.Collector.CollectUsage — nil
+	// (not 0) when no usage snapshot exists this tick, the same "omit rather
+	// than send zeros" posture UsedMilliCPU/UsedMemoryBytes above already use
+	// for an unconfigured Tracker.
+	ClusterUsedMilliCPU    *int64 `json:"clusterUsedMilliCpu,omitempty"`
+	ClusterUsedMemoryBytes *int64 `json:"clusterUsedMemoryBytes,omitempty"`
+	ManagedUsedMilliCPU    *int64 `json:"managedUsedMilliCpu,omitempty"`
+	ManagedUsedMemoryBytes *int64 `json:"managedUsedMemoryBytes,omitempty"`
+	NodesReporting         *int   `json:"nodesReporting,omitempty"`
+	NodesTotal             *int   `json:"nodesTotal,omitempty"`
 }
 
 // claimableWorkloadWire/pendingOperationWire are heartbeatResponse's list
@@ -263,8 +275,11 @@ type PendingOperation struct {
 // snapshot, when non-nil, is included purely for Convex's admin
 // fleet-visibility view — nil (no Tracker configured, or this tick's
 // Snapshot call errored) omits it from the request entirely rather than
-// sending zeros.
-func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string, snapshot *capacity.Snapshot) ([]ClaimableWorkload, []PendingOperation, error) {
+// sending zeros. usage, when non-nil, adds the live cluster-wide/managed
+// usage figures alongside it (see metrics.Collector.CollectUsage) — a nil
+// usage with a non-nil snapshot still sends the requests-based fields,
+// just without the live ones for this tick.
+func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string, snapshot *capacity.Snapshot, usage *metrics.UsageSnapshot) ([]ClaimableWorkload, []PendingOperation, error) {
 	var resourceCapacity *resourceCapacityWire
 	if snapshot != nil {
 		resourceCapacity = &resourceCapacityWire{
@@ -272,6 +287,14 @@ func (c *Client) Heartbeat(ctx context.Context, heartbeatToken string, snapshot 
 			AllocatableMemoryBytes: snapshot.AllocatableMemoryBytes,
 			UsedMilliCPU:           snapshot.UsedMilliCPU,
 			UsedMemoryBytes:        snapshot.UsedMemoryBytes,
+		}
+		if usage != nil {
+			resourceCapacity.ClusterUsedMilliCPU = &usage.ClusterUsedMilliCPU
+			resourceCapacity.ClusterUsedMemoryBytes = &usage.ClusterUsedMemoryBytes
+			resourceCapacity.ManagedUsedMilliCPU = &usage.ManagedUsedMilliCPU
+			resourceCapacity.ManagedUsedMemoryBytes = &usage.ManagedUsedMemoryBytes
+			resourceCapacity.NodesReporting = &usage.NodesReporting
+			resourceCapacity.NodesTotal = &usage.NodesTotal
 		}
 	}
 	body, err := json.Marshal(heartbeatRequest{Name: c.config.OperatorName, ResourceCapacity: resourceCapacity})
