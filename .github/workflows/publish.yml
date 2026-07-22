@@ -20,12 +20,12 @@ on:
         description: "vX.Y.Z tag this build is for (set by promote.yml). Leave unset for a plain branch build — produces latest+sha image tags only, no versioned tag and no install.yaml release asset."
         required: false
         type: string
-      build_image:
-        description: "Whether to actually build+push the image. False when promote.yml calls this purely to cut the GitHub Release for a stable tag whose image was already published (as a prerelease build) and promoted by digest — see promote.yml's promote-image job. Compared with `!= false` everywhere below so a direct push trigger (inputs undefined, not a workflow_call) still builds as before."
+      skip_build:
+        description: "True when promote.yml calls this purely to cut the GitHub Release for a stable tag whose image was already published (as a prerelease build) and promoted by digest — see promote.yml's promote-image job. Named/defaulted so omitting it (a direct push trigger, not a workflow_call — inputs.skip_build is then null) still builds: GitHub coerces null and false to the same number (0) for `!=` comparisons, so a `build_image` flag compared with `!= false` would (and did) evaluate false — i.e. skip the build — whenever it was merely left unset, not just when explicitly false. skip_build compared with `!= true` doesn't have that failure mode: null and false both compare unequal to true either way."
         required: false
         type: boolean
-      create_release:
-        description: "Whether to create a GitHub Release + attach install.yaml once the image is tagged. False for promote.yml's prerelease/dev builds, which publish a real versioned image but shouldn't clutter GitHub Releases. Compared with `!= false` so a direct push trigger still gets a release as before."
+      skip_release:
+        description: "True for promote.yml's prerelease/dev builds, which publish a real versioned image but shouldn't clutter GitHub Releases. See skip_build's description for why this is phrased as an opt-in skip rather than an opt-in `create_release`/`build_image` — the same null-vs-false coercion bug applied here too."
         required: false
         type: boolean
 
@@ -63,7 +63,7 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        if: inputs.build_image != false
+        if: inputs.skip_build != true
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # Patches the builder stage's FROM to --platform=$BUILDPLATFORM (same
@@ -74,12 +74,12 @@ jobs:
       # scratch) under full QEMU emulation for arm64, which is dramatically
       # slower and prone to hanging.
       - name: Generate cross-compilation Dockerfile
-        if: inputs.build_image != false
+        if: inputs.skip_build != true
         run: |
           sed -e '1 s/\(^FROM\)/FROM --platform=${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
 
       - name: Log in to GHCR
-        if: inputs.build_image != false
+        if: inputs.skip_build != true
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
@@ -87,7 +87,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute image tags
-        if: inputs.build_image != false
+        if: inputs.skip_build != true
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
@@ -98,7 +98,7 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.tag != '' }}
 
       - name: Build and push
-        if: inputs.build_image != false
+        if: inputs.skip_build != true
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -117,7 +117,7 @@ jobs:
 
   release:
     needs: publish
-    if: needs.publish.outputs.tag != '' && inputs.create_release != false
+    if: needs.publish.outputs.tag != '' && inputs.skip_release != true
     permissions:
       contents: write
     name: Attach consolidated install.yaml to the release
