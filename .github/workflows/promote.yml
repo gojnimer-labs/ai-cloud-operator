@@ -22,8 +22,20 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     outputs:
+      # Branch-specific build tag/version — dev-suffixed on development,
+      # identical to release_tag/release_version on main. Used only by the
+      # jobs that actually build+publish (build-dev-image, build-dev-chart).
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
+      # Always the clean stable vX.Y.Z, on EITHER branch — straight from
+      # compute-next-version, never dev-suffixed. Everything that talks
+      # about "the release" (the git tag, the promotion PR title, the
+      # promote-image/promote-chart/finalize-release targets) must use
+      # these, not tag/version above — using the dev-suffixed value here
+      # was a real bug: it made the promotion PR's title itself read
+      # "chore: release vX.Y.Z-dev.<sha>".
+      release_tag: ${{ steps.compute.outputs.tag }}
+      release_version: ${{ steps.compute.outputs.version }}
       changelog: ${{ steps.compute.outputs.changelog }}
     steps:
       - name: Clone the code
@@ -74,8 +86,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ needs.version.outputs.tag }}" -m "Release ${{ needs.version.outputs.tag }}"
-          git push origin "${{ needs.version.outputs.tag }}"
+          git tag -a "${{ needs.version.outputs.release_tag }}" -m "Release ${{ needs.version.outputs.release_tag }}"
+          git push origin "${{ needs.version.outputs.release_tag }}"
 
   # Real build+push under the prerelease tag — this is the ONE build of the
   # image that will ever happen for this release; main's promote-image job
@@ -83,7 +95,7 @@ jobs:
   build-dev-image:
     needs: version
     if: github.ref_name == 'development'
-    # contents: write, even though create_release: false skips publish.yml's
+    # contents: write, even though skip_release: true skips publish.yml's
     # release job at runtime — GitHub statically checks the caller grants
     # everything any job in the called workflow could need, since it can't
     # evaluate that job's `if:` condition ahead of time.
@@ -93,7 +105,7 @@ jobs:
     uses: ./.github/workflows/publish.yml
     with:
       tag: ${{ needs.version.outputs.tag }}
-      create_release: false
+      skip_release: true
     secrets: inherit
 
   # Chart packaging isn't a build (no compile step, just a deterministic tar
@@ -147,7 +159,7 @@ jobs:
             echo "::error::HEAD has no second parent — this push to main wasn't a merge commit from the promotion PR (was it squash- or rebase-merged?). Can't determine which development build to promote." >&2
             exit 1
           fi
-          echo "tag=${{ needs.version.outputs.version }}-dev.${dev_sha}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ needs.version.outputs.release_version }}-dev.${dev_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -162,7 +174,7 @@ jobs:
       - name: Promote image by digest (no rebuild)
         run: |
           src="ghcr.io/${{ github.repository }}:${{ steps.source.outputs.tag }}"
-          crane tag "$src" "${{ needs.version.outputs.version }}"
+          crane tag "$src" "${{ needs.version.outputs.release_version }}"
           crane tag "$src" "latest"
 
   # A fresh `helm package --version` repackage, same as every other chart
@@ -176,10 +188,10 @@ jobs:
       packages: write
     uses: ./.github/workflows/helm-release.yml
     with:
-      tag: ${{ needs.version.outputs.tag }}
+      tag: ${{ needs.version.outputs.release_tag }}
     secrets: inherit
 
-  # build_image: false — the image is already sitting under the stable tag
+  # skip_build: true — the image is already sitting under the stable tag
   # from promote-image above, so this call exists purely to run publish.yml's
   # release job: build install.yaml and cut the GitHub Release.
   finalize-release:
@@ -190,9 +202,8 @@ jobs:
       packages: write
     uses: ./.github/workflows/publish.yml
     with:
-      tag: ${{ needs.version.outputs.tag }}
-      build_image: false
-      create_release: true
+      tag: ${{ needs.version.outputs.release_tag }}
+      skip_build: true
     secrets: inherit
 
   # Only reachable once development's own prerelease build succeeded — a
@@ -216,7 +227,7 @@ jobs:
           # from behaving differently everywhere a bot-authored PR looks
           # different (review UI, CODEOWNERS routing, etc).
           GH_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
-          NEXT_TAG: ${{ needs.version.outputs.tag }}
+          NEXT_TAG: ${{ needs.version.outputs.release_tag }}
           CHANGELOG: ${{ needs.version.outputs.changelog }}
         run: |
           title="chore: release ${NEXT_TAG}"
