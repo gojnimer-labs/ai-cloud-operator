@@ -284,7 +284,9 @@ func main() {
 // reconcile loop, with no bespoke goroutine plumbing in main. The returned
 // *convexclient.Runnable is also wired into the WorkloadReconciler so it can
 // report workload lifecycle events back to Convex.
-func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager, workloadNamespace string) (*convexclient.Runnable, error) {
+func setupConvexIntegration(
+	ctx context.Context, mgr ctrl.Manager, workloadNamespace string,
+) (*convexclient.Runnable, error) {
 	convexBaseURL := os.Getenv("CONVEX_BASE_URL")
 	operatorName := os.Getenv("OPERATOR_NAME")
 	operatorExternalURL := os.Getenv("OPERATOR_EXTERNAL_URL")
