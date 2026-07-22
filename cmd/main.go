@@ -35,6 +35,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -135,6 +136,21 @@ func main() {
 
 	webhookServer := webhook.NewServer(webhookServerOptions)
 
+	// WORKLOAD_NAMESPACE is read here (rather than inside
+	// setupConvexIntegration, where every other Convex-related env var is
+	// read) because it also has to seed the manager's Cache.DefaultNamespaces
+	// below — every Workload CR, and the Deployment/Service the reconciler
+	// creates for it, always lives in this one namespace (see
+	// internal/provisioning.WorkloadCreator), so scoping the manager's cache
+	// to it is what lets two operator instances (e.g. "prod" and "dev", each
+	// with a distinct WORKLOAD_NAMESPACE) coexist in the same cluster without
+	// reconciling each other's objects.
+	workloadNamespace := os.Getenv("WORKLOAD_NAMESPACE")
+	if workloadNamespace == "" {
+		setupLog.Error(errors.New("WORKLOAD_NAMESPACE must be set"), "missing required env")
+		os.Exit(1)
+	}
+
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
 	// More info:
 	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/metrics/server
@@ -186,6 +202,16 @@ func main() {
 				DisableFor: []client.Object{&corev1.Secret{}},
 			},
 		},
+		// Scopes every namespaced type this manager's cache serves (Workload,
+		// Deployment, Service) to WORKLOAD_NAMESPACE, so two operator
+		// instances in the same cluster never watch/reconcile each other's
+		// objects. Cluster-scoped types (e.g. Node, read by
+		// internal/capacity) are unaffected by DefaultNamespaces.
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				workloadNamespace: {},
+			},
+		},
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -207,10 +233,11 @@ func main() {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
 	}
+	setupLog.Info("workload cache scoped", "namespace", workloadNamespace)
 
 	ctx := ctrl.SetupSignalHandler()
 
-	convexRunnable, err := setupConvexIntegration(ctx, mgr)
+	convexRunnable, err := setupConvexIntegration(ctx, mgr, workloadNamespace)
 	if err != nil {
 		setupLog.Error(err, "Failed to set up convex registration/heartbeat and operator api")
 		os.Exit(1)
@@ -257,19 +284,20 @@ func main() {
 // reconcile loop, with no bespoke goroutine plumbing in main. The returned
 // *convexclient.Runnable is also wired into the WorkloadReconciler so it can
 // report workload lifecycle events back to Convex.
-func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclient.Runnable, error) {
+func setupConvexIntegration(
+	ctx context.Context, mgr ctrl.Manager, workloadNamespace string,
+) (*convexclient.Runnable, error) {
 	convexBaseURL := os.Getenv("CONVEX_BASE_URL")
 	operatorName := os.Getenv("OPERATOR_NAME")
 	operatorExternalURL := os.Getenv("OPERATOR_EXTERNAL_URL")
 	podNamespace := os.Getenv("POD_NAMESPACE")
-	workloadNamespace := os.Getenv("WORKLOAD_NAMESPACE")
 
 	missingRequiredEnv := convexBaseURL == "" || operatorName == "" ||
-		operatorExternalURL == "" || podNamespace == "" || workloadNamespace == ""
+		operatorExternalURL == "" || podNamespace == ""
 	if missingRequiredEnv {
 		return nil, errors.New(
 			"CONVEX_BASE_URL, OPERATOR_NAME, OPERATOR_EXTERNAL_URL, " +
-				"POD_NAMESPACE, and WORKLOAD_NAMESPACE must all be set")
+				"and POD_NAMESPACE must all be set")
 	}
 
 	// ENROLLMENT_SECRET comes from a mounted volume, not an env var — see
