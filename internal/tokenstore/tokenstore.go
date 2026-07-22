@@ -36,27 +36,34 @@ import (
 const SecretName = "ai-cloud-operator-token"
 
 const (
-	keyHeartbeatToken = "heartbeatToken"
-	keyDeployToken    = "deployToken"
-	keyCatalogHash    = "catalogHash"
+	keyHeartbeatToken  = "heartbeatToken"
+	keyDeployToken     = "deployToken"
+	keyCatalogHash     = "catalogHash"
+	keyOperatorVersion = "operatorVersion"
+	keyTagsFingerprint = "tagsFingerprint"
 )
 
 // Tokens holds the pair of bearer tokens minted at registration time, plus
-// the catalog fingerprint (see internal/catalog.Hash) this operator last
+// the fingerprints (catalog, operator version, tags) this operator last
 // successfully registered with Convex.
 //
 // HeartbeatToken is presented BY the operator when calling Convex's
 // heartbeat endpoint; Convex only ever stores its hash.
 // DeployToken is presented BY Convex when calling the operator's inbound
 // HTTP API; the operator only ever stores its hash (see internal/api).
-// CatalogHash lets Runnable.loadOrRegister detect, at startup, that the
-// compiled-in catalog differs from what was last reported — the persisted
-// token Secret otherwise survives a restart and would silently reuse a
-// stale registration.
+// CatalogHash/OperatorVersion/TagsFingerprint each let
+// Runnable.loadOrRegister detect, at startup, that the compiled-in catalog,
+// the running binary's version, or its configured tags differ from what
+// was last reported — the persisted token Secret otherwise survives a
+// restart (and a version/tags-only change touches none of the other two)
+// and would silently reuse a stale registration, leaving Convex's fleet
+// table showing a stale operatorVersion/tags forever.
 type Tokens struct {
-	HeartbeatToken string
-	DeployToken    string
-	CatalogHash    string
+	HeartbeatToken  string
+	DeployToken     string
+	CatalogHash     string
+	OperatorVersion string
+	TagsFingerprint string
 }
 
 // create cannot be scoped by resourceNames in Kubernetes RBAC (the object
@@ -92,9 +99,11 @@ func (s *Store) Load(ctx context.Context) (Tokens, bool, error) {
 	}
 
 	tokens := Tokens{
-		HeartbeatToken: string(secret.Data[keyHeartbeatToken]),
-		DeployToken:    string(secret.Data[keyDeployToken]),
-		CatalogHash:    string(secret.Data[keyCatalogHash]),
+		HeartbeatToken:  string(secret.Data[keyHeartbeatToken]),
+		DeployToken:     string(secret.Data[keyDeployToken]),
+		CatalogHash:     string(secret.Data[keyCatalogHash]),
+		OperatorVersion: string(secret.Data[keyOperatorVersion]),
+		TagsFingerprint: string(secret.Data[keyTagsFingerprint]),
 	}
 	if tokens.HeartbeatToken == "" || tokens.DeployToken == "" {
 		return Tokens{}, false, nil
@@ -117,9 +126,11 @@ func (s *Store) Save(ctx context.Context, tokens Tokens) error {
 		secret.Labels = map[string]string{labels.ManagedBy: labels.ManagedByValue}
 		secret.Type = corev1.SecretTypeOpaque
 		secret.Data = map[string][]byte{
-			keyHeartbeatToken: []byte(tokens.HeartbeatToken),
-			keyDeployToken:    []byte(tokens.DeployToken),
-			keyCatalogHash:    []byte(tokens.CatalogHash),
+			keyHeartbeatToken:  []byte(tokens.HeartbeatToken),
+			keyDeployToken:     []byte(tokens.DeployToken),
+			keyCatalogHash:     []byte(tokens.CatalogHash),
+			keyOperatorVersion: []byte(tokens.OperatorVersion),
+			keyTagsFingerprint: []byte(tokens.TagsFingerprint),
 		}
 		if err := s.client.Create(ctx, secret); err != nil {
 			return fmt.Errorf("creating token secret: %w", err)
@@ -134,6 +145,8 @@ func (s *Store) Save(ctx context.Context, tokens Tokens) error {
 		secret.Data[keyHeartbeatToken] = []byte(tokens.HeartbeatToken)
 		secret.Data[keyDeployToken] = []byte(tokens.DeployToken)
 		secret.Data[keyCatalogHash] = []byte(tokens.CatalogHash)
+		secret.Data[keyOperatorVersion] = []byte(tokens.OperatorVersion)
+		secret.Data[keyTagsFingerprint] = []byte(tokens.TagsFingerprint)
 		if err := s.client.Update(ctx, secret); err != nil {
 			return fmt.Errorf("updating token secret: %w", err)
 		}

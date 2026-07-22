@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/capacity"
@@ -96,6 +97,32 @@ func (c *Client) EnrollmentSecret() string {
 // as the rest of Client's state.
 func (c *Client) SetEnrollmentSecret(secret string) {
 	c.config.EnrollmentSecret = secret
+}
+
+// Version returns this Client's configured operator version — see
+// Runnable.loadOrRegister, which compares it against what was last
+// persisted to decide whether a version bump alone (no catalog or tags
+// change) should still trigger a fresh Register call.
+func (c *Client) Version() string {
+	return c.config.Version
+}
+
+// tagsFingerprintUnset is TagsFingerprint's return value for a nil
+// Config.Tags (OPERATOR_TAGS never set) — also referenced directly by this
+// package's tests when seeding/asserting a persisted tokenstore.Tokens.
+const tagsFingerprintUnset = "unset"
+
+// TagsFingerprint returns a value that changes whenever this Client's
+// configured Tags' reported shape changes — unset (nil) to set (even to an
+// empty slice), or the set value itself changing — for the same
+// last-persisted comparison Version serves above. Order-sensitive:
+// reordering the same tags produces a different fingerprint, an accepted,
+// harmless false positive since Register is always idempotent.
+func (c *Client) TagsFingerprint() string {
+	if c.config.Tags == nil {
+		return tagsFingerprintUnset
+	}
+	return "set:" + strings.Join(c.config.Tags, ",")
 }
 
 type registerRequest struct {

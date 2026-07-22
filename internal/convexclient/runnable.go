@@ -225,19 +225,30 @@ func (r *Runnable) checkEnrollmentSecret(ctx context.Context) {
 }
 
 // loadOrRegister tries to reuse a persisted token (validating it with one
-// heartbeat call, and confirming this operator's own catalog hasn't changed
-// since it was issued) and falls back to fresh registration if none exists,
-// the stored token is rejected, or the catalog has changed.
+// heartbeat call, and confirming this operator's own catalog, version, and
+// tags haven't changed since it was issued) and falls back to fresh
+// registration if none exists, the stored token is rejected, or any of
+// those three fingerprints has changed — version/tags are otherwise never
+// re-reported on a routine restart (an image bump, or an OPERATOR_TAGS
+// edit, touches neither the catalog nor the persisted tokens' validity),
+// leaving Convex's fleet table showing whatever was registered once, long
+// ago.
 func (r *Runnable) loadOrRegister(ctx context.Context) error {
 	log := logf.FromContext(ctx)
 	if tokens, ok, err := r.store.Load(ctx); err == nil && ok {
 		if _, _, err := r.client.Heartbeat(ctx, tokens.HeartbeatToken, nil); err == nil {
-			if tokens.CatalogHash == catalog.Hash() {
+			switch {
+			case tokens.CatalogHash != catalog.Hash():
+				log.Info("catalog changed since last registration, re-registering")
+			case tokens.OperatorVersion != r.client.Version():
+				log.Info("operator version changed since last registration, re-registering")
+			case tokens.TagsFingerprint != r.client.TagsFingerprint():
+				log.Info("operator tags changed since last registration, re-registering")
+			default:
 				log.Info("reusing persisted operator token")
 				r.setTokens(tokens)
 				return nil
 			}
-			log.Info("catalog changed since last registration, re-registering")
 		} else {
 			log.Info("persisted operator token rejected by convex, re-registering")
 		}
@@ -254,6 +265,8 @@ func (r *Runnable) register(ctx context.Context) error {
 		return err
 	}
 	tokens.CatalogHash = catalog.Hash()
+	tokens.OperatorVersion = r.client.Version()
+	tokens.TagsFingerprint = r.client.TagsFingerprint()
 	if err := r.store.Save(ctx, tokens); err != nil {
 		return err
 	}
