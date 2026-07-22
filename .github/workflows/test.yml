@@ -1,15 +1,13 @@
 name: Tests
 
 on:
-  # feature/** push gives fast feedback before a PR exists; pull_request
-  # against development is what the development branch ruleset actually
-  # requires. Once a feature/** branch merges, that same tree already ran
-  # here — re-running on push to development/main (which auto-pr.yml/
-  # promote.yml would otherwise trigger for) would just be redundant compute
-  # against a commit that's either an unchanged merge or the promotion PR's
-  # tree (also unchanged from what development already tested).
-  push:
-    branches: ["feature/**"]
+  # pull_request only, no push trigger — auto-pr.yml auto-opens a PR within
+  # seconds of the first push to any feature/** branch, so a push-triggered
+  # run would almost always just duplicate the pull_request-triggered run
+  # for the same commit (and unconditionally would, on every push after the
+  # first). This is what the development branch ruleset actually requires;
+  # a merge into development/main doesn't re-trigger this at all, since
+  # that tree already ran here as the PR's head commit.
   pull_request:
     branches: [development]
 

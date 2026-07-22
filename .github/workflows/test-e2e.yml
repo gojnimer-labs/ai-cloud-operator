@@ -1,13 +1,9 @@
 name: E2E Tests
 
 on:
-  # feature/** push gives fast feedback before a PR exists; pull_request
-  # against development is what the development branch ruleset actually
-  # requires — see test.yml's identical comment for why push isn't also
-  # scoped to development/main (that would just re-run against a tree this
-  # already tested).
-  push:
-    branches: ["feature/**"]
+  # pull_request only — see test.yml's identical comment for why a
+  # feature/** push trigger would just duplicate this on every push once
+  # auto-pr.yml's PR exists (immediately).
   pull_request:
     branches: [development]
 

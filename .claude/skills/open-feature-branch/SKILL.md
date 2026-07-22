@@ -10,7 +10,7 @@ This repo's pipeline (`.github/workflows/auto-pr.yml`, `promote.yml`, `test.yml`
 ## The rule
 
 1. **Branch off `development`, not `main`.** `main` only ever receives code via the automated `development` -> `main` promotion PR (see `promote.yml`) — a feature branch based on `main` will diverge and can't merge into `development` cleanly.
-2. **Name it `feature/<short-description>`.** `auto-pr.yml` triggers on `push: branches: ["feature/**"]`, and `test.yml`/`lint.yml`/`test-e2e.yml` only push-trigger on that same pattern — anything not under `feature/` (e.g. `fix-typo`, `wip`, `my-branch`) gets no automatic PR and no CI feedback until you open one by hand.
+2. **Name it `feature/<short-description>`.** `auto-pr.yml` triggers on `push: branches: ["feature/**"]` — anything not under `feature/` (e.g. `fix-typo`, `wip`, `my-branch`) gets no automatic PR at all. `test.yml`/`lint.yml`/`test-e2e.yml` only trigger on `pull_request: branches: [development]`, so without that auto-opened PR you also get no CI feedback until you open one by hand.
 3. **Push it.** The first push (with at least one commit ahead of `development`) triggers `auto-pr.yml`, which opens — or, on later pushes, reuses — a PR from your branch into `development`. You never run `gh pr create` yourself for this leg.
 
 Direct pushes to `development`/`main` are blocked by branch rulesets anyway (`.github/scripts/apply-branch-rulesets.sh` is the source of truth for what those require) — a `feature/*` branch + PR is the only path in.
