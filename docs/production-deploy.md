@@ -6,7 +6,7 @@ This walks through running the operator as an actual in-cluster Deployment (imag
 
 - `kubectl` pointed at the target cluster.
 - A reachable Convex deployment (self-hosted or cloud) with `ENROLLMENT_SECRET` set on it (see `ai-cloud-v2/convex/operators/http.ts`'s `register` handler — it must match what you set here).
-- A `v*` tag already pushed to this repo, so `.github/workflows/publish.yml`'s `release` job has produced a consolidated `install.yaml` release asset. `.github/workflows/auto-tag.yml` pushes one automatically on every merge to `main` — check `git tag -l` or the repo's Releases page rather than tagging one yourself.
+- A `v*` tag already pushed to this repo, so `.github/workflows/publish.yml`'s `release` job has produced a consolidated `install.yaml` release asset. `.github/workflows/promote.yml` pushes one automatically whenever a `development -> main` promotion PR is merged — check `git tag -l` or the repo's Releases page rather than tagging one yourself. (A prerelease `vX.Y.Z-dev.<sha>` image/chart also gets published on every `development` push, but without a git tag or GitHub Release — see the README's Releases section.)
 - If you plan to enable the ingress overlay: an ingress controller (k3s ships Traefik by default) and, optionally, cert-manager with a `ClusterIssuer` for automatic TLS.
 
 ## Option A — no source checkout needed (recommended)
