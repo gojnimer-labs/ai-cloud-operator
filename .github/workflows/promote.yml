@@ -83,8 +83,12 @@ jobs:
   build-dev-image:
     needs: version
     if: github.ref_name == 'development'
+    # contents: write, even though create_release: false skips publish.yml's
+    # release job at runtime — GitHub statically checks the caller grants
+    # everything any job in the called workflow could need, since it can't
+    # evaluate that job's `if:` condition ahead of time.
     permissions:
-      contents: read
+      contents: write
       packages: write
     uses: ./.github/workflows/publish.yml
     with:
@@ -117,6 +121,7 @@ jobs:
     needs: [version, tag-if-main]
     if: github.ref_name == 'main'
     permissions:
+      contents: read
       packages: write
     runs-on: ubuntu-latest
     steps:
