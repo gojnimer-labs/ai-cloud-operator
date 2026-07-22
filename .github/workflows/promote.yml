@@ -123,6 +123,38 @@ jobs:
       tag: ${{ needs.version.outputs.tag }}
     secrets: inherit
 
+  # Aliases this run's freshly-published prerelease image+chart under one
+  # stable name ("dev") in addition to their real vX.Y.Z-dev.<sha> tag, so
+  # anything tracking "always the latest development build" (e.g. an
+  # ArgoCD Application) has one fixed name to pull from instead of needing
+  # to know which specific commit's tag is newest. Same crane-by-reference
+  # pattern promote-image uses below — no rebuild, no digest plumbing,
+  # just an additional tag on a manifest that's already there. Runs in the
+  # same workflow run as build-dev-image/build-dev-chart, so (unlike
+  # promote-image) there's no cross-run state to reconstruct — the tag
+  # this job needs is right there in needs.version.outputs.version.
+  alias-dev-tag:
+    needs: [version, build-dev-image, build-dev-chart]
+    if: success() && github.ref_name == 'development'
+    permissions:
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Alias image and chart as "dev"
+        run: |
+          crane tag "ghcr.io/${{ github.repository }}:${{ needs.version.outputs.version }}" dev
+          crane tag "ghcr.io/${{ github.repository_owner }}/charts/ai-cloud-operator:${{ needs.version.outputs.version }}" dev
+
   # Retags the exact image digest already built and published from
   # development under the stable version and `latest` — never rebuilds.
   # Rebuilding here would reintroduce the reproducibility gap (mutable base
