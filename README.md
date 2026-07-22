@@ -97,8 +97,8 @@ spec:
 
 ## Releases
 
-Any branch other than `main`/`development` auto-opens a PR into `development`
-(`auto-pr.yml`). Every push to `development` builds and publishes a real,
+Any `feature/**` branch auto-opens a PR into `development` (`auto-pr.yml`).
+Every push to `development` builds and publishes a real,
 pullable prerelease image + chart tagged `vX.Y.Z-dev.<sha>` (no GitHub
 Release, no `latest`), and opens or updates a `chore: release vX.Y.Z`
 promotion PR into `main` with a changelog (`promote.yml`). Merging that PR

@@ -1,15 +1,14 @@
 name: Auto PR
 
-# Promotion flow: any branch -> development -> main. Every push to a branch
-# other than main/development opens (or reuses) a PR into development. The
+# Promotion flow: feature/** -> development -> main. Every push to a
+# feature/** branch opens (or reuses) a PR into development. The
 # development -> main leg lives in promote.yml instead (its promote-pr job),
 # gated on that push's development build actually succeeding — see the
 # comment there.
 on:
   push:
-    branches-ignore:
-      - main
-      - development
+    branches:
+      - "feature/**"
 
 permissions:
   contents: read
