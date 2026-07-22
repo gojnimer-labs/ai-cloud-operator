@@ -124,15 +124,27 @@ jobs:
     secrets: inherit
 
   # Aliases this run's freshly-published prerelease image+chart under one
-  # stable name ("dev") in addition to their real vX.Y.Z-dev.<sha> tag, so
-  # anything tracking "always the latest development build" (e.g. an
-  # ArgoCD Application) has one fixed name to pull from instead of needing
-  # to know which specific commit's tag is newest. Same crane-by-reference
-  # pattern promote-image uses below — no rebuild, no digest plumbing,
-  # just an additional tag on a manifest that's already there. Runs in the
-  # same workflow run as build-dev-image/build-dev-chart, so (unlike
+  # stable name in addition to their real vX.Y.Z-dev.<sha> tag, so anything
+  # tracking "always the latest development build" (e.g. an ArgoCD
+  # Application) has one fixed name to pull from instead of needing to know
+  # which specific commit's tag is newest. Same crane-by-reference pattern
+  # promote-image uses below — no rebuild, no digest plumbing, just an
+  # additional tag on a manifest that's already there. Runs in the same
+  # workflow run as build-dev-image/build-dev-chart, so (unlike
   # promote-image) there's no cross-run state to reconstruct — the tag
   # this job needs is right there in needs.version.outputs.version.
+  #
+  # The image and the chart need DIFFERENT floating names here: a plain
+  # "dev" works fine as a Docker/OCI image tag (just a string, nothing
+  # parses it), but ArgoCD's Helm source resolution shells out to `helm
+  # pull --version <targetRevision>`, and Helm validates --version as a
+  # SemVer *constraint* before it ever touches the network — "dev" fails
+  # that with "Error: improper constraint: dev" even though the OCI tag
+  # itself exists. "0.0.0-dev" is a valid (if nonstandard) SemVer
+  # prerelease string, so it passes that validation and resolves as an
+  # exact-version match — confirmed locally: `helm pull --version dev`
+  # fails before any network call, `helm pull --version 0.0.0-dev` gets
+  # past validation to a real registry lookup.
   alias-dev-tag:
     needs: [version, build-dev-image, build-dev-chart]
     if: success() && github.ref_name == 'development'
@@ -150,10 +162,10 @@ jobs:
       - name: Install crane
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
 
-      - name: Alias image and chart as "dev"
+      - name: Alias image as "dev", chart as "0.0.0-dev"
         run: |
           crane tag "ghcr.io/${{ github.repository }}:${{ needs.version.outputs.version }}" dev
-          crane tag "ghcr.io/${{ github.repository_owner }}/charts/ai-cloud-operator:${{ needs.version.outputs.version }}" dev
+          crane tag "ghcr.io/${{ github.repository_owner }}/charts/ai-cloud-operator:${{ needs.version.outputs.version }}" 0.0.0-dev
 
   # Retags the exact image digest already built and published from
   # development under the stable version and `latest` — never rebuilds.
