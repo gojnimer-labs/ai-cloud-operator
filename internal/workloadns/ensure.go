@@ -30,17 +30,56 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=create
+// podSecurityLabels pin the workload namespace to the "baseline" Pod
+// Security Standard, regardless of whatever a cluster-wide default policy
+// (common on hardened distros — this project targets an on-prem Talos
+// cluster via core-d, see docs/argocd-helm-deploy.md) would otherwise
+// impose on a freshly-created, unlabeled namespace. "restricted" is too
+// strict for what actually runs here: the browser/desktop catalog
+// templates (firefox/chrome/webtop, all linuxserver.io-based images — see
+// internal/catalog) and the shared restoreProfileInitContainer all need to
+// start as root (s6-overlay init, `chown` before dropping to PUID/PGID),
+// which "restricted" flatly forbids — pods just silently never reach Ready,
+// with no error the operator itself can see (PodSecurity's Pod-level
+// enforcement is a separate admission check from the warning attached to
+// this Namespace's own Deployment writes, which only reports "would
+// violate" advisories, not the hard rejection those warnings imply is
+// still happening downstream). "baseline" still blocks the things that
+// actually matter for isolating untrusted, user-supplied workload
+// config — host namespace/network access, privileged containers, hostPath
+// volumes — while allowing root-in-container.
+const podSecurityLevelBaseline = "baseline"
 
-// EnsureNamespace creates the Namespace named name if it doesn't already
-// exist. A blind Create (rather than Get-then-create) deliberately avoids
-// any dependency on the manager's informer cache — this runs before
-// mgr.Start(), when reads through a cached client would hang, but writes go
-// straight to the API server and are always safe.
+var podSecurityLabels = map[string]string{
+	"pod-security.kubernetes.io/enforce": podSecurityLevelBaseline,
+	"pod-security.kubernetes.io/audit":   podSecurityLevelBaseline,
+	"pod-security.kubernetes.io/warn":    podSecurityLevelBaseline,
+}
+
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=create;patch
+
+// EnsureNamespace creates the Namespace named name (with podSecurityLabels
+// already set) if it doesn't already exist, and merge-patches those same
+// labels onto it otherwise — covering a namespace created by an earlier
+// version of this operator (before podSecurityLabels existed) or out of
+// band. Both the blind Create and the label Patch deliberately avoid any
+// Get: this runs before mgr.Start(), when a read through the manager's
+// cached client would hang waiting on an informer cache that hasn't
+// started syncing yet, but writes (Create/Patch) go straight to the API
+// server and are always safe. A JSON merge patch (client.Merge) needs no
+// prior read to construct — unlike client.MergeFrom, which diffs against
+// an already-fetched original — and only touches the label keys actually
+// present in podSecurityLabels, leaving any other existing labels alone.
 func EnsureNamespace(ctx context.Context, c client.Client, name string) error {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	if err := c.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("creating workload namespace %q: %w", name, err)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: podSecurityLabels}}
+	if err := c.Create(ctx, ns); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating workload namespace %q: %w", name, err)
+		}
+		patch := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: podSecurityLabels}}
+		if err := c.Patch(ctx, patch, client.Merge); err != nil {
+			return fmt.Errorf("labeling existing workload namespace %q: %w", name, err)
+		}
 	}
 	return nil
 }
