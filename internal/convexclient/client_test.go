@@ -41,6 +41,7 @@ const (
 	pathOperatorsClaimOperation = "/operators/workloads/claim-operation"
 	pathOperatorsLifecycle      = "/operators/workloads/lifecycle"
 	testHeartbeatToken          = "hb-1"
+	testHeartbeatTokenNew       = "hb-new"
 	testDeployTokenValue        = "dp-1"
 	testDeployTokenRotated      = "dp-new"
 	testOperatorName            = "op-1"
@@ -50,6 +51,8 @@ const (
 	testTemplateID              = "nginx"
 	testSubdomain               = "demo-sub"
 	testClaimWorkloadID         = "wl-1"
+	testTagGPU                  = "gpu"
+	testTagOnPrem               = "on-prem"
 
 	testBearerHeartbeatToken = "Bearer " + testHeartbeatToken
 )
@@ -209,11 +212,11 @@ func TestRegisterSendsNonEmptyTags(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, Tags: []string{"gpu", "on-prem"}})
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, Tags: []string{testTagGPU, testTagOnPrem}})
 	if _, err := c.Register(context.Background()); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if req.Tags == nil || len(*req.Tags) != 2 || (*req.Tags)[0] != "gpu" || (*req.Tags)[1] != "on-prem" {
+	if req.Tags == nil || len(*req.Tags) != 2 || (*req.Tags)[0] != testTagGPU || (*req.Tags)[1] != testTagOnPrem {
 		t.Fatalf("expected tags to be forwarded, got %+v", req.Tags)
 	}
 }

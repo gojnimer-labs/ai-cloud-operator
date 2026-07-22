@@ -145,13 +145,17 @@ func TestLoadOrRegisterReusesTokenWhenCatalogHashMatches(t *testing.T) {
 		case pathOperatorsRegister:
 			registerCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-new", DeployToken: testDeployTokenRotated})
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatTokenNew, DeployToken: testDeployTokenRotated})
 		}
 	}))
 	defer srv.Close()
 
 	store := newFakeTokenStore(t)
-	if err := store.Save(context.Background(), tokenstore.Tokens{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue, CatalogHash: catalog.Hash()}); err != nil {
+	// TagsFingerprint matches what Client.TagsFingerprint() returns for the
+	// Config below's nil Tags — otherwise this seeded token would itself
+	// look stale by the new version/tags comparison and this "unchanged,
+	// pure reuse" test would spuriously re-register.
+	if err := store.Save(context.Background(), tokenstore.Tokens{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue, CatalogHash: catalog.Hash(), TagsFingerprint: tagsFingerprintUnset}); err != nil {
 		t.Fatalf("seeding store: %v", err)
 	}
 	enrollment, _ := newFakeEnrollmentWatcher(t)
@@ -186,7 +190,7 @@ func TestLoadOrRegisterReregistersWhenCatalogHashDiffers(t *testing.T) {
 		case pathOperatorsRegister:
 			registerCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: "hb-new", DeployToken: testDeployTokenRotated})
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatTokenNew, DeployToken: testDeployTokenRotated})
 		}
 	}))
 	defer srv.Close()
@@ -215,6 +219,97 @@ func TestLoadOrRegisterReregistersWhenCatalogHashDiffers(t *testing.T) {
 	}
 	if persisted.CatalogHash != catalog.Hash() {
 		t.Fatalf("expected the freshly persisted CatalogHash to match the current catalog, got %q", persisted.CatalogHash)
+	}
+}
+
+// TestLoadOrRegisterReregistersWhenVersionDiffers pins the fix for a real
+// gap: a persisted token whose CatalogHash still matches (the catalog
+// package is untouched by a version bump) previously meant the operator
+// silently kept reusing its old registration forever, even after being
+// redeployed at a new OPERATOR_VERSION/Chart.AppVersion — Convex's fleet
+// table would show a stale version indefinitely. loadOrRegister must
+// compare OperatorVersion too, independent of CatalogHash.
+func TestLoadOrRegisterReregistersWhenVersionDiffers(t *testing.T) {
+	var registerCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case pathOperatorsHeartbeat:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+		case pathOperatorsRegister:
+			registerCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatTokenNew, DeployToken: testDeployTokenRotated})
+		}
+	}))
+	defer srv.Close()
+
+	store := newFakeTokenStore(t)
+	if err := store.Save(context.Background(), tokenstore.Tokens{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue, CatalogHash: catalog.Hash(), OperatorVersion: "v1.0.0", TagsFingerprint: tagsFingerprintUnset}); err != nil {
+		t.Fatalf("seeding store: %v", err)
+	}
+	enrollment, _ := newFakeEnrollmentWatcher(t)
+	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, Version: "v1.1.0"})
+	runnable := NewRunnable(RunnableConfig{Client: convexClient, Store: store, Enrollment: enrollment, HeartbeatInterval: time.Hour})
+
+	if err := runnable.loadOrRegister(context.Background()); err != nil {
+		t.Fatalf("loadOrRegister: %v", err)
+	}
+	if registerCalls.Load() != 1 {
+		t.Fatalf("expected exactly 1 re-registration when operator version differs, got %d", registerCalls.Load())
+	}
+
+	persisted, ok, err := store.Load(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("expected freshly-registered token to be persisted, ok=%v err=%v", ok, err)
+	}
+	if persisted.OperatorVersion != "v1.1.0" {
+		t.Fatalf("expected the freshly persisted OperatorVersion to be v1.1.0, got %q", persisted.OperatorVersion)
+	}
+}
+
+// TestLoadOrRegisterReregistersWhenTagsDiffer is TestLoadOrRegister
+// ReregistersWhenVersionDiffers's twin for OPERATOR_TAGS: editing it alone
+// (no catalog or version change) must still trigger a fresh Register call,
+// or Convex would never see the new tags.
+func TestLoadOrRegisterReregistersWhenTagsDiffer(t *testing.T) {
+	var registerCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case pathOperatorsHeartbeat:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+		case pathOperatorsRegister:
+			registerCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(registerResponse{HeartbeatToken: testHeartbeatTokenNew, DeployToken: testDeployTokenRotated})
+		}
+	}))
+	defer srv.Close()
+
+	store := newFakeTokenStore(t)
+	if err := store.Save(context.Background(), tokenstore.Tokens{HeartbeatToken: testHeartbeatToken, DeployToken: testDeployTokenValue, CatalogHash: catalog.Hash(), TagsFingerprint: "set:" + testTagGPU}); err != nil {
+		t.Fatalf("seeding store: %v", err)
+	}
+	enrollment, _ := newFakeEnrollmentWatcher(t)
+	convexClient := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName, Tags: []string{testTagGPU, testTagOnPrem}})
+	runnable := NewRunnable(RunnableConfig{Client: convexClient, Store: store, Enrollment: enrollment, HeartbeatInterval: time.Hour})
+
+	if err := runnable.loadOrRegister(context.Background()); err != nil {
+		t.Fatalf("loadOrRegister: %v", err)
+	}
+	if registerCalls.Load() != 1 {
+		t.Fatalf("expected exactly 1 re-registration when tags differ, got %d", registerCalls.Load())
+	}
+
+	persisted, ok, err := store.Load(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("expected freshly-registered token to be persisted, ok=%v err=%v", ok, err)
+	}
+	if persisted.TagsFingerprint != "set:gpu,on-prem" {
+		t.Fatalf("expected the freshly persisted TagsFingerprint to be %q, got %q", "set:gpu,on-prem", persisted.TagsFingerprint)
 	}
 }
 
