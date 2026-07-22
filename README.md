@@ -97,10 +97,20 @@ spec:
 
 ## Releases
 
-Every merge to `main` gets its own `vX.Y.Z` tag automatically
-(`.github/workflows/auto-tag.yml`), which is what triggers publishing the
-image + `install.yaml` (`publish.yml`) and the Helm chart
-(`helm-release.yml`). There's no manual tagging step.
+Any branch other than `main`/`development` auto-opens a PR into `development`
+(`auto-pr.yml`). Every push to `development` builds and publishes a real,
+pullable prerelease image + chart tagged `vX.Y.Z-dev.<sha>` (no GitHub
+Release, no `latest`), and opens or updates a `chore: release vX.Y.Z`
+promotion PR into `main` with a changelog (`promote.yml`). Merging that PR
+(as a real merge commit — squash/rebase isn't supported here) promotes the
+exact same image by digest to the stable `vX.Y.Z` tag and `latest` — it's
+never rebuilt — repackages the chart under that version, and cuts the
+`vX.Y.Z` git tag and GitHub Release with `install.yaml` attached.
+
+The version bump (`vX.Y.(Z+1)` vs. a minor/major bump) is computed from
+Conventional Commits since the last release
+(`.github/actions/compute-next-version`) rather than always being a patch.
+There's no manual tagging step at any stage.
 
 ## Development
 

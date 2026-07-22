@@ -4,13 +4,13 @@ on:
   push:
     tags:
       - "v*"
-  # Lets auto-tag.yml invoke this directly with the tag it just pushed — see
-  # publish.yml's workflow_call comment for why a tag pushed by auto-tag.yml
+  # Lets promote.yml invoke this directly with the tag it just pushed — see
+  # publish.yml's workflow_call comment for why a tag pushed by promote.yml
   # itself never triggers the `on: push: tags` matcher above.
   workflow_call:
     inputs:
       tag:
-        description: "vX.Y.Z tag to package the chart under (set by auto-tag.yml). Falls back to the triggering push's tag when unset (a direct `git push origin vX.Y.Z` bypassing auto-tag.yml)."
+        description: "vX.Y.Z tag to package the chart under (set by promote.yml). Falls back to the triggering push's tag when unset (a direct `git push origin vX.Y.Z` bypassing promote.yml)."
         required: false
         type: string
 
@@ -39,7 +39,7 @@ jobs:
 
       # Prefers the explicit workflow_call input; falls back to the
       # triggering ref for a direct `git push origin vX.Y.Z` that bypasses
-      # auto-tag.yml entirely.
+      # promote.yml entirely.
       - name: Resolve version
         id: version
         run: |

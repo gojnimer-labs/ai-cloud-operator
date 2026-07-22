@@ -1,0 +1,244 @@
+name: Promote
+
+# Promotion flow: any branch -> development (auto-pr.yml) -> main (this
+# workflow's promote-pr job opens that PR; merging it is what actually cuts
+# the release). Runs on push to either branch — development builds and
+# publishes a real prerelease image+chart so there's something concrete to
+# test before promotion; main promotes those exact bits to the stable
+# version rather than rebuilding them (see promote-image below for why).
+on:
+  push:
+    branches: [main, development]
+
+concurrency:
+  group: promote-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  version:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      changelog: ${{ steps.compute.outputs.changelog }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compute next version
+        id: compute
+        uses: ./.github/actions/compute-next-version
+
+      # development gets a prerelease suffix built from its own HEAD's FULL
+      # sha (not abbreviated) — main's promote-image job later has to
+      # reconstruct this exact string from `git rev-parse HEAD^2`, so any
+      # abbreviation here would make that reconstruction ambiguous.
+      - name: Resolve tag for this branch
+        id: resolve
+        run: |
+          if [ "${{ github.ref_name }}" = "development" ]; then
+            sha="$(git rev-parse HEAD)"
+            echo "tag=${{ steps.compute.outputs.tag }}-dev.${sha}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ steps.compute.outputs.version }}-dev.${sha}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ steps.compute.outputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ steps.compute.outputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Pushed first, before anything is published under this name, so the tag
+  # already exists by the time publish.yml's release job (called from
+  # finalize-release below) attaches the GitHub Release to it.
+  tag-if-main:
+    needs: version
+    if: github.ref_name == 'main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          # Deliberately NOT persist-credentials: false (unlike this repo's
+          # other checkouts) — this job's whole purpose is `git push` a tag,
+          # which needs the checkout-configured GITHUB_TOKEN credential.
+
+      - name: Push the release tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ needs.version.outputs.tag }}" -m "Release ${{ needs.version.outputs.tag }}"
+          git push origin "${{ needs.version.outputs.tag }}"
+
+  # Real build+push under the prerelease tag — this is the ONE build of the
+  # image that will ever happen for this release; main's promote-image job
+  # retags these exact bits rather than building again.
+  build-dev-image:
+    needs: version
+    if: github.ref_name == 'development'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+      create_release: false
+    secrets: inherit
+
+  # Chart packaging isn't a build (no compile step, just a deterministic tar
+  # of already-rendered, already-diff-checked YAML) so unlike the image it's
+  # fine to redo at promotion time too (see promote-chart) — this call is
+  # only about giving development its own real, pullable prerelease chart.
+  build-dev-chart:
+    needs: version
+    if: github.ref_name == 'development'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/helm-release.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+    secrets: inherit
+
+  # Retags the exact image digest already built and published from
+  # development under the stable version and `latest` — never rebuilds.
+  # Rebuilding here would reintroduce the reproducibility gap (mutable base
+  # image tag, different builder cache state) that promoting by reference
+  # exists to close; a second `docker buildx build` from the same commit is
+  # *usually* identical but isn't guaranteed to be.
+  promote-image:
+    needs: [version, tag-if-main]
+    if: github.ref_name == 'main'
+    permissions:
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # HEAD^2 is the tip of `development` the promotion PR merged — only
+      # present because main's branch ruleset requires that PR to land via a
+      # real merge commit (squash/rebase would collapse this parent away).
+      # Reconstructing the dev build's tag from it, instead of passing state
+      # between workflow runs, is the only option: this run and the
+      # `development` run that built the image are two separate pushes with
+      # no shared state otherwise (same reasoning compute-next-version
+      # already applies to recomputing the version number itself, extended
+      # here to recovering the digest's lookup key).
+      - name: Resolve the development build being promoted
+        id: source
+        run: |
+          if ! dev_sha="$(git rev-parse HEAD^2 2>/dev/null)"; then
+            echo "::error::HEAD has no second parent — this push to main wasn't a merge commit from the promotion PR (was it squash- or rebase-merged?). Can't determine which development build to promote." >&2
+            exit 1
+          fi
+          echo "tag=${{ needs.version.outputs.version }}-dev.${dev_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Promote image by digest (no rebuild)
+        run: |
+          src="ghcr.io/${{ github.repository }}:${{ steps.source.outputs.tag }}"
+          crane tag "$src" "${{ needs.version.outputs.version }}"
+          crane tag "$src" "latest"
+
+  # A fresh `helm package --version` repackage, same as every other chart
+  # release — see build-dev-chart above for why this one carries none of the
+  # image's rebuild risk.
+  promote-chart:
+    needs: [version, tag-if-main]
+    if: github.ref_name == 'main'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/helm-release.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+    secrets: inherit
+
+  # build_image: false — the image is already sitting under the stable tag
+  # from promote-image above, so this call exists purely to run publish.yml's
+  # release job: build install.yaml and cut the GitHub Release.
+  finalize-release:
+    needs: [version, promote-image, promote-chart]
+    if: github.ref_name == 'main'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+      build_image: false
+      create_release: true
+    secrets: inherit
+
+  # Only reachable once development's own prerelease build succeeded — a
+  # broken dev build never gets a promotion PR opened or updated for it.
+  promote-pr:
+    needs: [version, build-dev-image, build-dev-chart]
+    if: success() && github.ref_name == 'development'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Open or update promotion PR
+        env:
+          # A PR opened with the default GITHUB_TOKEN shows as authored by
+          # github-actions[bot], which GitHub holds for manual approval
+          # before pull_request-triggered workflows run on it — same
+          # reasoning as auto-pr.yml. Nothing currently gates on a check
+          # running against this specific PR (main's required check comes
+          # from the push-triggered build-dev-image run, not a pull_request
+          # event), but using the same real-user PAT here too keeps this PR
+          # from behaving differently everywhere a bot-authored PR looks
+          # different (review UI, CODEOWNERS routing, etc).
+          GH_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
+          NEXT_TAG: ${{ needs.version.outputs.tag }}
+          CHANGELOG: ${{ needs.version.outputs.changelog }}
+        run: |
+          title="chore: release ${NEXT_TAG}"
+          body_file="$(mktemp)"
+          {
+            echo "Automated promotion PR — merging this promotes the already-published ${NEXT_TAG} prerelease image/chart to a stable release (no rebuild)."
+            echo
+            echo "## What's included"
+            echo
+            echo "$CHANGELOG"
+          } > "$body_file"
+
+          # Edit in place if a promotion PR is already open, rather than a
+          # no-op — more commits routinely land on development before
+          # someone gets to merging the promotion PR, and each one can
+          # change the proposed version (e.g. a feat landing after only
+          # fixes were queued bumps minor instead of patch) and always
+          # changes the changelog, so the open PR needs to stay in sync.
+          existing_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head development --base main --state open --json number --jq '.[0].number // empty')"
+
+          if [ -n "$existing_number" ]; then
+            gh pr edit "$existing_number" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$body_file"
+            echo "Updated PR #$existing_number: $title"
+            exit 0
+          fi
+
+          if ! gh pr create --repo "$GITHUB_REPOSITORY" --head development --base main \
+            --title "$title" --body-file "$body_file"; then
+            echo "No PR created (likely no commits ahead of main yet)."
+          fi

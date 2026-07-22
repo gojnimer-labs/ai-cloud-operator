@@ -1,0 +1,76 @@
+name: Auto PR
+
+# Promotion flow: any branch -> development -> main. Every push to a branch
+# other than main/development opens (or reuses) a PR into development. The
+# development -> main leg lives in promote.yml instead (its promote-pr job),
+# gated on that push's development build actually succeeding — see the
+# comment there.
+on:
+  push:
+    branches-ignore:
+      - main
+      - development
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — need origin/development to list everything this
+      # branch is ahead by, for the PR body.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Open or update PR into development
+        env:
+          # A PR opened with the default GITHUB_TOKEN shows as authored by
+          # github-actions[bot], which GitHub holds for manual approval
+          # before any pull_request-triggered workflow (lint.yml/test.yml)
+          # runs on it — the PR just sits with zero checks until someone
+          # clicks "Approve and run". AUTO_PR_TOKEN is a real-user PAT
+          # (fine-grained, scoped to this repo, Pull requests: read/write
+          # only), so the PR shows as opened by a real account instead and
+          # never hits that gate.
+          GH_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
+        run: |
+          head="${{ github.ref_name }}"
+          base="development"
+
+          # Title is the branch name, not a commit message: a branch
+          # routinely carries several commits (wip, fixups, the real change),
+          # and picking just the latest one's subject as the title used to be
+          # actively misleading about what the PR actually contains. The
+          # branch name is always accurate regardless of commit count.
+          title="$head"
+
+          git fetch origin "$base" --quiet
+          body_file="$(mktemp)"
+          {
+            echo "Automated PR: $head -> $base."
+            echo
+            echo "## Commits"
+            echo
+            # --no-merges + tformat (not format): format: drops the trailing
+            # newline after the LAST entry, which makes a plain `while read`
+            # silently lose that final line (see compute-next-version's same
+            # comment) — tformat always terminates every entry.
+            git log --reverse --no-merges --pretty=tformat:'- %s (%h)' "origin/${base}..HEAD"
+          } > "$body_file"
+
+          existing_number="$(gh pr list --head "$head" --base "$base" --state open --json number --jq '.[0].number // empty')"
+
+          if [ -n "$existing_number" ]; then
+            gh pr edit "$existing_number" --title "$title" --body-file "$body_file"
+            echo "Updated PR #$existing_number: $title"
+            exit 0
+          fi
+
+          if ! gh pr create --head "$head" --base "$base" --title "$title" --body-file "$body_file"; then
+            echo "No PR created (likely no commits ahead of $base yet)."
+          fi

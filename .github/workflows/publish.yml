@@ -1,25 +1,33 @@
 name: Publish
 
 on:
-  # No `branches: [main]` trigger here — auto-tag.yml fires on every main
+  # No `branches: [main]` trigger here — promote.yml fires on every main
   # push and calls this workflow via workflow_call below, so a direct
   # branch-push trigger here would double-build the image for the same
   # commit. `tags: v*` stays as a fallback for a direct `git push origin
-  # vX.Y.Z` that bypasses auto-tag.yml entirely.
+  # vX.Y.Z` that bypasses promote.yml entirely.
   push:
     tags:
       - "v*"
-  # Lets auto-tag.yml invoke this directly with the tag it just pushed —
+  # Lets promote.yml invoke this directly with the tag it just pushed —
   # necessary because a tag pushed with the default GITHUB_TOKEN (as
-  # auto-tag.yml's push is) does NOT trigger other workflows' `on: push:
+  # promote.yml's push is) does NOT trigger other workflows' `on: push:
   # tags` matchers. That's an intentional GitHub Actions anti-recursion
   # guard, not something fixable by changing the trigger syntax here.
   workflow_call:
     inputs:
       tag:
-        description: "vX.Y.Z tag this build is for (set by auto-tag.yml). Leave unset for a plain branch build — produces latest+sha image tags only, no versioned tag and no install.yaml release asset."
+        description: "vX.Y.Z tag this build is for (set by promote.yml). Leave unset for a plain branch build — produces latest+sha image tags only, no versioned tag and no install.yaml release asset."
         required: false
         type: string
+      build_image:
+        description: "Whether to actually build+push the image. False when promote.yml calls this purely to cut the GitHub Release for a stable tag whose image was already published (as a prerelease build) and promoted by digest — see promote.yml's promote-image job. Compared with `!= false` everywhere below so a direct push trigger (inputs undefined, not a workflow_call) still builds as before."
+        required: false
+        type: boolean
+      create_release:
+        description: "Whether to create a GitHub Release + attach install.yaml once the image is tagged. False for promote.yml's prerelease/dev builds, which publish a real versioned image but shouldn't clutter GitHub Releases. Compared with `!= false` so a direct push trigger still gets a release as before."
+        required: false
+        type: boolean
 
 permissions: {}
 
@@ -43,7 +51,7 @@ jobs:
       # below by both the image tag list and (if non-empty) the release job.
       # Prefers the explicit workflow_call input; falls back to inspecting
       # the actual triggering ref for a direct `git push origin vX.Y.Z`
-      # (bypassing auto-tag.yml entirely) or a plain branch push (empty).
+      # (bypassing promote.yml entirely) or a plain branch push (empty).
       - name: Resolve version tag
         id: version
         run: |
@@ -55,6 +63,7 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
+        if: inputs.build_image != false
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # Patches the builder stage's FROM to --platform=$BUILDPLATFORM (same
@@ -65,10 +74,12 @@ jobs:
       # scratch) under full QEMU emulation for arm64, which is dramatically
       # slower and prone to hanging.
       - name: Generate cross-compilation Dockerfile
+        if: inputs.build_image != false
         run: |
           sed -e '1 s/\(^FROM\)/FROM --platform=${BUILDPLATFORM}/; t' -e ' 1,// s//FROM --platform=${BUILDPLATFORM}/' Dockerfile > Dockerfile.cross
 
       - name: Log in to GHCR
+        if: inputs.build_image != false
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
@@ -76,6 +87,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute image tags
+        if: inputs.build_image != false
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
@@ -86,6 +98,7 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.tag != '' }}
 
       - name: Build and push
+        if: inputs.build_image != false
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -104,7 +117,7 @@ jobs:
 
   release:
     needs: publish
-    if: needs.publish.outputs.tag != ''
+    if: needs.publish.outputs.tag != '' && inputs.create_release != false
     permissions:
       contents: write
     name: Attach consolidated install.yaml to the release
