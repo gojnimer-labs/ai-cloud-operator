@@ -53,6 +53,21 @@ type Config struct {
 	OperatorName     string
 	ExternalURL      string
 	Metadata         map[string]any
+	// Version is this operator build's own version string (see cmd/main.go's
+	// Version var, set via -ldflags at build time). Reported on every
+	// Register call so Convex's fleet table can display it — never gates
+	// anything server-side.
+	Version string
+	// Tags are this operator's user-configured tags (OPERATOR_TAGS env var,
+	// see cmd/main.go), reported on every Register call. Once Convex sees a
+	// non-nil Tags on a register request — even an empty slice — it locks
+	// that operator's tags against further edits from the admin UI; only a
+	// fresh Register call can change them again (convex/operators/
+	// mutations.ts's claim/updateCluster). A nil Tags here means "this
+	// install never set OPERATOR_TAGS," which is intentionally
+	// indistinguishable from "not reported" so tags admin-set through
+	// Convex directly aren't clobbered on every restart.
+	Tags []string
 }
 
 // Client is a thin HTTP client for the two Convex operator endpoints.
@@ -93,6 +108,16 @@ type registerRequest struct {
 	// at claim time to verify the claiming operator actually supports the
 	// exact templateId+templateVersion a workload row was requested against.
 	Catalog []catalog.Template `json:"catalog"`
+	// OperatorVersion is display-only (see Config.Version's doc comment).
+	OperatorVersion string `json:"operatorVersion,omitempty"`
+	// Tags is a pointer, not a plain slice: encoding/json's omitempty on a
+	// plain slice drops it whenever len == 0, which would silently discard
+	// an explicit "report zero tags" the same as "OPERATOR_TAGS was never
+	// set" — but Convex's claim mutation treats those as different signals
+	// (see Config.Tags's doc comment). omitempty on a pointer instead keys
+	// off nil-ness alone, so a non-nil pointer to an empty slice still
+	// marshals as "tags":[] while a nil pointer omits the field entirely.
+	Tags *[]string `json:"tags,omitempty"`
 }
 
 type registerResponse struct {
@@ -104,12 +129,19 @@ type registerResponse struct {
 // enrollment secret, returning the pair of tokens Convex minted for this
 // operator.
 func (c *Client) Register(ctx context.Context) (tokenstore.Tokens, error) {
+	var tags *[]string
+	if c.config.Tags != nil {
+		tags = &c.config.Tags
+	}
+
 	body, err := json.Marshal(registerRequest{
 		Name:             c.config.OperatorName,
 		ExternalURL:      c.config.ExternalURL,
 		EnrollmentSecret: c.config.EnrollmentSecret,
 		Metadata:         c.config.Metadata,
 		Catalog:          catalog.List(),
+		OperatorVersion:  c.config.Version,
+		Tags:             tags,
 	})
 	if err != nil {
 		return tokenstore.Tokens{}, fmt.Errorf("marshaling register request: %w", err)

@@ -67,6 +67,13 @@ metricsService:
       protocol: TCP
       targetPort: 8443
   type: ClusterIP
+# Not one of helmify's auto-derived params.* keys (config/manager/params.env
+# leaves OPERATOR_TAGS commented out, so it never reaches the ConfigMap
+# helmify reads from — see that file's own comment). Added here instead,
+# and wired directly as a plain env value (not a configMapKeyRef) in
+# templates/deployment.yaml, since a Helm install configures this at
+# install/upgrade time via --set/values.yaml rather than editing a
+# generated file.
 params:
   convexBaseUrl: ""
   heartbeatInterval: 30s
@@ -74,6 +81,14 @@ params:
   operatorExternalUrl: ""
   operatorName: ""
   workloadNamespace: ai-cloud-workloads
+  # Comma-separated, e.g. "gpu,on-prem". Once set to a non-empty value,
+  # Convex locks this operator's tags against admin-UI edits — see
+  # convexclient.Config.Tags's doc comment. Left empty by default (the env
+  # var is omitted entirely in that case — see templates/deployment.yaml)
+  # so a fresh install keeps its tags manageable from the Convex admin UI.
+  # (Reporting an explicit "zero tags, but locked" isn't expressible from
+  # this chart — use the kustomize install's OPERATOR_TAGS="" for that.)
+  operatorTags: ""
 serviceAccount:
   annotations: {}
   automount: true

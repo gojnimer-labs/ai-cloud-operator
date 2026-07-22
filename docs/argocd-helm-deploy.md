@@ -52,6 +52,11 @@ Optional:
 | `ingress.tls.secretName` | `<release>-api-tls` | Only relevant if `ingress.tls.enabled`. |
 | `crds.enabled` | `true` | The Workload CRD ships as a regular template (not Helm's native `crds/` dir) so schema changes roll out on every ArgoCD sync, carrying a `helm.sh/resource-policy: keep` annotation so `helm uninstall`/pruning still can't delete it. |
 | `controllerManager.manager.image.tag` | `""` (→ `.Chart.AppVersion`) | Only set to pin an older image than the chart version. |
+| `params.operatorTags` | `""` | Comma-separated (e.g. `gpu,on-prem`), reported to Convex on every register call. Setting it locks this operator's tags against Convex admin-UI edits — only a fresh register call (a rollout with the value changed) can change them again. Leave empty to keep managing tags from the admin UI instead. |
+
+`OPERATOR_VERSION` has no corresponding value — the chart sets it
+automatically from `.Chart.AppVersion` on every install, so there's nothing
+to configure.
 
 **Release name matters for one thing**: several resource names get long
 static suffixes (e.g. `-controller-manager-metrics-service`), and Kubernetes

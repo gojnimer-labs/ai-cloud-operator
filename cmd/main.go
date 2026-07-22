@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -317,6 +318,31 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 		heartbeatInterval = parsed
 	}
 
+	// OPERATOR_VERSION is optional — display-only on Convex's fleet table
+	// (see convexclient.Config.Version's doc comment). Left unset in the
+	// kustomize path; the Helm chart sources it from .Chart.AppVersion, so
+	// a Helm install reports its version automatically with no manual
+	// wiring.
+	operatorVersion := os.Getenv("OPERATOR_VERSION")
+
+	// OPERATOR_TAGS is a comma-separated list, e.g. "gpu,on-prem". Presence
+	// of the env var (LookupEnv), not truthiness of its value, decides
+	// whether this operator reports tags at all — an unset var leaves
+	// admin-set tags in Convex alone, while a set-but-empty value is a
+	// deliberate "I have no tags" report that still locks them against
+	// admin edits (see convexclient.Config.Tags's doc comment).
+	var operatorTags []string
+	if raw, ok := os.LookupEnv("OPERATOR_TAGS"); ok {
+		operatorTags = []string{}
+		if raw != "" {
+			for tag := range strings.SplitSeq(raw, ",") {
+				if trimmed := strings.TrimSpace(tag); trimmed != "" {
+					operatorTags = append(operatorTags, trimmed)
+				}
+			}
+		}
+	}
+
 	// One WorkloadCreator + one WorkloadDestroyer, shared between the
 	// manual /workloads* HTTP path (api.New, still reachable for
 	// local/manual testing) and the claim-consumption loop
@@ -343,6 +369,8 @@ func setupConvexIntegration(ctx context.Context, mgr ctrl.Manager) (*convexclien
 			EnrollmentSecret: enrollmentSecret,
 			OperatorName:     operatorName,
 			ExternalURL:      operatorExternalURL,
+			Version:          operatorVersion,
+			Tags:             operatorTags,
 		}),
 		Store:             tokenstore.New(mgr.GetClient(), podNamespace),
 		Enrollment:        enrollment,
