@@ -31,7 +31,6 @@ controllerManager:
       # Only set this to pin an instance to an older image than the chart
       # version it's running.
       tag: ""
-    imagePullPolicy: Always
     resources:
       limits:
         cpu: 500m
@@ -39,6 +38,15 @@ controllerManager:
       requests:
         cpu: 10m
         memory: 64Mi
+    # NOT in config/manager/manager.yaml — that file is also what `make
+    # deploy`/the e2e test's kustomize flow uses, and `kind load
+    # docker-image` only works with the locally-loaded image if the
+    # kubelet is willing to skip a registry check (IfNotPresent/Never).
+    # Always here forces a real pull every time, which is what makes a
+    # floating tag (e.g. "dev", tracked by an ArgoCD Application) actually
+    # fetch new bits on a pod restart instead of reusing whatever image
+    # already happens to be cached on the node.
+    imagePullPolicy: Always
   maxUnavailable: 1
   nodeSelector: {}
   podSecurityContext:

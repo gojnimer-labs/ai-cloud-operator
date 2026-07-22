@@ -12,6 +12,15 @@ controllerManager:
       # Only set this to pin an instance to an older image than the chart
       # version it's running.
       tag: ""
+    # NOT in config/manager/manager.yaml — that file is also what `make
+    # deploy`/the e2e test's kustomize flow uses, and `kind load
+    # docker-image` only works with the locally-loaded image if the
+    # kubelet is willing to skip a registry check (IfNotPresent/Never).
+    # Always here forces a real pull every time, which is what makes a
+    # floating tag (e.g. "dev", tracked by an ArgoCD Application) actually
+    # fetch new bits on a pod restart instead of reusing whatever image
+    # already happens to be cached on the node.
+    imagePullPolicy: Always
   # helmify's PodDisruptionBudget template (templates/controller-manager.yaml)
   # unconditionally references .Values.controllerManager.minAvailable even
   # though config/manager/poddisruptionbudget.yaml only sets maxUnavailable —
