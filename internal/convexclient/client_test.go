@@ -232,7 +232,7 @@ func TestHeartbeatSuccess(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil)
+	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil, nil)
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestHeartbeatDecodesClaimableAndPendingOperations(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil)
+	claimable, pendingOps, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil, nil)
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestHeartbeatSendsResourceCapacityWhenSnapshotProvided(t *testing.T) {
 
 	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
 	snap := &capacity.Snapshot{AllocatableMilliCPU: 4000, AllocatableMemoryBytes: 8 * 1024 * 1024 * 1024, UsedMilliCPU: 1000, UsedMemoryBytes: 1024 * 1024 * 1024}
-	if _, _, err := c.Heartbeat(context.Background(), testHeartbeatToken, snap); err != nil {
+	if _, _, err := c.Heartbeat(context.Background(), testHeartbeatToken, snap, nil); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 	if got.ResourceCapacity == nil {
@@ -289,6 +289,66 @@ func TestHeartbeatSendsResourceCapacityWhenSnapshotProvided(t *testing.T) {
 	}
 	if got.ResourceCapacity.AllocatableMilliCPU != snap.AllocatableMilliCPU || got.ResourceCapacity.UsedMemoryBytes != snap.UsedMemoryBytes {
 		t.Fatalf("unexpected resourceCapacity payload: %+v", got.ResourceCapacity)
+	}
+	if got.ResourceCapacity.ClusterUsedMilliCPU != nil || got.ResourceCapacity.NodesReporting != nil {
+		t.Fatalf("expected live-usage fields to stay nil when usage is nil, got: %+v", got.ResourceCapacity)
+	}
+}
+
+// TestHeartbeatSendsLiveUsageWhenProvided is the concrete proof that a
+// non-nil usage snapshot populates the independently-optional live-usage
+// fields (ClusterUsed*/ManagedUsed*/NodesReporting/NodesTotal) alongside the
+// existing requests-based ones, without disturbing them.
+func TestHeartbeatSendsLiveUsageWhenProvided(t *testing.T) {
+	var got heartbeatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"claimable": [], "pendingOperations": []}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
+	snap := &capacity.Snapshot{AllocatableMilliCPU: 4000, AllocatableMemoryBytes: 8 * 1024 * 1024 * 1024, UsedMilliCPU: 1000, UsedMemoryBytes: 1024 * 1024 * 1024}
+	usage := &metrics.UsageSnapshot{
+		ClusterUsedMilliCPU:    2500,
+		ClusterUsedMemoryBytes: 4 * 1024 * 1024 * 1024,
+		ManagedUsedMilliCPU:    900,
+		ManagedUsedMemoryBytes: 512 * 1024 * 1024,
+		NodesReporting:         4,
+		NodesTotal:             5,
+	}
+	if _, _, err := c.Heartbeat(context.Background(), testHeartbeatToken, snap, usage); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if got.ResourceCapacity == nil {
+		t.Fatalf("expected resourceCapacity to be sent")
+	}
+	rc := got.ResourceCapacity
+	if rc.ClusterUsedMilliCPU == nil || *rc.ClusterUsedMilliCPU != usage.ClusterUsedMilliCPU {
+		t.Fatalf("unexpected ClusterUsedMilliCPU: %+v", rc.ClusterUsedMilliCPU)
+	}
+	if rc.ClusterUsedMemoryBytes == nil || *rc.ClusterUsedMemoryBytes != usage.ClusterUsedMemoryBytes {
+		t.Fatalf("unexpected ClusterUsedMemoryBytes: %+v", rc.ClusterUsedMemoryBytes)
+	}
+	if rc.ManagedUsedMilliCPU == nil || *rc.ManagedUsedMilliCPU != usage.ManagedUsedMilliCPU {
+		t.Fatalf("unexpected ManagedUsedMilliCPU: %+v", rc.ManagedUsedMilliCPU)
+	}
+	if rc.ManagedUsedMemoryBytes == nil || *rc.ManagedUsedMemoryBytes != usage.ManagedUsedMemoryBytes {
+		t.Fatalf("unexpected ManagedUsedMemoryBytes: %+v", rc.ManagedUsedMemoryBytes)
+	}
+	if rc.NodesReporting == nil || *rc.NodesReporting != usage.NodesReporting {
+		t.Fatalf("unexpected NodesReporting: %+v", rc.NodesReporting)
+	}
+	if rc.NodesTotal == nil || *rc.NodesTotal != usage.NodesTotal {
+		t.Fatalf("unexpected NodesTotal: %+v", rc.NodesTotal)
+	}
+	// Requests-based fields must stay exactly what they were before this
+	// feature existed — usage is purely additive.
+	if rc.AllocatableMilliCPU != snap.AllocatableMilliCPU || rc.UsedMilliCPU != snap.UsedMilliCPU {
+		t.Fatalf("requests-based fields changed unexpectedly: %+v", rc)
 	}
 }
 
@@ -306,7 +366,7 @@ func TestHeartbeatOmitsResourceCapacityWhenSnapshotNil(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-	if _, _, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil); err != nil {
+	if _, _, err := c.Heartbeat(context.Background(), testHeartbeatToken, nil, nil); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 	if strings.Contains(string(gotBody), "resourceCapacity") {
@@ -321,7 +381,7 @@ func TestHeartbeatUnauthorizedMapsToSentinel(t *testing.T) {
 		}))
 
 		c := New(Config{BaseURL: srv.URL, OperatorName: testOperatorName})
-		_, _, err := c.Heartbeat(context.Background(), "stale-token", nil)
+		_, _, err := c.Heartbeat(context.Background(), "stale-token", nil, nil)
 		srv.Close()
 
 		if err != ErrUnauthorized {

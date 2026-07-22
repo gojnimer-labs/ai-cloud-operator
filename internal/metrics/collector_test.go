@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/gojnimer-labs/ai-cloud-operator/internal/labels"
@@ -62,13 +63,26 @@ func fakeKubeletServer(t *testing.T, byNode map[string]nodeStatsSummary) *httpte
 
 func newTestCollector(t *testing.T, server *httptest.Server, pods ...*corev1.Pod) *Collector {
 	t.Helper()
+	objs := make([]client.Object, len(pods))
+	for i, p := range pods {
+		objs[i] = p
+	}
+	return newTestCollectorWithObjects(t, server, objs...)
+}
+
+// newTestCollectorWithObjects is newTestCollector generalized to also seed
+// Nodes — needed for CollectUsage, which (unlike Collect) lists all Nodes
+// cluster-wide rather than only discovering them via a managed pod's
+// spec.nodeName.
+func newTestCollectorWithObjects(t *testing.T, server *httptest.Server, objs ...client.Object) *Collector {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding scheme: %v", err)
 	}
 	builder := fake.NewClientBuilder().WithScheme(scheme)
-	for _, p := range pods {
-		builder = builder.WithObjects(p)
+	for _, o := range objs {
+		builder = builder.WithObjects(o)
 	}
 	fakeClient := builder.Build()
 
@@ -77,6 +91,10 @@ func newTestCollector(t *testing.T, server *httptest.Server, pods ...*corev1.Pod
 		t.Fatalf("building collector: %v", err)
 	}
 	return collector
+}
+
+func fakeNode(name string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
 }
 
 func managedPod(name, nodeName, workloadName string) *corev1.Pod {
@@ -205,5 +223,136 @@ func TestCollectContinuesPastAnUnreachableNode(t *testing.T) {
 		if s.Name != "firefox-ok" {
 			t.Fatalf("expected only firefox-ok's samples, got %q", s.Name)
 		}
+	}
+}
+
+// TestCollectUsageSumsClusterWideAcrossAllNodes confirms ClusterUsedMilliCPU/
+// ClusterUsedMemoryBytes count every Node's own reading, including a node
+// hosting no managed pod at all — the key difference from Collect, which
+// only ever visits nodes a managed pod happens to be scheduled on.
+func TestCollectUsageSumsClusterWideAcrossAllNodes(t *testing.T) {
+	pod := managedPod("firefox-abc12-xyz", "node-with-pod", "firefox-abc12")
+	server := fakeKubeletServer(t, map[string]nodeStatsSummary{
+		"node-with-pod": {
+			Node: &nodeStats{CPU: &cpuStats{UsageNanoCores: uint64Ptr(500_000_000)}, Memory: &memoryStats{WorkingSetBytes: uint64Ptr(1024)}},
+		},
+		"node-empty": {
+			Node: &nodeStats{CPU: &cpuStats{UsageNanoCores: uint64Ptr(200_000_000)}, Memory: &memoryStats{WorkingSetBytes: uint64Ptr(2048)}},
+		},
+	})
+	collector := newTestCollectorWithObjects(t, server, pod, fakeNode("node-with-pod"), fakeNode("node-empty"))
+
+	snap, err := collector.CollectUsage(context.Background())
+	if err != nil {
+		t.Fatalf("CollectUsage: %v", err)
+	}
+	if snap.ClusterUsedMilliCPU != 700 {
+		t.Fatalf("expected ClusterUsedMilliCPU to sum both nodes' readings (500+200), got %d", snap.ClusterUsedMilliCPU)
+	}
+	if snap.ClusterUsedMemoryBytes != 3072 {
+		t.Fatalf("expected ClusterUsedMemoryBytes to sum both nodes' readings (1024+2048), got %d", snap.ClusterUsedMemoryBytes)
+	}
+	if snap.NodesReporting != 2 || snap.NodesTotal != 2 {
+		t.Fatalf("expected 2/2 nodes reporting, got %d/%d", snap.NodesReporting, snap.NodesTotal)
+	}
+}
+
+// TestCollectUsageFiltersManagedUsageByNamespaceAndLabel confirms
+// ManagedUsedMilliCPU/ManagedUsedMemoryBytes only ever count pods in this
+// operator's own namespace+managed-by scope, ignoring another pod on the
+// same node's kubelet response — the same isolation Collect already
+// guarantees for network bytes, now extended to CPU/memory.
+func TestCollectUsageFiltersManagedUsageByNamespaceAndLabel(t *testing.T) {
+	pod := managedPod("firefox-abc12-xyz", testNode, "firefox-abc12")
+	server := fakeKubeletServer(t, map[string]nodeStatsSummary{
+		testNode: {
+			Node: &nodeStats{CPU: &cpuStats{UsageNanoCores: uint64Ptr(1_000_000_000)}, Memory: &memoryStats{WorkingSetBytes: uint64Ptr(4096)}},
+			Pods: []podStats{
+				{
+					PodRef: podReference{Name: "firefox-abc12-xyz", Namespace: testNamespace},
+					CPU:    &cpuStats{UsageNanoCores: uint64Ptr(300_000_000)},
+					Memory: &memoryStats{WorkingSetBytes: uint64Ptr(1500)},
+				},
+				// Unmanaged pod on the same node — must not leak into
+				// ManagedUsed*.
+				{
+					PodRef: podReference{Name: "someone-elses-pod", Namespace: testNamespace},
+					CPU:    &cpuStats{UsageNanoCores: uint64Ptr(900_000_000)},
+					Memory: &memoryStats{WorkingSetBytes: uint64Ptr(9999)},
+				},
+			},
+		},
+	})
+	collector := newTestCollectorWithObjects(t, server, pod, fakeNode(testNode))
+
+	snap, err := collector.CollectUsage(context.Background())
+	if err != nil {
+		t.Fatalf("CollectUsage: %v", err)
+	}
+	if snap.ManagedUsedMilliCPU != 300 {
+		t.Fatalf("expected ManagedUsedMilliCPU to count only the managed pod (300), got %d", snap.ManagedUsedMilliCPU)
+	}
+	if snap.ManagedUsedMemoryBytes != 1500 {
+		t.Fatalf("expected ManagedUsedMemoryBytes to count only the managed pod (1500), got %d", snap.ManagedUsedMemoryBytes)
+	}
+	// The node-level reading is cluster-wide and includes both pods —
+	// unaffected by the managed-pod filter, which only applies to
+	// ManagedUsed*.
+	if snap.ClusterUsedMilliCPU != 1000 {
+		t.Fatalf("expected ClusterUsedMilliCPU to reflect the whole node's reading (1000), got %d", snap.ClusterUsedMilliCPU)
+	}
+}
+
+// TestCollectUsageSkipsUnreachableNodeAndReflectsInNodesReporting confirms a
+// kubelet round-trip failure for one node is best-effort — logged and
+// skipped, not a hard error for the whole call — while NodesReporting vs
+// NodesTotal makes the partial reading visible to callers rather than
+// silently presenting an undercount as authoritative.
+func TestCollectUsageSkipsUnreachableNodeAndReflectsInNodesReporting(t *testing.T) {
+	server := fakeKubeletServer(t, map[string]nodeStatsSummary{
+		"node-healthy": {
+			Node: &nodeStats{CPU: &cpuStats{UsageNanoCores: uint64Ptr(500_000_000)}, Memory: &memoryStats{WorkingSetBytes: uint64Ptr(1024)}},
+		},
+		// node-unreachable deliberately has no handler registered — the fake
+		// server 404s it, simulating a node whose kubelet can't be reached.
+	})
+	collector := newTestCollectorWithObjects(t, server, fakeNode("node-healthy"), fakeNode("node-unreachable"))
+
+	snap, err := collector.CollectUsage(context.Background())
+	if err != nil {
+		t.Fatalf("CollectUsage: %v", err)
+	}
+	if snap.NodesTotal != 2 {
+		t.Fatalf("expected NodesTotal to count both nodes, got %d", snap.NodesTotal)
+	}
+	if snap.NodesReporting != 1 {
+		t.Fatalf("expected NodesReporting to count only the healthy node, got %d", snap.NodesReporting)
+	}
+	if snap.ClusterUsedMilliCPU != 500 {
+		t.Fatalf("expected ClusterUsedMilliCPU to reflect only the healthy node's reading, got %d", snap.ClusterUsedMilliCPU)
+	}
+}
+
+// TestCollectUsageReadsWorkingSetBytesNotUsageBytes is the concrete guard
+// against decoding the wrong memory field: memoryStats intentionally has no
+// UsageBytes field at all, so a fixture where the kubelet also reports a
+// (deliberately different, much larger) usageBytes value alongside
+// workingSetBytes must never influence the result — confirming a future
+// accidental field-name swap would be caught here rather than silently
+// reintroducing the overstated-memory bug this feature exists to fix.
+func TestCollectUsageReadsWorkingSetBytesNotUsageBytes(t *testing.T) {
+	server := fakeKubeletServer(t, map[string]nodeStatsSummary{
+		testNode: {
+			Node: &nodeStats{Memory: &memoryStats{WorkingSetBytes: uint64Ptr(2000)}},
+		},
+	})
+	collector := newTestCollectorWithObjects(t, server, fakeNode(testNode))
+
+	snap, err := collector.CollectUsage(context.Background())
+	if err != nil {
+		t.Fatalf("CollectUsage: %v", err)
+	}
+	if snap.ClusterUsedMemoryBytes != 2000 {
+		t.Fatalf("expected ClusterUsedMemoryBytes to equal workingSetBytes (2000), got %d", snap.ClusterUsedMemoryBytes)
 	}
 }
