@@ -75,6 +75,16 @@ const (
 	linuxserverUID      = "1000"
 	linuxserverTimezone = "Etc/UTC"
 
+	// envPassword names the linuxserver.io web-GUI password env var
+	// firefox/chrome don't use (they have no auth of their own) but
+	// code-server does — shared here anyway since a template + its own
+	// tests both reference the literal, tripping goconst at 3 occurrences.
+	envPassword = "PASSWORD"
+
+	// shShellPath is the interpreter every init/exec script in this package
+	// runs under — 3+ occurrences of the bare literal trips goconst.
+	shShellPath = "/bin/sh"
+
 	paramKeyLogLevel       = "logLevel"
 	logLevelInfo           = "info"
 	logLevelWarn           = "warn"
@@ -182,7 +192,7 @@ chmod -R 755 /config
 `, profilePath)
 
 	return corev1.Container{
-		Command: []string{"/bin/sh", "-c", script},
+		Command: []string{shShellPath, "-c", script},
 		Env: []corev1.EnvVar{
 			{Name: envProfileDownloadURL, Value: profileDownloadURL},
 		},
@@ -272,7 +282,7 @@ tar czf /tmp/backup.tar.gz -C /config "$1" || {
 curl -sf -X PUT --upload-file /tmp/backup.tar.gz "$2"
 rm -f /tmp/backup.tar.gz
 `
-			command := []string{"/bin/sh", "-c", script, "sh", profilePath, uploadURL}
+			command := []string{shShellPath, "-c", script, "sh", profilePath, uploadURL}
 			_, stderr, err := exec.Exec(ctx, pod.Namespace, pod.PodName, containerName, command)
 			if err != nil {
 				return OperationResult{}, fmt.Errorf("backup exec failed: %w (stderr: %s)", err, stderr)

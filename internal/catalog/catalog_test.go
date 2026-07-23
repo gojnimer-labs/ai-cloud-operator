@@ -19,6 +19,7 @@ package catalog
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -108,7 +109,7 @@ func TestEstimatedResourcesMatchesHardcodedBrowserValues(t *testing.T) {
 }
 
 func TestGetReturnsKnownTemplates(t *testing.T) {
-	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome, templateIDWebtop} {
+	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDCodeServer} {
 		if _, ok := Get(id); !ok {
 			t.Fatalf("expected template %q to be registered", id)
 		}
@@ -559,5 +560,108 @@ func TestWebtopUsesDistinctProfileSourceKeyFromBrowsers(t *testing.T) {
 
 	if webtopGroup == "" || webtopGroup == firefoxGroup || webtopGroup == chromeGroup {
 		t.Fatalf("expected webtop's profileName group %q to be distinct and non-empty (firefox=%q chrome=%q)", webtopGroup, firefoxGroup, chromeGroup)
+	}
+}
+
+func TestCodeServerBuildDefaultsWithoutPasswordsOrToken(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved[paramKeyWorkspace] != "/config/workspace" {
+		t.Fatalf("expected default defaultWorkspace, got %v", resolved[paramKeyWorkspace])
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	container := rendered.Containers[0]
+	if container.Name != templateIDCodeServer || container.Image != "lscr.io/linuxserver/code-server:latest" {
+		t.Fatalf("unexpected container name/image: %+v", container)
+	}
+	for _, env := range container.Env {
+		if env.Name == envPassword || env.Name == "SUDO_PASSWORD" || env.Name == "CLAUDE_CODE_OAUTH_TOKEN" {
+			t.Fatalf("did not expect %s to be set when left blank, got %+v", env.Name, container.Env)
+		}
+	}
+	if len(container.Ports) != 1 || container.Ports[0].ContainerPort != codeServerPort || container.Ports[0].Name != portNameHTTP {
+		t.Fatalf("unexpected container ports: %+v", container.Ports)
+	}
+	if len(rendered.ServicePorts) != 1 || rendered.ServicePorts[0].TargetPort.IntVal != codeServerPort {
+		t.Fatalf("unexpected service ports: %+v", rendered.ServicePorts)
+	}
+}
+
+func TestCodeServerBuildAppliesPasswordsWorkspaceAndClaudeToken(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{
+		paramKeyWorkspace:    "/config/project",
+		paramKeyPassword:     "hunter2",
+		paramKeySudoPassword: "sudopw",
+		paramKeyClaudeToken:  "sk-ant-oat-test",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range rendered.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env[envPassword] != "hunter2" || env["SUDO_PASSWORD"] != "sudopw" || env["DEFAULT_WORKSPACE"] != "/config/project" {
+		t.Fatalf("unexpected env: %+v", env)
+	}
+	if env["CLAUDE_CODE_OAUTH_TOKEN"] != "sk-ant-oat-test" {
+		t.Fatalf("expected CLAUDE_CODE_OAUTH_TOKEN to be passed through, got %+v", env)
+	}
+}
+
+// TestCodeServerInstallsClaudeCodeViaInitContainer guards the mechanism this
+// template exists for: the Claude Code CLI must be installed into the
+// shared /config volume (via the official claude.ai installer, the same one
+// registry.coder.com/coder/claude-code's own install script wraps) before
+// code-server starts, regardless of whether a token was supplied — an empty
+// token only skips authentication, never the install itself.
+func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(rendered.InitContainers) != 1 {
+		t.Fatalf("expected exactly one init container, got %d", len(rendered.InitContainers))
+	}
+	init := rendered.InitContainers[0]
+	if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != configVolumeName {
+		t.Fatalf("expected init container to mount the shared config volume, got %+v", init.VolumeMounts)
+	}
+	if len(init.Command) == 0 || !strings.Contains(init.Command[len(init.Command)-1], "claude.ai/install.sh") {
+		t.Fatalf("expected init container command to install Claude Code from claude.ai/install.sh, got %+v", init.Command)
+	}
+}
+
+// TestCodeServerRunsWithNoBuiltInAuthByDefault guards the fix for why this
+// template was reverted once before (see CodeServer's doc comment): its
+// login page must not exist unless the caller explicitly opts in with a
+// password, since this workload's only intended access path is through the
+// operator's own authenticated gateway.
+func TestCodeServerRunsWithNoBuiltInAuthByDefault(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for _, env := range rendered.Containers[0].Env {
+		if env.Name == envPassword || env.Name == "HASHED_PASSWORD" {
+			t.Fatalf("expected no password env vars by default, got %+v", rendered.Containers[0].Env)
+		}
 	}
 }
