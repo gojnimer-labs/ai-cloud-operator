@@ -41,7 +41,11 @@ const (
 
 // codeServerProbe targets codeServerPort — deliberately not browserProbe
 // (see its own doc comment), which is hard-coded to browserHTTPPort for
-// firefox/chrome specifically.
+// firefox/chrome specifically. Plain HTTP, confirmed live: linuxserver/
+// code-server does not speak TLS on this port by default (curl against the
+// pod IP got a clean HTTP/1.1 302; a TLS handshake attempt against the same
+// port failed outright with "wrong version number") — don't set Scheme:
+// HTTPS here without re-verifying that's changed.
 func codeServerProbe(initialDelay int32) *corev1.Probe {
 	return &corev1.Probe{
 		FailureThreshold:    3,
@@ -207,6 +211,37 @@ var CodeServer = Template{
 			InitContainers: []corev1.Container{
 				installClaudeCodeInitContainer(),
 			},
+			// Named "http", plain HTTP — confirmed live (2026-07-23) by
+			// curling the pod IP directly: port codeServerPort answers a
+			// normal HTTP/1.1 302 redirect, and a TLS handshake against the
+			// same port fails outright ("wrong version number"), so it does
+			// NOT speak TLS. Tried naming this "https" first, on the theory
+			// that the K8s API server's services/{name}:{port}/proxy
+			// subresource (which internal/gateway/proxy.go's Handler routes
+			// through) picks HTTP vs HTTPS to the backend by that exact
+			// port-name convention — but a kubectl get --raw against that
+			// same subresource path (bypassing this operator's own gateway
+			// entirely) already returns the full code-server workbench page
+			// correctly on plain "http". So the underlying proxy plumbing
+			// isn't the problem, and this isn't a scheme mismatch.
+			//
+			// The operator's own logs around the actual failed browser
+			// access instead show `httputil: ReverseProxy read error during
+			// body copy: unexpected EOF` — a response getting cut off
+			// mid-stream through internal/gateway/proxy.go's
+			// httputil.ReverseProxy, not anything this template's Build()
+			// controls. code-server's workbench needs WebSocket connections
+			// (terminal, extension host) immediately after the initial page
+			// load; the K8s API server's services/proxy subresource this
+			// gateway proxies through is not designed for that (it's built
+			// for simple request/response HTTP, the same reason
+			// firefox/chrome/webtop's KasmVNC UIs — which don't depend on a
+			// live WebSocket the instant the page loads the same way — don't
+			// hit this). If true, the real fix is in the gateway's proxy
+			// mechanism itself, not in this template — out of scope here
+			// without confirming that's actually the cause and discussing
+			// the approach, since internal/gateway/proxy.go is shared by
+			// every template, not just this one.
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(codeServerPort)},
 			},
