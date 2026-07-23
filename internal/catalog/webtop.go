@@ -48,12 +48,17 @@ var webtopFlavors = []SelectOption{
 	{Value: "ubuntu-xfce", Label: "Ubuntu + XFCE"},
 }
 
-// Webtop deploys a full Linux desktop (KasmVNC) accessible via the operator's
-// gateway — same linuxserver.io PUID/PGID/TZ/config-volume/profile-restore
-// shape as Firefox/Chrome (which are themselves built on this same webtop
-// base image), except the "profile" being restored/backed up is the entire
-// /config home directory rather than one browser's profile subdirectory, so
-// it's passed as "." rather than a browser-specific path.
+// Webtop deploys a full Linux desktop (Selkies —
+// github.com/linuxserver/docker-baseimage-selkies) accessible via the
+// operator's gateway — same linuxserver.io PUID/PGID/TZ/config-volume/
+// profile-restore/FILE_MANAGER_PATH shape as Firefox/Chrome (which are
+// themselves built on this same Selkies base image), except there's no
+// single-application "default URL" concept for a full desktop, so unlike
+// Firefox/Chrome it declares no startURLParameter. The "profile" being
+// restored/backed up is, and always was, the entire /config home directory
+// (passed as "." — Firefox/Chrome now do the same, see their own doc
+// comments on why) rather than one browser's profile subdirectory, since a
+// desktop has no single well-known profile path to narrow it to.
 var Webtop = Template{
 	Build: func(params map[string]any) (Rendered, error) {
 		flavor := paramString(params, "flavor", "latest")
@@ -66,6 +71,7 @@ var Webtop = Template{
 						{Name: envPUID, Value: linuxserverUID},
 						{Name: envPGID, Value: linuxserverUID},
 						{Name: envTZ, Value: linuxserverTimezone},
+						fileManagerPathEnv(),
 					},
 					Image:         "lscr.io/linuxserver/webtop:" + flavor,
 					LivenessProbe: browserProbe(30),

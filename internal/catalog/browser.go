@@ -61,6 +61,28 @@ const (
 	configVolumeName       = "config"
 	envProfileDownloadURL  = "PROFILE_DOWNLOAD_URL"
 
+	// envFileManagerPath is docker-baseimage-selkies's own env var
+	// (https://github.com/linuxserver/docker-baseimage-selkies) for where its
+	// Selkies web UI's file-transfer ("Files") tab reads/writes uploads and
+	// downloads. Every template built on that base image (firefox, chrome,
+	// webtop — code-server and nginx use unrelated, non-Selkies images) sets
+	// it to browserConfigMountPath itself, one level above the unset
+	// default. Confirmed live, 2026-07-23: with FILE_MANAGER_PATH unset, the
+	// tab was rooted at "$browserConfigMountPath/Desktop" — a sibling of
+	// "$browserConfigMountPath/Downloads" (where the desktop's own
+	// XDG_DOWNLOAD_DIR and any in-browser "Save file" dialog actually land
+	// files), so a user could reach one but not the other depending on which
+	// folder they happened to save into. Rooting one level higher, at
+	// browserConfigMountPath itself, makes both reachable in the same tab.
+	envFileManagerPath = "FILE_MANAGER_PATH"
+
+	// paramKeyStartURL is the shared key for the optional "open this URL on
+	// launch" deploy-time parameter chrome/firefox each declare (see
+	// startURLParameter) — not webtop, which runs a full desktop rather than
+	// one specific browser, so "the URL to open" isn't a meaningful concept
+	// for it.
+	paramKeyStartURL = "startUrl"
+
 	// envPUID/envPGID/envTZ are the standard linuxserver.io image env var
 	// *names* (see
 	// https://docs.linuxserver.io/general/understanding-puid-and-pgid/);
@@ -296,6 +318,29 @@ rm -f /tmp/backup.tar.gz
 				File: &FileResult{Type: "browser_profile_backup", Label: label},
 			}, nil
 		},
+	}
+}
+
+// fileManagerPathEnv is the envFileManagerPath env var every Selkies-based
+// template (firefox, chrome, webtop) sets identically — see
+// envFileManagerPath's own doc comment for why browserConfigMountPath (not
+// its default) is the right value.
+func fileManagerPathEnv() corev1.EnvVar {
+	return corev1.EnvVar{Name: envFileManagerPath, Value: browserConfigMountPath}
+}
+
+// startURLParameter returns the optional deploy-time parameter chrome and
+// firefox each declare for themselves (never folded into browserParameters,
+// which webtop also uses via the same append pattern — an "open this URL on
+// launch" field would be meaningless on a full desktop). appLabel names the
+// application in the description text (e.g. "Chrome", "Firefox").
+func startURLParameter(appLabel string) Parameter {
+	return Parameter{
+		Key:         paramKeyStartURL,
+		Label:       "Default URL",
+		Description: fmt.Sprintf("URL to open automatically when %s starts. Leave blank to use the browser's own default new-tab page.", appLabel),
+		Type:        ParameterTypeString,
+		DataSource:  DataSource{Kind: DataSourceStatic},
 	}
 }
 
