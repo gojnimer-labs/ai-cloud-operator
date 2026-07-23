@@ -25,10 +25,7 @@ const (
 	templateIDCodeServer = "code-server"
 	codeServerPort       = int32(8443)
 
-	paramKeyPassword     = "password"
-	paramKeySudoPassword = "sudoPassword"
-	paramKeyWorkspace    = "defaultWorkspace"
-	paramKeyClaudeToken  = "claudeCodeOauthToken"
+	paramKeyClaudeToken = "claudeCodeOauthToken"
 
 	// claudeInstallHome is where the init container installs Claude Code —
 	// the shared /config volume, so the binary is already present on
@@ -37,6 +34,14 @@ const (
 	// opened in code-server's integrated terminal is the same $HOME the
 	// installer ran against.
 	claudeInstallHome = browserConfigMountPath
+
+	// defaultWorkspacePath is fixed, not user-configurable — this template
+	// exists to give Claude Code a consistent, known install/working
+	// location, and a per-deploy-customizable path bought nothing for that
+	// beyond a parameter to plumb through and re-validate in the init
+	// container's directory-ownership fix (see
+	// installClaudeCodeInitContainer's doc comment).
+	defaultWorkspacePath = "/config/workspace"
 )
 
 // codeServerProbe targets codeServerPort — deliberately not browserProbe
@@ -61,9 +66,11 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 	}
 }
 
-// installClaudeCodeInitContainer installs the Claude Code CLI onto the
-// shared /config volume before code-server starts, via the same official
-// installer registry.coder.com/coder/claude-code's own install script wraps
+// installClaudeCodeInitContainer prepares the shared /config volume before
+// code-server starts: fixes a real, confirmed directory-ownership gap in
+// linuxserver/code-server's own startup (see the dedicated comment block
+// below), then installs the Claude Code CLI via the same official installer
+// registry.coder.com/coder/claude-code's own install script wraps
 // (https://claude.ai/install.sh) — mimicking that module's install step,
 // minus the Coder-agent-specific parts (script bin dir symlink, tmux
 // session) that don't apply outside a Coder workspace. Re-runs on every pod
@@ -71,6 +78,21 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 // browser-family template here (see restoreProfileInitContainer) — an
 // acceptable cost since this template always needs network access to
 // install Claude Code at all, unlike a conditional profile restore.
+//
+// Directory-ownership fix (found live, 2026-07-23, via `kubectl exec ...
+// stat`): code-server actually runs as the "abc" user (uid 1000, confirmed
+// via `ps aux` inside the container), but /config/workspace,
+// /config/data (--user-data-dir), and /config/extensions
+// (--extensions-dir) all came up owned by root:root 0755 — created fresh
+// by linuxserver's own startup *after* this init container's later
+// `chown -R 1000:1000 "$HOME"` had already run against an /config that
+// didn't have them yet, and never chowned by linuxserver's own init
+// afterward. Result: "EACCES: permission denied" the moment a user tries
+// to save a file in the editor. Pre-creating these three directories here,
+// before the main container ever starts, means linuxserver's own `mkdir
+// -p`-shaped startup logic finds them already present (a no-op) instead of
+// creating fresh root-owned ones — same defensive shape as
+// restoreProfileInitContainer's own `mkdir -p` + chown.
 //
 // Deliberately NOT alpine, unlike this package's other init containers (see
 // restoreProfileInitContainer) — debian-slim was tried after a real deploy
@@ -116,7 +138,7 @@ func installClaudeCodeInitContainer() corev1.Container {
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
 export HOME=` + claudeInstallHome + `
-mkdir -p "$HOME"
+mkdir -p "$HOME" "$HOME/data" "$HOME/extensions" "` + defaultWorkspacePath + `"
 timeout 45 bash -c 'curl -fsSL https://claude.ai/install.sh | bash -s -- stable' || echo "Claude Code install failed or timed out — continuing without it, code-server will still start"
 for rcfile in "$HOME/.bashrc" "$HOME/.profile"; do
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rcfile"
@@ -135,6 +157,76 @@ chown -R 1000:1000 "$HOME"
 	}
 }
 
+// disableCasualEnvDumpHook returns a postStart lifecycle hook that wraps
+// /usr/bin/env and /usr/bin/printenv so a bare, no-argument invocation
+// (the "just show me everything" form) prints a short message instead of
+// dumping the container's environment — including CLAUDE_CODE_OAUTH_TOKEN,
+// which necessarily lands in this container as a plain env var (that's the
+// only interface the Claude Code CLI reads it from; see CodeServer's own
+// doc comment for why that's unavoidable here). This is explicitly a
+// deterrent against a non-technical end-user casually running a familiar
+// command out of curiosity, not a security boundary: anyone who goes
+// looking has plenty of equivalent ways to read the same environment (a
+// bash builtin like `export`/`set`/`declare -x`, /proc/self/environ, a
+// one-line python3/node snippet — all left untouched, deliberately, since
+// this container is a coding IDE and disabling them isn't practical
+// without breaking normal use). Both wrapped commands still work exactly
+// as before when called *with* arguments — `env some-command args...` and
+// `printenv SPECIFIC_VAR` pass straight through to the real binary — only
+// the bare form is intercepted. env in particular can't just be deleted:
+// it's also the standard shebang interpreter-resolution mechanism
+// (`#!/usr/bin/env python3`), which real dev tooling depends on constantly.
+//
+// Can't be an init container: those run in a separate filesystem from the
+// main container and can only touch what's explicitly shared (this
+// package's other init containers only ever write to the shared /config
+// volume) — never the main image's own /usr/bin. A postStart hook runs
+// inside the main container's own filesystem right after it starts, which
+// is what direct binary replacement needs. Ends with an explicit `exit 0`
+// — a postStart hook that exits non-zero gets the whole container killed
+// and restarted per Kubernetes' own semantics, which would turn a cosmetic
+// nice-to-have into an outage, and without it the script's exit status
+// would be whatever the last executed command happened to return (e.g.
+// falsy on a re-run where both binaries are already wrapped, since the
+// last evaluated `[ ! -f "$real" ]` check would itself be false). Verified
+// directly in a throwaway container (not just read): the wrapper blocks
+// bare `env`/`printenv`, passes through `env <cmd> [args]` and `printenv
+// VAR` unchanged, and is idempotent on a second run. Timing is best-effort
+// too (no ordering guarantee against the container's own entrypoint), but
+// linuxserver's s6 init and the operator's own gateway-auth round trip
+// both take meaningfully longer than this hook's few filesystem
+// operations, so in practice it's in place long before a human could
+// reach a terminal.
+func disableCasualEnvDumpHook() *corev1.Lifecycle {
+	const script = `
+for cmd in env printenv; do
+  bin="/usr/bin/$cmd"
+  real="$bin.real"
+  if [ -f "$bin" ] && [ ! -f "$real" ]; then
+    mv "$bin" "$real"
+    cat > "$bin" <<'WRAP'
+#!/bin/sh
+if [ $# -eq 0 ]; then
+  echo "$0: environment listing is disabled on this workspace" >&2
+  exit 1
+fi
+WRAP
+    echo "exec \"$real\" \"\$@\"" >> "$bin"
+    chmod +x "$bin"
+  fi
+done
+exit 0
+`
+
+	return &corev1.Lifecycle{
+		PostStart: &corev1.LifecycleHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{shShellPath, "-c", script},
+			},
+		},
+	}
+}
+
 // CodeServer deploys code-server (https://github.com/coder/code-server) — VS
 // Code accessible via the browser — via linuxserver.io's image, for the same
 // PUID/PGID/TZ/config-volume conventions as firefox/chrome/webtop, with a
@@ -147,13 +239,16 @@ chown -R 1000:1000 "$HOME"
 // installClaudeCodeInitContainer's doc comment) — code-server itself still
 // comes up either way, just without a working `claude` yet.
 //
-// Deliberately runs with no code-server password (PASSWORD/HASHED_PASSWORD
-// both left unset unless the caller opts in) — this workload is only ever
-// reachable through the operator's own /gw/ gateway, which already
-// authenticates every request via a signed, workload-scoped session cookie
-// (see internal/gateway/token.go) before it ever proxies to this Service.
-// This is the same "no per-workload auth" shape firefox/chrome/webtop
-// already use. It's also a deliberate change from this template's first
+// Deliberately runs with no code-server password at all (PASSWORD/
+// HASHED_PASSWORD/SUDO_PASSWORD are never set — not even offered as
+// parameters) — this workload is only ever reachable through the
+// operator's own /gw/ gateway, which already authenticates every request
+// via a signed, workload-scoped session cookie (see
+// internal/gateway/token.go) before it ever proxies to this Service. A
+// second credential here would be redundant, not defense-in-depth: nothing
+// else can reach this Service to present it against. This is the same
+// "no per-workload auth" shape firefox/chrome/webtop already use. It's
+// also a deliberate change from this template's first
 // attempt (see git history: "Add/Remove the code-server catalog template"),
 // which defaulted to code-server's own password-protected login page and
 // was reverted after that page 502'd through the cluster's Traefik
@@ -164,27 +259,13 @@ chown -R 1000:1000 "$HOME"
 // from this change alone.
 var CodeServer = Template{
 	Build: func(params map[string]any) (Rendered, error) {
-		password := paramString(params, paramKeyPassword, "")
-		sudoPassword := paramString(params, paramKeySudoPassword, "")
-		defaultWorkspace := paramString(params, paramKeyWorkspace, "/config/workspace")
 		claudeToken := paramString(params, paramKeyClaudeToken, "")
 
 		env := []corev1.EnvVar{
 			{Name: envPUID, Value: linuxserverUID},
 			{Name: envPGID, Value: linuxserverUID},
 			{Name: envTZ, Value: linuxserverTimezone},
-			{Name: "DEFAULT_WORKSPACE", Value: defaultWorkspace},
-		}
-		// Omitted entirely rather than passed as "" — an explicit empty
-		// PASSWORD/SUDO_PASSWORD env var is not the same thing to the
-		// image's entrypoint script as the var being unset (see
-		// linuxserver/code-server's docs: no PASSWORD/HASHED_PASSWORD means
-		// no auth at all, which is what this template wants by default).
-		if password != "" {
-			env = append(env, corev1.EnvVar{Name: envPassword, Value: password})
-		}
-		if sudoPassword != "" {
-			env = append(env, corev1.EnvVar{Name: "SUDO_PASSWORD", Value: sudoPassword})
+			{Name: "DEFAULT_WORKSPACE", Value: defaultWorkspacePath},
 		}
 		// Blank is a valid, supported state: the CLI is still installed by
 		// the init container below, just unauthenticated until a user runs
@@ -198,6 +279,7 @@ var CodeServer = Template{
 				{
 					Env:            env,
 					Image:          "lscr.io/linuxserver/code-server:latest",
+					Lifecycle:      disableCasualEnvDumpHook(),
 					LivenessProbe:  codeServerProbe(30),
 					Name:           templateIDCodeServer,
 					Ports:          []corev1.ContainerPort{{ContainerPort: codeServerPort, Name: portNameHTTP}},
@@ -249,30 +331,13 @@ var CodeServer = Template{
 	ID:          templateIDCodeServer,
 	Icon:        "💻",
 	Name:        "VS Code (Browser)",
-	Version:     initialTemplateVersion,
+	// 1.1.0: dropped password/sudoPassword/defaultWorkspace — redundant
+	// with the operator's own gateway auth, and a fixed workspace path
+	// serves this template's actual purpose (a consistent Claude Code
+	// install location) better than per-deploy configurability did. See
+	// CodeServer's own doc comment for the reasoning.
+	Version: "1.1.0",
 	Parameters: []Parameter{
-		{
-			Description: "Login password for the code-server web UI. Leave blank: this workload is only reachable through the operator's own authenticated gateway, so no separate password is needed.",
-			Key:         paramKeyPassword,
-			Label:       "Password",
-			DataSource:  DataSource{Kind: DataSourceStatic},
-			Type:        ParameterTypeString,
-		},
-		{
-			Description: "Enables sudo inside the container's terminal when set — passed through as SUDO_PASSWORD.",
-			Key:         paramKeySudoPassword,
-			Label:       "Sudo password",
-			DataSource:  DataSource{Kind: DataSourceStatic},
-			Type:        ParameterTypeString,
-		},
-		{
-			Default:     "/config/workspace",
-			Description: "Folder code-server opens by default.",
-			Key:         paramKeyWorkspace,
-			Label:       "Default workspace path",
-			DataSource:  DataSource{Kind: DataSourceStatic},
-			Type:        ParameterTypeString,
-		},
 		{
 			Description: "OAuth token for Claude Code (from `claude setup-token`). Leave blank to skip authentication — the CLI is still installed but requires a manual `claude login` from the integrated terminal.",
 			Key:         paramKeyClaudeToken,

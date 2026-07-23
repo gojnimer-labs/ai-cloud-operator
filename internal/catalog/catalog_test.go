@@ -563,14 +563,11 @@ func TestWebtopUsesDistinctProfileSourceKeyFromBrowsers(t *testing.T) {
 	}
 }
 
-func TestCodeServerBuildDefaultsWithoutPasswordsOrToken(t *testing.T) {
+func TestCodeServerBuildDefaultsWithoutToken(t *testing.T) {
 	tmpl, _ := Get(templateIDCodeServer)
 	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
-	}
-	if resolved[paramKeyWorkspace] != "/config/workspace" {
-		t.Fatalf("expected default defaultWorkspace, got %v", resolved[paramKeyWorkspace])
 	}
 	rendered, err := tmpl.Build(resolved)
 	if err != nil {
@@ -580,10 +577,15 @@ func TestCodeServerBuildDefaultsWithoutPasswordsOrToken(t *testing.T) {
 	if container.Name != templateIDCodeServer || container.Image != "lscr.io/linuxserver/code-server:latest" {
 		t.Fatalf("unexpected container name/image: %+v", container)
 	}
-	for _, env := range container.Env {
-		if env.Name == envPassword || env.Name == "SUDO_PASSWORD" || env.Name == "CLAUDE_CODE_OAUTH_TOKEN" {
-			t.Fatalf("did not expect %s to be set when left blank, got %+v", env.Name, container.Env)
+	env := map[string]string{}
+	for _, e := range container.Env {
+		env[e.Name] = e.Value
+		if e.Name == "PASSWORD" || e.Name == "SUDO_PASSWORD" || e.Name == "HASHED_PASSWORD" || e.Name == "CLAUDE_CODE_OAUTH_TOKEN" {
+			t.Fatalf("did not expect %s to be set, got %+v", e.Name, container.Env)
 		}
+	}
+	if env["DEFAULT_WORKSPACE"] != defaultWorkspacePath {
+		t.Fatalf("expected DEFAULT_WORKSPACE=%q, got %+v", defaultWorkspacePath, env)
 	}
 	if len(container.Ports) != 1 || container.Ports[0].ContainerPort != codeServerPort || container.Ports[0].Name != portNameHTTP {
 		t.Fatalf("unexpected container ports: %+v", container.Ports)
@@ -593,14 +595,9 @@ func TestCodeServerBuildDefaultsWithoutPasswordsOrToken(t *testing.T) {
 	}
 }
 
-func TestCodeServerBuildAppliesPasswordsWorkspaceAndClaudeToken(t *testing.T) {
+func TestCodeServerBuildAppliesClaudeToken(t *testing.T) {
 	tmpl, _ := Get(templateIDCodeServer)
-	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{
-		paramKeyWorkspace:    "/config/project",
-		paramKeyPassword:     "hunter2",
-		paramKeySudoPassword: "sudopw",
-		paramKeyClaudeToken:  "sk-ant-oat-test",
-	})
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{paramKeyClaudeToken: "sk-ant-oat-test"})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -611,9 +608,6 @@ func TestCodeServerBuildAppliesPasswordsWorkspaceAndClaudeToken(t *testing.T) {
 	env := map[string]string{}
 	for _, e := range rendered.Containers[0].Env {
 		env[e.Name] = e.Value
-	}
-	if env[envPassword] != "hunter2" || env["SUDO_PASSWORD"] != "sudopw" || env["DEFAULT_WORKSPACE"] != "/config/project" {
-		t.Fatalf("unexpected env: %+v", env)
 	}
 	if env["CLAUDE_CODE_OAUTH_TOKEN"] != "sk-ant-oat-test" {
 		t.Fatalf("expected CLAUDE_CODE_OAUTH_TOKEN to be passed through, got %+v", env)
@@ -664,24 +658,58 @@ func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
 	}
 }
 
-// TestCodeServerRunsWithNoBuiltInAuthByDefault guards the fix for why this
-// template was reverted once before (see CodeServer's doc comment): its
-// login page must not exist unless the caller explicitly opts in with a
-// password, since this workload's only intended access path is through the
-// operator's own authenticated gateway.
-func TestCodeServerRunsWithNoBuiltInAuthByDefault(t *testing.T) {
+// TestCodeServerPreparesWorkspaceDataAndExtensionsDirs is the regression
+// guard for a fourth real incident: code-server runs as uid 1000 ("abc"),
+// but linuxserver/code-server's own startup creates /config/workspace,
+// /config/data, and /config/extensions fresh as root:root and never
+// chowns them afterward — confirmed live via `kubectl exec ... stat`,
+// surfacing as "EACCES: permission denied" the moment a user tried to save
+// a file. The init container must create (and therefore, via its later
+// blanket chown, own) all three before code-server ever starts. The
+// workspace path is a fixed constant now (not a parameter), so it's safe
+// to check the script literally rather than via an env var indirection.
+func TestCodeServerPreparesWorkspaceDataAndExtensionsDirs(t *testing.T) {
 	tmpl, _ := Get(templateIDCodeServer)
-	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	rendered, err := tmpl.Build(resolved)
+	rendered, err := tmpl.Build(map[string]any{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	for _, env := range rendered.Containers[0].Env {
-		if env.Name == envPassword || env.Name == "HASHED_PASSWORD" {
-			t.Fatalf("expected no password env vars by default, got %+v", rendered.Containers[0].Env)
+	script := rendered.InitContainers[0].Command[len(rendered.InitContainers[0].Command)-1]
+	for _, want := range []string{`"$HOME/data"`, `"$HOME/extensions"`, defaultWorkspacePath} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected init container script to reference %s, got: %s", want, script)
+		}
+	}
+}
+
+// TestCodeServerWrapsEnvAndPrintenvViaPostStartHook guards the deterrent
+// against a non-technical end-user casually running a familiar command to
+// dump CLAUDE_CODE_OAUTH_TOKEN (see disableCasualEnvDumpHook's doc comment
+// for why this is a deterrent, not a security boundary, and why it targets
+// exactly these two commands and no others). The actual wrapper shell
+// logic was verified end-to-end in a real container, not just read — this
+// test pins the wiring: the hook exists, runs on postStart (not some other
+// lifecycle point), and its script references both binaries plus an
+// explicit `exit 0` so a re-run (both already wrapped) can't return a
+// non-zero PostStart status and get the container killed.
+func TestCodeServerWrapsEnvAndPrintenvViaPostStartHook(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	lifecycle := rendered.Containers[0].Lifecycle
+	if lifecycle == nil || lifecycle.PostStart == nil || lifecycle.PostStart.Exec == nil {
+		t.Fatalf("expected a postStart exec hook on the code-server container, got %+v", lifecycle)
+	}
+	cmd := lifecycle.PostStart.Exec.Command
+	if len(cmd) == 0 {
+		t.Fatalf("expected a non-empty postStart command")
+	}
+	script := cmd[len(cmd)-1]
+	for _, want := range []string{"for cmd in env printenv", `"/usr/bin/$cmd"`, "exit 0"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected postStart script to reference %q, got: %s", want, script)
 		}
 	}
 }
