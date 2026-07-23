@@ -91,20 +91,43 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 // <host-pid>` run directly from the node (bypassing the container's own
 // ptrace restrictions): the hung process burned CPU while making almost no
 // syscalls over an 8-second trace window, a genuine userspace compute
-// spin, not blocked I/O. Musl vs glibc, TTY presence, DISABLE_AUTOUPDATER,
-// CPU limits, and seccomp (`/proc/<pid>/status` showed `Seccomp: 0` — not
-// even active) were all ruled out first. The actual cause: the node's VM
-// had a QEMU generic "Common KVM processor" CPU type, missing AVX, AVX2,
-// SSE4, SSSE3, even POPCNT — Node.js/V8 ran fine on that same hardware,
-// only the Bun-compiled `claude` binary hung, consistent with a JIT-engine
-// bug triggered by assumed-present CPU features being absent. **Fixed at
-// the infrastructure level, not here**: the Proxmox VM's CPU type was
-// changed from the generic model to host passthrough (confirmed live,
-// 2026-07-23 — real CPU flags now visible, e.g. avx2/bmi2/popcnt, and the
-// official installer completes normally, `claude --version` returns
-// instantly). If Claude Code ever seems to hang on install again, suspect
-// the VM's CPU type before this script — check `lscpu`/`/proc/cpuinfo` on
-// the node first.
+// spin, not blocked I/O. TTY presence, DISABLE_AUTOUPDATER, CPU limits,
+// and seccomp (`/proc/<pid>/status` showed `Seccomp: 0` — not even active)
+// were all ruled out. The actual cause: the node's VM had a QEMU generic
+// "Common KVM processor" CPU type, missing AVX, AVX2, SSE4, SSSE3, even
+// POPCNT — Node.js/V8 ran fine on that same hardware, only the
+// Bun-compiled `claude` binary hung, consistent with a JIT-engine bug
+// triggered by assumed-present CPU features being absent. **Fixed at the
+// infrastructure level, not here**: the Proxmox VM's CPU type was changed
+// from the generic model to host passthrough (confirmed live, 2026-07-23
+// — real CPU flags now visible, e.g. avx2/bmi2/popcnt, and the official
+// installer completes normally, `claude --version` returns instantly). If
+// Claude Code ever seems to hang on install again, suspect the VM's CPU
+// type before this script — check `lscpu`/`/proc/cpuinfo` on the node
+// first.
+//
+// Deliberately NOT alpine, unlike this package's other init containers
+// (restoreProfileInitContainer) — a real, live deploy right after this
+// hang was fixed hit a *second*, genuinely different bug: `bash:
+// /config/.local/bin/claude: cannot execute: required file not found` in
+// the main code-server container's terminal. install.sh detects musl vs
+// glibc by probing *its own* container (`ldd /bin/ls | grep musl` — see
+// install.sh's own platform-detection logic) and downloads the matching
+// build accordingly — so running it from an alpine (musl) init container
+// fetches the musl-linked `claude` binary, which then lands via the
+// shared /config volume in the main container, which is glibc-based
+// (linuxserver/code-server is Ubuntu). A musl binary has no glibc dynamic
+// linker to run against there — exactly "required file not found". This
+// is NOT the same bug as the CPU-hang above (different symptom, different
+// mechanism: this one doesn't depend on the node's CPU model at all, it's
+// purely about which container the *installer* itself runs in) — the
+// installer must run somewhere glibc-based so it downloads a build the
+// main container can actually execute. Verified live, cross-container
+// (not just within the install container itself, which is exactly the
+// gap that let the musl bug through undetected the first time): installed
+// here on debian-slim, then executed successfully from a separate,
+// genuinely different glibc-based container matching the real
+// linuxserver/code-server image.
 //
 // Bounded and non-fatal regardless (`timeout ... || echo ...`, no bare
 // `set -e` exposure on that line): code-server must come up either way,
@@ -125,7 +148,8 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 // Init:0/1 sat for minutes looking stuck.
 func installClaudeCodeInitContainer() corev1.Container {
 	const script = `set -e
-apk add --no-cache bash curl ca-certificates >/dev/null
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
 export HOME=` + claudeInstallHome + `
 mkdir -p "$HOME" "$HOME/data" "$HOME/extensions" "` + defaultWorkspacePath + `"
 timeout 90 bash -c 'curl -fsSL https://claude.ai/install.sh | bash -s -- stable' || echo "Claude Code install failed or timed out — continuing without it, code-server will still start"
@@ -137,7 +161,7 @@ chown -R 1000:1000 "$HOME"
 
 	return corev1.Container{
 		Command:   []string{shShellPath, "-c", script},
-		Image:     alpineImage,
+		Image:     "debian:bookworm-slim",
 		Name:      "install-claude-code",
 		Resources: browserResources("500m", "128Mi", "256Mi"),
 		VolumeMounts: []corev1.VolumeMount{
