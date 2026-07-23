@@ -21,8 +21,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +34,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -126,10 +128,7 @@ func newTestServer(t *testing.T) (*Server, client.Client, *fakeGatewayVerifier, 
 		WithObjects(svc).
 		Build()
 
-	proxy, err := gateway.NewServiceProxy(c, &rest.Config{Host: "http://127.0.0.1:0"}, testServiceNS)
-	if err != nil {
-		t.Fatalf("NewServiceProxy: %v", err)
-	}
+	proxy := gateway.NewServiceProxy(c, testServiceNS)
 
 	verifier := newFakeGatewayVerifier()
 	executor := &fakePodExecutor{}
@@ -334,8 +333,33 @@ func TestGatewayRejectsWhenVerifierFails(t *testing.T) {
 	}
 }
 
-func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fakeGatewayVerifier) {
+// newTestServerWithBackend builds a Server whose "http" and "backoffice"
+// entrypoints both dial straight through to backendURL — a real
+// httptest.Server standing in for a workload's own backend. ServiceProxy
+// now proxies directly to a Service's ClusterIP:port (see
+// internal/gateway/proxy.go's doc comment for why), so backendURL is parsed
+// apart and fed into the fake Service's ClusterIP/Port fields, not into
+// NewServiceProxy itself — that's the only way this test's fake
+// client.Client's Service object becomes an address the proxy can actually
+// dial. Both ports point at the same real listener: tests that exercise
+// "backoffice" (see TestGatewayCookieAuthorizesDifferentEntrypointsOfSameWorkload)
+// only care that a *different* entrypoint of the same workload is reachable
+// end-to-end, not that it serves distinguishable content.
+func newTestServerWithBackend(t *testing.T, backendURL string) (*Server, *fakeGatewayVerifier) {
 	t.Helper()
+	u, err := url.Parse(backendURL)
+	if err != nil {
+		t.Fatalf("parsing backend URL %q: %v", backendURL, err)
+	}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("splitting backend host:port %q: %v", u.Host, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parsing backend port %q: %v", portStr, err)
+	}
+
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("adding scheme: %v", err)
@@ -345,10 +369,13 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 	}
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: testServiceName, Namespace: testServiceNS},
-		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{
-			{Name: "http", Port: testServicePort},
-			{Name: "backoffice", Port: 9090},
-		}},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: host,
+			Ports: []corev1.ServicePort{
+				{Name: "http", Port: int32(port)},
+				{Name: "backoffice", Port: int32(port)},
+			},
+		},
 	}
 	// Handler() now gates on workload readiness before resolving the
 	// Service — these gateway-token tests are exercising auth/proxy
@@ -359,10 +386,7 @@ func newTestServerWithAPIServer(t *testing.T, apiServerURL string) (*Server, *fa
 		Status:     appsv1alpha1.WorkloadStatus{Phase: "Running"},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc, wl).Build()
-	proxy, err := gateway.NewServiceProxy(c, &rest.Config{Host: apiServerURL}, testServiceNS)
-	if err != nil {
-		t.Fatalf("NewServiceProxy: %v", err)
-	}
+	proxy := gateway.NewServiceProxy(c, testServiceNS)
 	verifier := newFakeGatewayVerifier()
 	creator := provisioning.NewWorkloadCreator(c, testServiceNS)
 	destroyer := provisioning.NewWorkloadDestroyer(c, testServiceNS)
@@ -410,18 +434,20 @@ func exchangeGatewayToken(t *testing.T, s *Server) *http.Cookie {
 }
 
 func TestGatewayAcceptsValidTokenAndProxies(t *testing.T) {
-	// Stand in for the real kube-apiserver so we can assert the proxied
-	// request actually reaches it once the gateway cookie passes.
+	// Stand in for the workload's own backend so we can assert the proxied
+	// request actually reaches it once the gateway cookie passes — a direct
+	// connection now, not routed through the kube-apiserver (see
+	// internal/gateway/proxy.go's doc comment for why), so the upstream
+	// sees exactly "/" for an empty subpath, no apiserver-proxy prefix.
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wantPath := "/api/v1/namespaces/" + testServiceNS + "/services/" + testServiceName + ":8080/proxy/"
-		if r.URL.Path != wantPath {
+		if r.URL.Path != "/" {
 			t.Errorf("unexpected upstream path: %s", r.URL.Path)
 		}
 		_, _ = w.Write([]byte("ok from service"))
 	}))
 	defer apiServer.Close()
 
-	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
+	s, verifier := newTestServerWithBackend(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
 	cookie := exchangeGatewayToken(t, s)
@@ -451,7 +477,7 @@ func TestGatewayTokenIsSingleUse(t *testing.T) {
 	}))
 	defer apiServer.Close()
 
-	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
+	s, verifier := newTestServerWithBackend(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
 	exchangeGatewayToken(t, s)
@@ -472,7 +498,7 @@ func TestGatewayCookieAuthorizesSubsequentRequestsWithoutToken(t *testing.T) {
 	}))
 	defer apiServer.Close()
 
-	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
+	s, verifier := newTestServerWithBackend(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
 	cookie := exchangeGatewayToken(t, s)
@@ -503,7 +529,7 @@ func TestGatewayCookieAuthorizesDifferentEntrypointsOfSameWorkload(t *testing.T)
 	}))
 	defer apiServer.Close()
 
-	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
+	s, verifier := newTestServerWithBackend(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
 	cookie := exchangeGatewayToken(t, s)
@@ -534,7 +560,7 @@ func TestGatewayInvalidTokenIsNotMaskedByExistingCookie(t *testing.T) {
 	}))
 	defer apiServer.Close()
 
-	s, verifier := newTestServerWithAPIServer(t, apiServer.URL)
+	s, verifier := newTestServerWithBackend(t, apiServer.URL)
 	verifier.issue(testServiceName)
 
 	// Establish a legitimate, still-valid session cookie.

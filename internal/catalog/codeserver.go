@@ -41,7 +41,11 @@ const (
 
 // codeServerProbe targets codeServerPort — deliberately not browserProbe
 // (see its own doc comment), which is hard-coded to browserHTTPPort for
-// firefox/chrome specifically.
+// firefox/chrome specifically. Plain HTTP, confirmed live: linuxserver/
+// code-server does not speak TLS on this port by default (curl against the
+// pod IP got a clean HTTP/1.1 302; a TLS handshake attempt against the same
+// port failed outright with "wrong version number") — don't set Scheme:
+// HTTPS here without re-verifying that's changed.
 func codeServerProbe(initialDelay int32) *corev1.Probe {
 	return &corev1.Probe{
 		FailureThreshold:    3,
@@ -207,6 +211,31 @@ var CodeServer = Template{
 			InitContainers: []corev1.Container{
 				installClaudeCodeInitContainer(),
 			},
+			// Named "http", plain HTTP — confirmed live (2026-07-23) by
+			// curling the pod IP directly: port codeServerPort answers a
+			// normal HTTP/1.1 302 redirect, and a TLS handshake against the
+			// same port fails outright ("wrong version number"), so it does
+			// NOT speak TLS. Naming this "https" would make
+			// internal/gateway/proxy.go dial it over TLS and fail outright
+			// — see serviceProxyScheme's own doc comment for when that
+			// naming is actually correct to use.
+			//
+			// The real failure this entrypoint hit end-to-end wasn't a
+			// scheme mismatch at all: the operator's gateway used to relay
+			// every entrypoint through the Kubernetes API server's
+			// services/proxy subresource, and the operator's own logs
+			// showed `httputil: ReverseProxy read error during body copy:
+			// unexpected EOF` live on this exact workload — something
+			// nginx/firefox/chrome/webtop's much smaller payloads never
+			// triggered. Addressed at the gateway level, not here — see
+			// internal/gateway/proxy.go's own doc comment — by proxying
+			// directly to the Service's ClusterIP instead of through that
+			// subresource, which also closes an independent WebSocket-path
+			// risk this template actually depends on (terminal, extension
+			// host). That doc comment is explicit that the exact EOF
+			// trigger wasn't reproduced under direct testing, though — this
+			// still needs a real browser check once redeployed, not just
+			// trust in the theory.
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(codeServerPort)},
 			},
