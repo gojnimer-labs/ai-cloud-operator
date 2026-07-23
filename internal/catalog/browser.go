@@ -79,6 +79,10 @@ const (
 	// runs under — 3+ occurrences of the bare literal trips goconst.
 	shShellPath = "/bin/sh"
 
+	// alpineImage is this package's standard lightweight init-container
+	// base — 3+ occurrences of the bare literal trips goconst.
+	alpineImage = "alpine:latest"
+
 	paramKeyLogLevel       = "logLevel"
 	logLevelInfo           = "info"
 	logLevelWarn           = "warn"
@@ -190,7 +194,7 @@ chmod -R 755 /config
 		Env: []corev1.EnvVar{
 			{Name: envProfileDownloadURL, Value: profileDownloadURL},
 		},
-		Image: "alpine:latest",
+		Image: alpineImage,
 		Name:  "restore-profile",
 		VolumeMounts: []corev1.VolumeMount{
 			{MountPath: browserConfigMountPath, Name: configVolumeName},

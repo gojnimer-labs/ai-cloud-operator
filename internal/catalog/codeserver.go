@@ -25,7 +25,8 @@ const (
 	templateIDCodeServer = "code-server"
 	codeServerPort       = int32(8443)
 
-	paramKeyClaudeToken = "claudeCodeOauthToken"
+	paramKeyClaudeToken     = "claudeCodeOauthToken"
+	paramKeyAnthropicAPIKey = "anthropicApiKey"
 
 	// claudeInstallHome is where the init container installs Claude Code —
 	// the shared /config volume, so the binary is already present on
@@ -68,78 +69,66 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 
 // installClaudeCodeInitContainer prepares the shared /config volume before
 // code-server starts: fixes a real, confirmed directory-ownership gap in
-// linuxserver/code-server's own startup (see the dedicated comment block
-// below), then installs the Claude Code CLI via the same official installer
-// registry.coder.com/coder/claude-code's own install script wraps
-// (https://claude.ai/install.sh) — mimicking that module's install step,
-// minus the Coder-agent-specific parts (script bin dir symlink, tmux
-// session) that don't apply outside a Coder workspace. Re-runs on every pod
-// start since /config is a plain EmptyDir, same as every other
-// browser-family template here (see restoreProfileInitContainer) — an
-// acceptable cost since this template always needs network access to
-// install Claude Code at all, unlike a conditional profile restore.
+// linuxserver/code-server's own startup, then installs the Claude Code CLI
+// via the official installer (https://claude.ai/install.sh — the same one
+// registry.coder.com/coder/claude-code's own install step wraps).
 //
-// Directory-ownership fix (found live, 2026-07-23, via `kubectl exec ...
-// stat`): code-server actually runs as the "abc" user (uid 1000, confirmed
-// via `ps aux` inside the container), but /config/workspace,
+// Directory-ownership fix: code-server runs as the "abc" user (uid 1000,
+// confirmed via `ps aux` inside the container), but /config/workspace,
 // /config/data (--user-data-dir), and /config/extensions
-// (--extensions-dir) all came up owned by root:root 0755 — created fresh
-// by linuxserver's own startup *after* this init container's later
-// `chown -R 1000:1000 "$HOME"` had already run against an /config that
-// didn't have them yet, and never chowned by linuxserver's own init
-// afterward. Result: "EACCES: permission denied" the moment a user tries
-// to save a file in the editor. Pre-creating these three directories here,
-// before the main container ever starts, means linuxserver's own `mkdir
-// -p`-shaped startup logic finds them already present (a no-op) instead of
-// creating fresh root-owned ones — same defensive shape as
+// (--extensions-dir) all come up owned by root:root 0755 — created fresh
+// by linuxserver's own startup, after which nothing chowns them to match
+// PUID/PGID. Result: "EACCES: permission denied" the moment a user tries
+// to save a file. Pre-creating these three directories here, before the
+// main container ever starts, means linuxserver's own `mkdir -p`-shaped
+// startup logic finds them already present (a no-op) instead of creating
+// fresh root-owned ones — same defensive shape as
 // restoreProfileInitContainer's own `mkdir -p` + chown.
 //
-// Deliberately NOT alpine, unlike this package's other init containers (see
-// restoreProfileInitContainer) — debian-slim was tried after a real deploy
-// first hung on Alpine specifically (musl libc). That turned out to be a
-// red herring: live debugging on the actual cluster (root SSH + kubectl
-// exec, 2026-07-23) found the installer hangs identically on debian-slim
-// (glibc) — and in fact hangs on a bare `claude --version`, with no
-// install/network/TTY involved at all. Zero syscalls, ~100% CPU across two
-// threads, 100% reproducible on every attempt. Not a musl bug, not a TUI
-// bug, not fixed by DISABLE_AUTOUPDATER — most likely the CLI's own
-// bundled runtime (Bun, going by the epoll/eventfd fds and ~5GB reserved
-// VmSize) hitting a container-security restriction this cluster enforces
-// (kernel io_uring is enabled here, but the default container seccomp
-// profile very plausibly still blocks the io_uring syscalls Bun wants —
-// confirming that needs an unconfined-seccomp debug pod, which is a real
-// security-posture call outside this template's authority to make
-// unilaterally). Kept on debian-slim anyway since there's no evidence
-// alpine is any better and no reason to reintroduce that variable.
+// The install itself has a real history worth knowing before touching this
+// again. It used to hang forever (100% CPU, ~zero syscalls) on this
+// cluster's node hardware — confirmed live via root SSH + `strace -p
+// <host-pid>` run directly from the node (bypassing the container's own
+// ptrace restrictions): the hung process burned CPU while making almost no
+// syscalls over an 8-second trace window, a genuine userspace compute
+// spin, not blocked I/O. Musl vs glibc, TTY presence, DISABLE_AUTOUPDATER,
+// CPU limits, and seccomp (`/proc/<pid>/status` showed `Seccomp: 0` — not
+// even active) were all ruled out first. The actual cause: the node's VM
+// had a QEMU generic "Common KVM processor" CPU type, missing AVX, AVX2,
+// SSE4, SSSE3, even POPCNT — Node.js/V8 ran fine on that same hardware,
+// only the Bun-compiled `claude` binary hung, consistent with a JIT-engine
+// bug triggered by assumed-present CPU features being absent. **Fixed at
+// the infrastructure level, not here**: the Proxmox VM's CPU type was
+// changed from the generic model to host passthrough (confirmed live,
+// 2026-07-23 — real CPU flags now visible, e.g. avx2/bmi2/popcnt, and the
+// official installer completes normally, `claude --version` returns
+// instantly). If Claude Code ever seems to hang on install again, suspect
+// the VM's CPU type before this script — check `lscpu`/`/proc/cpuinfo` on
+// the node first.
 //
-// Given the CLI may simply not run in this cluster today, the install is
-// bounded and non-fatal (`timeout ... || echo ...`, no bare `set -e`
-// exposure on that line) rather than blocking the pod: code-server must
-// come up either way, with or without Claude Code. See the Description on
-// CodeServer's own doc comment update — 100% reproducible in testing, so
-// 45s is enough slack for a slow download without leaving every pod start
-// waiting on something that's never once succeeded here.
+// Bounded and non-fatal regardless (`timeout ... || echo ...`, no bare
+// `set -e` exposure on that line): code-server must come up either way,
+// with or without Claude Code, even though the install is expected to
+// succeed now.
 //
 // PATH is exported into both .bashrc and .profile rather than just one —
 // code-server's integrated terminal spawns bash as an interactive
 // non-login shell (sources .bashrc), but a user attaching some other way
 // (e.g. a login shell over `coder ssh`-style access) would only source
-// .profile — cheap to cover both rather than assume one. Harmless to run
-// even when the install above failed: just points PATH at a directory
-// that happens not to exist yet.
+// .profile.
 //
-// Carries an explicit CPU request (via browserResources, despite the name)
-// — unlike every other init container in this package (see
+// Carries an explicit CPU request (via browserResources, despite the
+// name) — unlike every other init container in this package (see
 // EstimatedResources' doc comment: "none of today's templates set
-// Resources on one"). Doesn't fix the hang above, but there's no reason to
-// leave it unset once identified.
+// Resources on one"). Found the hard way on a real deploy: with no
+// request, the installer got starved on an oversubscribed node and
+// Init:0/1 sat for minutes looking stuck.
 func installClaudeCodeInitContainer() corev1.Container {
 	const script = `set -e
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
+apk add --no-cache bash curl ca-certificates >/dev/null
 export HOME=` + claudeInstallHome + `
 mkdir -p "$HOME" "$HOME/data" "$HOME/extensions" "` + defaultWorkspacePath + `"
-timeout 45 bash -c 'curl -fsSL https://claude.ai/install.sh | bash -s -- stable' || echo "Claude Code install failed or timed out — continuing without it, code-server will still start"
+timeout 90 bash -c 'curl -fsSL https://claude.ai/install.sh | bash -s -- stable' || echo "Claude Code install failed or timed out — continuing without it, code-server will still start"
 for rcfile in "$HOME/.bashrc" "$HOME/.profile"; do
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rcfile"
 done
@@ -148,7 +137,7 @@ chown -R 1000:1000 "$HOME"
 
 	return corev1.Container{
 		Command:   []string{shShellPath, "-c", script},
-		Image:     "debian:bookworm-slim",
+		Image:     alpineImage,
 		Name:      "install-claude-code",
 		Resources: browserResources("500m", "128Mi", "256Mi"),
 		VolumeMounts: []corev1.VolumeMount{
@@ -160,22 +149,23 @@ chown -R 1000:1000 "$HOME"
 // disableCasualEnvDumpHook returns a postStart lifecycle hook that wraps
 // /usr/bin/env and /usr/bin/printenv so a bare, no-argument invocation
 // (the "just show me everything" form) prints a short message instead of
-// dumping the container's environment — including CLAUDE_CODE_OAUTH_TOKEN,
-// which necessarily lands in this container as a plain env var (that's the
-// only interface the Claude Code CLI reads it from; see CodeServer's own
-// doc comment for why that's unavoidable here). This is explicitly a
-// deterrent against a non-technical end-user casually running a familiar
-// command out of curiosity, not a security boundary: anyone who goes
-// looking has plenty of equivalent ways to read the same environment (a
-// bash builtin like `export`/`set`/`declare -x`, /proc/self/environ, a
-// one-line python3/node snippet — all left untouched, deliberately, since
-// this container is a coding IDE and disabling them isn't practical
-// without breaking normal use). Both wrapped commands still work exactly
-// as before when called *with* arguments — `env some-command args...` and
-// `printenv SPECIFIC_VAR` pass straight through to the real binary — only
-// the bare form is intercepted. env in particular can't just be deleted:
-// it's also the standard shebang interpreter-resolution mechanism
-// (`#!/usr/bin/env python3`), which real dev tooling depends on constantly.
+// dumping the container's environment — including CLAUDE_CODE_OAUTH_TOKEN/
+// ANTHROPIC_API_KEY, which necessarily land in this container as plain env
+// vars (that's the only interface the Claude Code CLI reads either from;
+// see CodeServer's own doc comment for why that's unavoidable here). This
+// is explicitly a deterrent against a non-technical end-user casually
+// running a familiar command out of curiosity, not a security boundary:
+// anyone who goes looking has plenty of equivalent ways to read the same
+// environment (a bash builtin like `export`/`set`/`declare -x`,
+// /proc/self/environ, a one-line python3/node snippet — all left
+// untouched, deliberately, since this container is a coding IDE and
+// disabling them isn't practical without breaking normal use). Both
+// wrapped commands still work exactly as before when called *with*
+// arguments — `env some-command args...` and `printenv SPECIFIC_VAR` pass
+// straight through to the real binary — only the bare form is intercepted.
+// env in particular can't just be deleted: it's also the standard shebang
+// interpreter-resolution mechanism (`#!/usr/bin/env python3`), which real
+// dev tooling depends on constantly.
 //
 // Can't be an init container: those run in a separate filesystem from the
 // main container and can only touch what's explicitly shared (this
@@ -229,15 +219,16 @@ exit 0
 
 // CodeServer deploys code-server (https://github.com/coder/code-server) — VS
 // Code accessible via the browser — via linuxserver.io's image, for the same
-// PUID/PGID/TZ/config-volume conventions as firefox/chrome/webtop, with a
-// best-effort attempt to install and authenticate the Claude Code CLI the
-// same way kubernetes-generic's Coder template wires up its claude-code
-// module: an install step plus CLAUDE_CODE_OAUTH_TOKEN as a plain env var,
-// which the CLI reads on its own — no separate `claude login` step needed.
-// "Best-effort" because, as of 2026-07-23, the Claude Code CLI binary does
-// not actually run in this cluster (hangs even on `--version`; see
-// installClaudeCodeInitContainer's doc comment) — code-server itself still
-// comes up either way, just without a working `claude` yet.
+// PUID/PGID/TZ/config-volume conventions as firefox/chrome/webtop, with the
+// Claude Code CLI installed and authenticated the same way
+// kubernetes-generic's Coder template wires up its claude-code module: an
+// install step plus CLAUDE_CODE_OAUTH_TOKEN as a plain env var, which the
+// CLI reads on its own — no separate `claude login` step needed.
+// ANTHROPIC_API_KEY is also supported as an alternative credential (direct
+// API billing instead of an OAuth/subscription-backed token) — set
+// whichever fits; both were exercised and confirmed working during the
+// investigation that got the underlying install hang fixed (see
+// installClaudeCodeInitContainer's doc comment for that story).
 //
 // Deliberately runs with no code-server password at all (PASSWORD/
 // HASHED_PASSWORD/SUDO_PASSWORD are never set — not even offered as
@@ -260,6 +251,7 @@ exit 0
 var CodeServer = Template{
 	Build: func(params map[string]any) (Rendered, error) {
 		claudeToken := paramString(params, paramKeyClaudeToken, "")
+		anthropicAPIKey := paramString(params, paramKeyAnthropicAPIKey, "")
 
 		env := []corev1.EnvVar{
 			{Name: envPUID, Value: linuxserverUID},
@@ -272,6 +264,9 @@ var CodeServer = Template{
 		// `claude login` themselves from the integrated terminal.
 		if claudeToken != "" {
 			env = append(env, corev1.EnvVar{Name: "CLAUDE_CODE_OAUTH_TOKEN", Value: claudeToken})
+		}
+		if anthropicAPIKey != "" {
+			env = append(env, corev1.EnvVar{Name: "ANTHROPIC_API_KEY", Value: anthropicAPIKey})
 		}
 
 		return Rendered{
@@ -314,10 +309,7 @@ var CodeServer = Template{
 			// directly to the Service's ClusterIP instead of through that
 			// subresource, which also closes an independent WebSocket-path
 			// risk this template actually depends on (terminal, extension
-			// host). That doc comment is explicit that the exact EOF
-			// trigger wasn't reproduced under direct testing, though — this
-			// still needs a real browser check once redeployed, not just
-			// trust in the theory.
+			// host).
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(codeServerPort)},
 			},
@@ -331,17 +323,31 @@ var CodeServer = Template{
 	ID:          templateIDCodeServer,
 	Icon:        "💻",
 	Name:        "VS Code (Browser)",
-	// 1.1.0: dropped password/sudoPassword/defaultWorkspace — redundant
-	// with the operator's own gateway auth, and a fixed workspace path
-	// serves this template's actual purpose (a consistent Claude Code
-	// install location) better than per-deploy configurability did. See
-	// CodeServer's own doc comment for the reasoning.
-	Version: "1.1.0",
+	// 1.3.0: reverted to the official Claude Code installer (latest/
+	// "stable", full OAuth-token support) now that the actual root cause of
+	// the install hang — this cluster's Proxmox VM using a generic,
+	// feature-minimal CPU type — was fixed at the infrastructure level
+	// (switched to host CPU passthrough, confirmed live). 1.2.0's
+	// claudeCodeNpmVersion pin and its ANTHROPIC_API_KEY-only workaround
+	// are no longer needed for that reason, but anthropicApiKey stays as a
+	// genuinely useful alternative credential, not just a leftover. 1.1.0
+	// dropped password/sudoPassword/defaultWorkspace — redundant with the
+	// operator's own gateway auth, and a fixed workspace path serves this
+	// template's actual purpose (a consistent Claude Code install
+	// location) better than per-deploy configurability did.
+	Version: "1.3.0",
 	Parameters: []Parameter{
 		{
 			Description: "OAuth token for Claude Code (from `claude setup-token`). Leave blank to skip authentication — the CLI is still installed but requires a manual `claude login` from the integrated terminal.",
 			Key:         paramKeyClaudeToken,
 			Label:       "Claude Code OAuth token",
+			DataSource:  DataSource{Kind: DataSourceStatic},
+			Type:        ParameterTypeString,
+		},
+		{
+			Description: "Anthropic API key (from console.anthropic.com) — an alternative to the OAuth token above, useful if you'd rather bill Claude Code usage directly to an API key than a Claude subscription. Leave blank if using the OAuth token instead.",
+			Key:         paramKeyAnthropicAPIKey,
+			Label:       "Anthropic API key",
 			DataSource:  DataSource{Kind: DataSourceStatic},
 			Type:        ParameterTypeString,
 		},

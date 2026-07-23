@@ -580,7 +580,7 @@ func TestCodeServerBuildDefaultsWithoutToken(t *testing.T) {
 	env := map[string]string{}
 	for _, e := range container.Env {
 		env[e.Name] = e.Value
-		if e.Name == "PASSWORD" || e.Name == "SUDO_PASSWORD" || e.Name == "HASHED_PASSWORD" || e.Name == "CLAUDE_CODE_OAUTH_TOKEN" {
+		if e.Name == "PASSWORD" || e.Name == "SUDO_PASSWORD" || e.Name == "HASHED_PASSWORD" || e.Name == "CLAUDE_CODE_OAUTH_TOKEN" || e.Name == "ANTHROPIC_API_KEY" {
 			t.Fatalf("did not expect %s to be set, got %+v", e.Name, container.Env)
 		}
 	}
@@ -614,12 +614,46 @@ func TestCodeServerBuildAppliesClaudeToken(t *testing.T) {
 	}
 }
 
+// TestCodeServerBuildAppliesAnthropicAPIKey guards the credential that
+// actually works today — see codeServerLifecycleHook's doc comment for why
+// claudeCodeNpmVersion's pin predates OAuth-token auth, leaving
+// ANTHROPIC_API_KEY as the only functional option.
+func TestCodeServerBuildAppliesAnthropicAPIKey(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{paramKeyAnthropicAPIKey: "sk-ant-api-test"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range rendered.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["ANTHROPIC_API_KEY"] != "sk-ant-api-test" {
+		t.Fatalf("expected ANTHROPIC_API_KEY to be passed through, got %+v", env)
+	}
+}
+
+// TestCodeServerPreparesConfigDirs is the regression guard for a real
+// incident: code-server runs as uid 1000 ("abc"), but linuxserver/
+// code-server's own startup creates /config/workspace, /config/data, and
+// /config/extensions fresh as root:root and never chowns them afterward —
+// confirmed live via `kubectl exec ... stat`, surfacing as "EACCES:
+// permission denied" the moment a user tried to save a file. The init
+// container must create (and therefore, via its later blanket chown, own)
+// all three before code-server ever starts. This init container no longer
+// installs Claude Code at all (see codeServerLifecycleHook's doc comment
+// for why that moved to a postStart hook on the main container) — its only
+// job now is this directory prep, so it's back on alpine like this
+// package's other init containers.
 // TestCodeServerInstallsClaudeCodeViaInitContainer guards the mechanism this
 // template exists for: the Claude Code CLI must be installed into the
-// shared /config volume (via the official claude.ai installer, the same one
-// registry.coder.com/coder/claude-code's own install script wraps) before
-// code-server starts, regardless of whether a token was supplied — an empty
-// token only skips authentication, never the install itself.
+// shared /config volume (via the official claude.ai installer) before
+// code-server starts, regardless of whether a credential was supplied — an
+// empty credential only skips authentication, never the install itself.
 func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
 	tmpl, _ := Get(templateIDCodeServer)
 	rendered, err := tmpl.Build(map[string]any{})
@@ -633,42 +667,37 @@ func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
 	if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != configVolumeName {
 		t.Fatalf("expected init container to mount the shared config volume, got %+v", init.VolumeMounts)
 	}
-	if len(init.Command) == 0 || !strings.Contains(init.Command[len(init.Command)-1], "claude.ai/install.sh") {
-		t.Fatalf("expected init container command to install Claude Code from claude.ai/install.sh, got %+v", init.Command)
+	if init.Image != alpineImage {
+		t.Fatalf("expected alpine, got %q", init.Image)
 	}
-	// Regression guard for a second real incident: the installer hangs
-	// indefinitely on Alpine (musl) specifically — see codeserver.go's doc
-	// comment. Pin the base image to a glibc distro so a future change
-	// doesn't silently reintroduce the musl build.
-	if strings.Contains(init.Image, "alpine") {
-		t.Fatalf("expected a glibc-based init container image (musl hangs the installer), got %q", init.Image)
+	script := init.Command[len(init.Command)-1]
+	if !strings.Contains(script, "claude.ai/install.sh") {
+		t.Fatalf("expected init container command to install Claude Code from claude.ai/install.sh, got: %s", script)
 	}
-	// Regression guard for a third real incident: the installer hangs even
-	// on debian-slim (glibc) — apparently unrelated to libc at all. The
-	// install step must not be allowed to fail the whole init container:
-	// code-server has to come up whether or not Claude Code does.
-	if len(init.Command) == 0 || !strings.Contains(init.Command[len(init.Command)-1], "|| echo") {
-		t.Fatalf("expected the install step to tolerate failure (|| echo ...) rather than block the pod, got %+v", init.Command)
+	// Regression guard: the install step must tolerate failure rather than
+	// block the pod — code-server has to come up whether or not Claude
+	// Code does, even now that the underlying hang is fixed at the
+	// infrastructure level (see this function's doc comment).
+	if !strings.Contains(script, "|| echo") {
+		t.Fatalf("expected the install step to tolerate failure (|| echo ...) rather than block the pod, got: %s", script)
 	}
 	// Regression guard for a real incident: with no CPU request, the
 	// installer got starved on an oversubscribed node and Init:0/1 sat for
-	// minutes looking stuck (see codeserver.go's doc comment).
+	// minutes looking stuck.
 	if init.Resources.Requests.Cpu().IsZero() {
 		t.Fatalf("expected init container to declare a CPU request, got %+v", init.Resources)
 	}
 }
 
-// TestCodeServerPreparesWorkspaceDataAndExtensionsDirs is the regression
-// guard for a fourth real incident: code-server runs as uid 1000 ("abc"),
-// but linuxserver/code-server's own startup creates /config/workspace,
-// /config/data, and /config/extensions fresh as root:root and never
-// chowns them afterward — confirmed live via `kubectl exec ... stat`,
-// surfacing as "EACCES: permission denied" the moment a user tried to save
-// a file. The init container must create (and therefore, via its later
-// blanket chown, own) all three before code-server ever starts. The
-// workspace path is a fixed constant now (not a parameter), so it's safe
-// to check the script literally rather than via an env var indirection.
-func TestCodeServerPreparesWorkspaceDataAndExtensionsDirs(t *testing.T) {
+// TestCodeServerPreparesConfigDirs is the regression guard for a real
+// incident: code-server runs as uid 1000 ("abc"), but linuxserver/
+// code-server's own startup creates /config/workspace, /config/data, and
+// /config/extensions fresh as root:root and never chowns them afterward —
+// confirmed live via `kubectl exec ... stat`, surfacing as "EACCES:
+// permission denied" the moment a user tried to save a file. The init
+// container must create (and therefore, via its later blanket chown, own)
+// all three before code-server ever starts.
+func TestCodeServerPreparesConfigDirs(t *testing.T) {
 	tmpl, _ := Get(templateIDCodeServer)
 	rendered, err := tmpl.Build(map[string]any{})
 	if err != nil {
@@ -684,14 +713,15 @@ func TestCodeServerPreparesWorkspaceDataAndExtensionsDirs(t *testing.T) {
 
 // TestCodeServerWrapsEnvAndPrintenvViaPostStartHook guards the deterrent
 // against a non-technical end-user casually running a familiar command to
-// dump CLAUDE_CODE_OAUTH_TOKEN (see disableCasualEnvDumpHook's doc comment
-// for why this is a deterrent, not a security boundary, and why it targets
-// exactly these two commands and no others). The actual wrapper shell
-// logic was verified end-to-end in a real container, not just read — this
-// test pins the wiring: the hook exists, runs on postStart (not some other
-// lifecycle point), and its script references both binaries plus an
-// explicit `exit 0` so a re-run (both already wrapped) can't return a
-// non-zero PostStart status and get the container killed.
+// dump CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY (see
+// disableCasualEnvDumpHook's doc comment for why this is a deterrent, not a
+// security boundary, and why it targets exactly these two commands and no
+// others). The actual wrapper shell logic was verified end-to-end in a
+// real container, not just read — this test pins the wiring: the hook
+// exists, runs on postStart (not some other lifecycle point), and its
+// script references both binaries plus an explicit `exit 0` so a re-run
+// (both already wrapped) can't return a non-zero PostStart status and get
+// the container killed.
 func TestCodeServerWrapsEnvAndPrintenvViaPostStartHook(t *testing.T) {
 	tmpl, _ := Get(templateIDCodeServer)
 	rendered, err := tmpl.Build(map[string]any{})
@@ -711,5 +741,11 @@ func TestCodeServerWrapsEnvAndPrintenvViaPostStartHook(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected postStart script to reference %q, got: %s", want, script)
 		}
+	}
+	// This hook must be scoped to env/printenv wrapping only now — Claude
+	// Code install lives back in the init container (see
+	// TestCodeServerInstallsClaudeCodeViaInitContainer).
+	if strings.Contains(script, "claude-code") {
+		t.Fatalf("did not expect the postStart hook to reference Claude Code install, got: %s", script)
 	}
 }
