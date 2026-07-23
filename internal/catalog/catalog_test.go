@@ -681,3 +681,35 @@ func TestCodeServerPreparesWorkspaceDataAndExtensionsDirs(t *testing.T) {
 		}
 	}
 }
+
+// TestCodeServerWrapsEnvAndPrintenvViaPostStartHook guards the deterrent
+// against a non-technical end-user casually running a familiar command to
+// dump CLAUDE_CODE_OAUTH_TOKEN (see disableCasualEnvDumpHook's doc comment
+// for why this is a deterrent, not a security boundary, and why it targets
+// exactly these two commands and no others). The actual wrapper shell
+// logic was verified end-to-end in a real container, not just read — this
+// test pins the wiring: the hook exists, runs on postStart (not some other
+// lifecycle point), and its script references both binaries plus an
+// explicit `exit 0` so a re-run (both already wrapped) can't return a
+// non-zero PostStart status and get the container killed.
+func TestCodeServerWrapsEnvAndPrintenvViaPostStartHook(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	lifecycle := rendered.Containers[0].Lifecycle
+	if lifecycle == nil || lifecycle.PostStart == nil || lifecycle.PostStart.Exec == nil {
+		t.Fatalf("expected a postStart exec hook on the code-server container, got %+v", lifecycle)
+	}
+	cmd := lifecycle.PostStart.Exec.Command
+	if len(cmd) == 0 {
+		t.Fatalf("expected a non-empty postStart command")
+	}
+	script := cmd[len(cmd)-1]
+	for _, want := range []string{"for cmd in env printenv", `"/usr/bin/$cmd"`, "exit 0"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected postStart script to reference %q, got: %s", want, script)
+		}
+	}
+}

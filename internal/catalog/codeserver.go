@@ -157,6 +157,76 @@ chown -R 1000:1000 "$HOME"
 	}
 }
 
+// disableCasualEnvDumpHook returns a postStart lifecycle hook that wraps
+// /usr/bin/env and /usr/bin/printenv so a bare, no-argument invocation
+// (the "just show me everything" form) prints a short message instead of
+// dumping the container's environment — including CLAUDE_CODE_OAUTH_TOKEN,
+// which necessarily lands in this container as a plain env var (that's the
+// only interface the Claude Code CLI reads it from; see CodeServer's own
+// doc comment for why that's unavoidable here). This is explicitly a
+// deterrent against a non-technical end-user casually running a familiar
+// command out of curiosity, not a security boundary: anyone who goes
+// looking has plenty of equivalent ways to read the same environment (a
+// bash builtin like `export`/`set`/`declare -x`, /proc/self/environ, a
+// one-line python3/node snippet — all left untouched, deliberately, since
+// this container is a coding IDE and disabling them isn't practical
+// without breaking normal use). Both wrapped commands still work exactly
+// as before when called *with* arguments — `env some-command args...` and
+// `printenv SPECIFIC_VAR` pass straight through to the real binary — only
+// the bare form is intercepted. env in particular can't just be deleted:
+// it's also the standard shebang interpreter-resolution mechanism
+// (`#!/usr/bin/env python3`), which real dev tooling depends on constantly.
+//
+// Can't be an init container: those run in a separate filesystem from the
+// main container and can only touch what's explicitly shared (this
+// package's other init containers only ever write to the shared /config
+// volume) — never the main image's own /usr/bin. A postStart hook runs
+// inside the main container's own filesystem right after it starts, which
+// is what direct binary replacement needs. Ends with an explicit `exit 0`
+// — a postStart hook that exits non-zero gets the whole container killed
+// and restarted per Kubernetes' own semantics, which would turn a cosmetic
+// nice-to-have into an outage, and without it the script's exit status
+// would be whatever the last executed command happened to return (e.g.
+// falsy on a re-run where both binaries are already wrapped, since the
+// last evaluated `[ ! -f "$real" ]` check would itself be false). Verified
+// directly in a throwaway container (not just read): the wrapper blocks
+// bare `env`/`printenv`, passes through `env <cmd> [args]` and `printenv
+// VAR` unchanged, and is idempotent on a second run. Timing is best-effort
+// too (no ordering guarantee against the container's own entrypoint), but
+// linuxserver's s6 init and the operator's own gateway-auth round trip
+// both take meaningfully longer than this hook's few filesystem
+// operations, so in practice it's in place long before a human could
+// reach a terminal.
+func disableCasualEnvDumpHook() *corev1.Lifecycle {
+	const script = `
+for cmd in env printenv; do
+  bin="/usr/bin/$cmd"
+  real="$bin.real"
+  if [ -f "$bin" ] && [ ! -f "$real" ]; then
+    mv "$bin" "$real"
+    cat > "$bin" <<'WRAP'
+#!/bin/sh
+if [ $# -eq 0 ]; then
+  echo "$0: environment listing is disabled on this workspace" >&2
+  exit 1
+fi
+WRAP
+    echo "exec \"$real\" \"\$@\"" >> "$bin"
+    chmod +x "$bin"
+  fi
+done
+exit 0
+`
+
+	return &corev1.Lifecycle{
+		PostStart: &corev1.LifecycleHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{shShellPath, "-c", script},
+			},
+		},
+	}
+}
+
 // CodeServer deploys code-server (https://github.com/coder/code-server) — VS
 // Code accessible via the browser — via linuxserver.io's image, for the same
 // PUID/PGID/TZ/config-volume conventions as firefox/chrome/webtop, with a
@@ -209,6 +279,7 @@ var CodeServer = Template{
 				{
 					Env:            env,
 					Image:          "lscr.io/linuxserver/code-server:latest",
+					Lifecycle:      disableCasualEnvDumpHook(),
 					LivenessProbe:  codeServerProbe(30),
 					Name:           templateIDCodeServer,
 					Ports:          []corev1.ContainerPort{{ContainerPort: codeServerPort, Name: portNameHTTP}},
