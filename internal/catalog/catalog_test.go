@@ -667,8 +667,14 @@ func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
 	if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != configVolumeName {
 		t.Fatalf("expected init container to mount the shared config volume, got %+v", init.VolumeMounts)
 	}
-	if init.Image != alpineImage {
-		t.Fatalf("expected alpine, got %q", init.Image)
+	// Regression guard for a real incident: an alpine (musl) init container
+	// makes claude.ai/install.sh download a musl-linked claude binary,
+	// which then fails to execute at all ("required file not found") once
+	// copied via the shared volume into the glibc-based main container
+	// (linuxserver/code-server is Ubuntu) — see this function's own doc
+	// comment for the full story. Must stay glibc-based.
+	if strings.Contains(init.Image, "alpine") {
+		t.Fatalf("expected a glibc-based init container image (musl produces a binary the main container can't execute), got %q", init.Image)
 	}
 	script := init.Command[len(init.Command)-1]
 	if !strings.Contains(script, "claude.ai/install.sh") {
