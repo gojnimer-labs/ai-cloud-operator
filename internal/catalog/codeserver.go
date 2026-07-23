@@ -61,9 +61,11 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 	}
 }
 
-// installClaudeCodeInitContainer installs the Claude Code CLI onto the
-// shared /config volume before code-server starts, via the same official
-// installer registry.coder.com/coder/claude-code's own install script wraps
+// installClaudeCodeInitContainer prepares the shared /config volume before
+// code-server starts: fixes a real, confirmed directory-ownership gap in
+// linuxserver/code-server's own startup (see the dedicated comment block
+// below), then installs the Claude Code CLI via the same official installer
+// registry.coder.com/coder/claude-code's own install script wraps
 // (https://claude.ai/install.sh) — mimicking that module's install step,
 // minus the Coder-agent-specific parts (script bin dir symlink, tmux
 // session) that don't apply outside a Coder workspace. Re-runs on every pod
@@ -71,6 +73,28 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 // browser-family template here (see restoreProfileInitContainer) — an
 // acceptable cost since this template always needs network access to
 // install Claude Code at all, unlike a conditional profile restore.
+//
+// Directory-ownership fix (found live, 2026-07-23, via `kubectl exec ...
+// stat`): code-server actually runs as the "abc" user (uid 1000, confirmed
+// via `ps aux` inside the container), but /config/workspace,
+// /config/data (--user-data-dir), and /config/extensions
+// (--extensions-dir) all came up owned by root:root 0755 — created fresh
+// by linuxserver's own startup *after* this init container's later
+// `chown -R 1000:1000 "$HOME"` had already run against an /config that
+// didn't have them yet, and never chowned by linuxserver's own init
+// afterward. Result: "EACCES: permission denied" the moment a user tries
+// to save a file in the editor. Pre-creating these three directories here,
+// before the main container ever starts, means linuxserver's own `mkdir
+// -p`-shaped startup logic finds them already present (a no-op) instead of
+// creating fresh root-owned ones — same defensive shape as
+// restoreProfileInitContainer's own `mkdir -p` + chown. The workspace path
+// is user-configurable (paramKeyWorkspace) and travels in via
+// DEFAULT_WORKSPACE_PATH, an env var read with "$..." — never
+// string-interpolated into the script text — so an adversarial value
+// (e.g. embedded shell metacharacters) can't break out of quoting; see
+// this package's other init containers (restoreProfileInitContainer,
+// backupStateFunction) for the same rule applied to other
+// caller-controlled strings.
 //
 // Deliberately NOT alpine, unlike this package's other init containers (see
 // restoreProfileInitContainer) — debian-slim was tried after a real deploy
@@ -111,21 +135,24 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 // EstimatedResources' doc comment: "none of today's templates set
 // Resources on one"). Doesn't fix the hang above, but there's no reason to
 // leave it unset once identified.
-func installClaudeCodeInitContainer() corev1.Container {
+func installClaudeCodeInitContainer(defaultWorkspace string) corev1.Container {
 	const script = `set -e
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
 export HOME=` + claudeInstallHome + `
-mkdir -p "$HOME"
+mkdir -p "$HOME" "$HOME/data" "$HOME/extensions" "$DEFAULT_WORKSPACE_PATH"
 timeout 45 bash -c 'curl -fsSL https://claude.ai/install.sh | bash -s -- stable' || echo "Claude Code install failed or timed out — continuing without it, code-server will still start"
 for rcfile in "$HOME/.bashrc" "$HOME/.profile"; do
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rcfile"
 done
-chown -R 1000:1000 "$HOME"
+chown -R 1000:1000 "$HOME" "$DEFAULT_WORKSPACE_PATH"
 `
 
 	return corev1.Container{
-		Command:   []string{shShellPath, "-c", script},
+		Command: []string{shShellPath, "-c", script},
+		Env: []corev1.EnvVar{
+			{Name: "DEFAULT_WORKSPACE_PATH", Value: defaultWorkspace},
+		},
 		Image:     "debian:bookworm-slim",
 		Name:      "install-claude-code",
 		Resources: browserResources("500m", "128Mi", "256Mi"),
@@ -209,7 +236,7 @@ var CodeServer = Template{
 				},
 			},
 			InitContainers: []corev1.Container{
-				installClaudeCodeInitContainer(),
+				installClaudeCodeInitContainer(defaultWorkspace),
 			},
 			// Named "http", plain HTTP — confirmed live (2026-07-23) by
 			// curling the pod IP directly: port codeServerPort answers a

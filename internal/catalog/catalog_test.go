@@ -664,6 +664,50 @@ func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
 	}
 }
 
+// TestCodeServerPreparesWorkspaceDataAndExtensionsDirs is the regression
+// guard for a fourth real incident: code-server runs as uid 1000 ("abc"),
+// but linuxserver/code-server's own startup creates /config/workspace,
+// /config/data, and /config/extensions fresh as root:root and never
+// chowns them afterward — confirmed live via `kubectl exec ... stat`,
+// surfacing as "EACCES: permission denied" the moment a user tried to save
+// a file. The init container must create (and therefore, via its later
+// blanket chown, own) all three before code-server ever starts.
+func TestCodeServerPreparesWorkspaceDataAndExtensionsDirs(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{paramKeyWorkspace: "/config/my-project"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	init := rendered.InitContainers[0]
+
+	var workspacePath string
+	for _, e := range init.Env {
+		if e.Name == "DEFAULT_WORKSPACE_PATH" {
+			workspacePath = e.Value
+		}
+	}
+	if workspacePath != "/config/my-project" {
+		t.Fatalf("expected DEFAULT_WORKSPACE_PATH env var to carry the resolved workspace path, got %q", workspacePath)
+	}
+
+	script := init.Command[len(init.Command)-1]
+	for _, want := range []string{`"$HOME/data"`, `"$HOME/extensions"`, `"$DEFAULT_WORKSPACE_PATH"`} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected init container script to reference %s, got: %s", want, script)
+		}
+	}
+	// The workspace path must travel via the env var, never spliced
+	// directly into the script text — otherwise a caller-supplied path
+	// containing shell metacharacters could break out of quoting.
+	if strings.Contains(script, "/config/my-project") {
+		t.Fatalf("expected the workspace path to be string-interpolated nowhere in the script, got: %s", script)
+	}
+}
+
 // TestCodeServerRunsWithNoBuiltInAuthByDefault guards the fix for why this
 // template was reverted once before (see CodeServer's doc comment): its
 // login page must not exist unless the caller explicitly opts in with a
