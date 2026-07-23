@@ -23,10 +23,10 @@ backend for ownership tracking and browser-facing access:
   subresource, authenticated by a round trip to Convex followed by a
   self-issued, per-workload signed session cookie (`internal/gateway`).
 - **Catalog templates** — `Workload.spec.templateName` selects a
-  pre-built container spec (`nginx`, `firefox`, `chrome` today) instead of
-  a raw image, so common workload types don't need their spec hand-written
-  (`internal/catalog`). See `.claude/skills/workload-template` for how to
-  add a new one.
+  pre-built container spec (`nginx`, `firefox`, `chrome`, `webtop`,
+  `code-server` today) instead of a raw image, so common workload types
+  don't need their spec hand-written (`internal/catalog`). See
+  `.claude/skills/workload-template` for how to add a new one.
 
 ## Install
 
