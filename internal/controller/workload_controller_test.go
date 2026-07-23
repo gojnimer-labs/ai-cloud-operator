@@ -252,6 +252,77 @@ var _ = Describe("Workload Controller", func() {
 		})
 	})
 
+	// Regression coverage for the code-server /config persistence fix: an
+	// EmptyDir there wiped Claude Code's one-time interactive OAuth login on
+	// every pod restart. code-server is the only template today that
+	// declares a catalog.PersistentVolumeClaimSpec, so it doubles as the
+	// live exercise of reconcilePVCs/volumesWithClaimNames end-to-end
+	// against a real (envtest) apiserver.
+	Context("When a template declares a PersistentVolumeClaim", func() {
+		const (
+			resourceName      = "test-resource-pvc"
+			resourceNamespace = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}
+		wantClaimName := resourceName + "-config"
+
+		AfterEach(func() {
+			workload := &appsv1alpha1.Workload{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, workload); err == nil {
+				Expect(k8sClient.Delete(ctx, workload)).To(Succeed())
+				forceRemoveFinalizers(ctx, typeNamespacedName)
+			}
+			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace}})).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: wantClaimName, Namespace: resourceNamespace}})).To(Succeed())
+		})
+
+		It("creates a workload-scoped PVC, points the Deployment's volume at it, and forces Recreate strategy", func() {
+			resource := &appsv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: resourceNamespace},
+				Spec:       appsv1alpha1.WorkloadSpec{TemplateName: "code-server"},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			controllerReconciler := &WorkloadReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			var pvc corev1.PersistentVolumeClaim
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: wantClaimName, Namespace: resourceNamespace}, &pvc)).To(Succeed())
+			Expect(pvc.Spec.AccessModes).To(ConsistOf(corev1.ReadWriteOnce))
+			Expect(pvc.Spec.Resources.Requests.Storage().IsZero()).To(BeFalse())
+			Expect(pvc.OwnerReferences).To(HaveLen(1))
+			Expect(pvc.OwnerReferences[0].Name).To(Equal(resourceName))
+
+			var deployment appsv1.Deployment
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &deployment)).To(Succeed())
+			Expect(deployment.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
+
+			var configVolume *corev1.Volume
+			for i := range deployment.Spec.Template.Spec.Volumes {
+				if deployment.Spec.Template.Spec.Volumes[i].Name == "config" {
+					configVolume = &deployment.Spec.Template.Spec.Volumes[i]
+				}
+			}
+			Expect(configVolume).NotTo(BeNil())
+			Expect(configVolume.PersistentVolumeClaim).NotTo(BeNil())
+			Expect(configVolume.PersistentVolumeClaim.ClaimName).To(Equal(wantClaimName))
+
+			// A second reconcile against the now-existing PVC must not error
+			// (CreateOrUpdate's read-modify-write against an
+			// already-satisfied, mostly-immutable PVC spec) — this is the
+			// idempotency reconcilePVCs' own doc comment relies on.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
 	Context("When a WorkloadNotifier is configured", func() {
 		const (
 			resourceName      = "test-resource-notify"
