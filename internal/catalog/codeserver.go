@@ -78,6 +78,17 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 // non-login shell (sources .bashrc), but a user attaching some other way
 // (e.g. a login shell over `coder ssh`-style access) would only source
 // .profile — cheap to cover both rather than assume one.
+//
+// Carries an explicit CPU request (via browserResources, despite the name)
+// — unlike every other init container in this package (see
+// EstimatedResources' doc comment: "none of today's templates set
+// Resources on one"). Found the hard way on a real deploy: with no
+// request, the installer binary (briefly ~90%+ CPU on its own) gets
+// starved rather than scheduled fairly on an oversubscribed node, so
+// Init:0/1 can sit for minutes looking stuck when it's actually just
+// waiting for CPU time. 500m is enough for the kernel/scheduler to give it
+// a fair share without reserving a full core for what's normally a
+// few-seconds download-and-extract.
 func installClaudeCodeInitContainer() corev1.Container {
 	const script = `set -e
 apk add --no-cache bash curl ca-certificates >/dev/null
@@ -91,9 +102,10 @@ chown -R 1000:1000 "$HOME"
 `
 
 	return corev1.Container{
-		Command: []string{shShellPath, "-c", script},
-		Image:   "alpine:latest",
-		Name:    "install-claude-code",
+		Command:   []string{shShellPath, "-c", script},
+		Image:     "alpine:latest",
+		Name:      "install-claude-code",
+		Resources: browserResources("500m", "128Mi", "256Mi"),
 		VolumeMounts: []corev1.VolumeMount{
 			{MountPath: browserConfigMountPath, Name: configVolumeName},
 		},

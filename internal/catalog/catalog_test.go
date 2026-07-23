@@ -642,6 +642,12 @@ func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
 	if len(init.Command) == 0 || !strings.Contains(init.Command[len(init.Command)-1], "claude.ai/install.sh") {
 		t.Fatalf("expected init container command to install Claude Code from claude.ai/install.sh, got %+v", init.Command)
 	}
+	// Regression guard for a real incident: with no CPU request, the
+	// installer got starved on an oversubscribed node and Init:0/1 sat for
+	// minutes looking stuck (see codeserver.go's doc comment).
+	if init.Resources.Requests.Cpu().IsZero() {
+		t.Fatalf("expected init container to declare a CPU request, got %+v", init.Resources)
+	}
 }
 
 // TestCodeServerRunsWithNoBuiltInAuthByDefault guards the fix for why this
