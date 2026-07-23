@@ -439,10 +439,7 @@ func setupConvexIntegration(
 		return nil, err
 	}
 
-	proxy, err := gateway.NewServiceProxy(mgr.GetClient(), mgr.GetConfig(), workloadNamespace)
-	if err != nil {
-		return nil, fmt.Errorf("building gateway service proxy: %w", err)
-	}
+	proxy := gateway.NewServiceProxy(mgr.GetClient(), workloadNamespace)
 
 	podExecutor, err := podexec.New(mgr.GetConfig())
 	if err != nil {

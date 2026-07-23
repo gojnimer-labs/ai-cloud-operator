@@ -215,33 +215,27 @@ var CodeServer = Template{
 			// curling the pod IP directly: port codeServerPort answers a
 			// normal HTTP/1.1 302 redirect, and a TLS handshake against the
 			// same port fails outright ("wrong version number"), so it does
-			// NOT speak TLS. Tried naming this "https" first, on the theory
-			// that the K8s API server's services/{name}:{port}/proxy
-			// subresource (which internal/gateway/proxy.go's Handler routes
-			// through) picks HTTP vs HTTPS to the backend by that exact
-			// port-name convention — but a kubectl get --raw against that
-			// same subresource path (bypassing this operator's own gateway
-			// entirely) already returns the full code-server workbench page
-			// correctly on plain "http". So the underlying proxy plumbing
-			// isn't the problem, and this isn't a scheme mismatch.
+			// NOT speak TLS. Naming this "https" would make
+			// internal/gateway/proxy.go dial it over TLS and fail outright
+			// — see serviceProxyScheme's own doc comment for when that
+			// naming is actually correct to use.
 			//
-			// The operator's own logs around the actual failed browser
-			// access instead show `httputil: ReverseProxy read error during
-			// body copy: unexpected EOF` — a response getting cut off
-			// mid-stream through internal/gateway/proxy.go's
-			// httputil.ReverseProxy, not anything this template's Build()
-			// controls. code-server's workbench needs WebSocket connections
-			// (terminal, extension host) immediately after the initial page
-			// load; the K8s API server's services/proxy subresource this
-			// gateway proxies through is not designed for that (it's built
-			// for simple request/response HTTP, the same reason
-			// firefox/chrome/webtop's KasmVNC UIs — which don't depend on a
-			// live WebSocket the instant the page loads the same way — don't
-			// hit this). If true, the real fix is in the gateway's proxy
-			// mechanism itself, not in this template — out of scope here
-			// without confirming that's actually the cause and discussing
-			// the approach, since internal/gateway/proxy.go is shared by
-			// every template, not just this one.
+			// The real failure this entrypoint hit end-to-end wasn't a
+			// scheme mismatch at all: the operator's gateway used to relay
+			// every entrypoint through the Kubernetes API server's
+			// services/proxy subresource, and the operator's own logs
+			// showed `httputil: ReverseProxy read error during body copy:
+			// unexpected EOF` live on this exact workload — something
+			// nginx/firefox/chrome/webtop's much smaller payloads never
+			// triggered. Addressed at the gateway level, not here — see
+			// internal/gateway/proxy.go's own doc comment — by proxying
+			// directly to the Service's ClusterIP instead of through that
+			// subresource, which also closes an independent WebSocket-path
+			// risk this template actually depends on (terminal, extension
+			// host). That doc comment is explicit that the exact EOF
+			// trigger wasn't reproduced under direct testing, though — this
+			// still needs a real browser check once redeployed, not just
+			// trust in the theory.
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(codeServerPort)},
 			},
