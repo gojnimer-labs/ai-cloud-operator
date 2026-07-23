@@ -69,44 +69,51 @@ func codeServerProbe(initialDelay int32) *corev1.Probe {
 // install Claude Code at all, unlike a conditional profile restore.
 //
 // Deliberately NOT alpine, unlike this package's other init containers (see
-// restoreProfileInitContainer) — a real deploy found the official installer
-// hangs indefinitely on Alpine specifically. It downloads a per-libc build
-// (its own logs named the binary "claude-...-linux-x64-musl"), and on
-// Alpine's musl libc that build span-loops at ~100% CPU doing zero
-// syscalls (confirmed with strace: no reads, no network, no file I/O) —
-// not slow, genuinely stuck, reproducible on every fresh attempt at the
-// identical point. Likely a musl-vs-glibc runtime bug in the CLI's own
-// bundled runtime, not anything this template's script does — the fix
-// available here is to make the installer pick its glibc build instead by
-// running on a glibc-based image (debian-slim), not to work around the
-// hang itself. bash/curl/ca-certificates aren't in debian-slim by default
-// either, so still an explicit install step, just via apt instead of apk.
+// restoreProfileInitContainer) — debian-slim was tried after a real deploy
+// first hung on Alpine specifically (musl libc). That turned out to be a
+// red herring: live debugging on the actual cluster (root SSH + kubectl
+// exec, 2026-07-23) found the installer hangs identically on debian-slim
+// (glibc) — and in fact hangs on a bare `claude --version`, with no
+// install/network/TTY involved at all. Zero syscalls, ~100% CPU across two
+// threads, 100% reproducible on every attempt. Not a musl bug, not a TUI
+// bug, not fixed by DISABLE_AUTOUPDATER — most likely the CLI's own
+// bundled runtime (Bun, going by the epoll/eventfd fds and ~5GB reserved
+// VmSize) hitting a container-security restriction this cluster enforces
+// (kernel io_uring is enabled here, but the default container seccomp
+// profile very plausibly still blocks the io_uring syscalls Bun wants —
+// confirming that needs an unconfined-seccomp debug pod, which is a real
+// security-posture call outside this template's authority to make
+// unilaterally). Kept on debian-slim anyway since there's no evidence
+// alpine is any better and no reason to reintroduce that variable.
+//
+// Given the CLI may simply not run in this cluster today, the install is
+// bounded and non-fatal (`timeout ... || echo ...`, no bare `set -e`
+// exposure on that line) rather than blocking the pod: code-server must
+// come up either way, with or without Claude Code. See the Description on
+// CodeServer's own doc comment update — 100% reproducible in testing, so
+// 45s is enough slack for a slow download without leaving every pod start
+// waiting on something that's never once succeeded here.
 //
 // PATH is exported into both .bashrc and .profile rather than just one —
 // code-server's integrated terminal spawns bash as an interactive
 // non-login shell (sources .bashrc), but a user attaching some other way
 // (e.g. a login shell over `coder ssh`-style access) would only source
-// .profile — cheap to cover both rather than assume one.
-//
-// Wrapped in `timeout` as a safety net: if the glibc build hangs too (this
-// fix is a strong bet, not a confirmed root cause — no way to test it from
-// here), the init container now fails loudly after 2 minutes instead of
-// silently sitting in Init:0/1 looking stuck for 10+.
+// .profile — cheap to cover both rather than assume one. Harmless to run
+// even when the install above failed: just points PATH at a directory
+// that happens not to exist yet.
 //
 // Carries an explicit CPU request (via browserResources, despite the name)
 // — unlike every other init container in this package (see
 // EstimatedResources' doc comment: "none of today's templates set
-// Resources on one"). Also found the hard way on a real deploy, before the
-// hang above was isolated: with no request, this container competes for
-// CPU on a busy node like anything else without one. Doesn't fix a genuine
-// hang, but there's no reason to leave it unset once identified.
+// Resources on one"). Doesn't fix the hang above, but there's no reason to
+// leave it unset once identified.
 func installClaudeCodeInitContainer() corev1.Container {
 	const script = `set -e
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
 export HOME=` + claudeInstallHome + `
 mkdir -p "$HOME"
-timeout 120 bash -c 'curl -fsSL https://claude.ai/install.sh | bash -s -- stable'
+timeout 45 bash -c 'curl -fsSL https://claude.ai/install.sh | bash -s -- stable' || echo "Claude Code install failed or timed out — continuing without it, code-server will still start"
 for rcfile in "$HOME/.bashrc" "$HOME/.profile"; do
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rcfile"
 done
@@ -126,11 +133,15 @@ chown -R 1000:1000 "$HOME"
 
 // CodeServer deploys code-server (https://github.com/coder/code-server) — VS
 // Code accessible via the browser — via linuxserver.io's image, for the same
-// PUID/PGID/TZ/config-volume conventions as firefox/chrome/webtop, with the
-// Claude Code CLI installed and authenticated the same way
-// kubernetes-generic's Coder template wires up its claude-code module: an
-// install step plus CLAUDE_CODE_OAUTH_TOKEN as a plain env var, which the
-// CLI reads on its own — no separate `claude login` step needed.
+// PUID/PGID/TZ/config-volume conventions as firefox/chrome/webtop, with a
+// best-effort attempt to install and authenticate the Claude Code CLI the
+// same way kubernetes-generic's Coder template wires up its claude-code
+// module: an install step plus CLAUDE_CODE_OAUTH_TOKEN as a plain env var,
+// which the CLI reads on its own — no separate `claude login` step needed.
+// "Best-effort" because, as of 2026-07-23, the Claude Code CLI binary does
+// not actually run in this cluster (hangs even on `--version`; see
+// installClaudeCodeInitContainer's doc comment) — code-server itself still
+// comes up either way, just without a working `claude` yet.
 //
 // Deliberately runs with no code-server password (PASSWORD/HASHED_PASSWORD
 // both left unset unless the caller opts in) — this workload is only ever

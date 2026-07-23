@@ -649,6 +649,13 @@ func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
 	if strings.Contains(init.Image, "alpine") {
 		t.Fatalf("expected a glibc-based init container image (musl hangs the installer), got %q", init.Image)
 	}
+	// Regression guard for a third real incident: the installer hangs even
+	// on debian-slim (glibc) — apparently unrelated to libc at all. The
+	// install step must not be allowed to fail the whole init container:
+	// code-server has to come up whether or not Claude Code does.
+	if len(init.Command) == 0 || !strings.Contains(init.Command[len(init.Command)-1], "|| echo") {
+		t.Fatalf("expected the install step to tolerate failure (|| echo ...) rather than block the pod, got %+v", init.Command)
+	}
 	// Regression guard for a real incident: with no CPU request, the
 	// installer got starved on an oversubscribed node and Init:0/1 sat for
 	// minutes looking stuck (see codeserver.go's doc comment).
