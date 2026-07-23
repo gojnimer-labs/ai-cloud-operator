@@ -755,3 +755,50 @@ func TestCodeServerWrapsEnvAndPrintenvViaPostStartHook(t *testing.T) {
 		t.Fatalf("did not expect the postStart hook to reference Claude Code install, got: %s", script)
 	}
 }
+
+// TestCodeServerConfigVolumeIsPersistent is the regression guard for the
+// real incident that motivated it: with /config as an EmptyDir, a pod
+// restart wiped Claude Code's one-time interactive OAuth login, so
+// code-server always came up unauthenticated even with claudeCodeOauthToken
+// set — unlike a real, persistent-$HOME Coder workspace. /config must be
+// backed by a PersistentVolumeClaim instead, and the Volume's placeholder
+// ClaimName must match the declared claim's logical Name so the reconciler
+// (internal/controller's volumesWithClaimNames) can rewrite it to the real,
+// workload-scoped name — see PersistentVolumeClaimSpec's own doc comment.
+func TestCodeServerConfigVolumeIsPersistent(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	var configVolume *corev1.Volume
+	for i := range rendered.Volumes {
+		if rendered.Volumes[i].Name == configVolumeName {
+			configVolume = &rendered.Volumes[i]
+		}
+	}
+	if configVolume == nil {
+		t.Fatalf("expected a %q volume, got %+v", configVolumeName, rendered.Volumes)
+	}
+	if configVolume.EmptyDir != nil {
+		t.Fatalf("expected %q to be PersistentVolumeClaim-backed, not EmptyDir — an EmptyDir wipes Claude Code's OAuth login on every pod restart", configVolumeName)
+	}
+	if configVolume.PersistentVolumeClaim == nil {
+		t.Fatalf("expected %q to have a PersistentVolumeClaim source, got %+v", configVolumeName, configVolume.VolumeSource)
+	}
+
+	if len(rendered.PersistentVolumeClaims) != 1 {
+		t.Fatalf("expected exactly one declared PersistentVolumeClaim, got %+v", rendered.PersistentVolumeClaims)
+	}
+	claim := rendered.PersistentVolumeClaims[0]
+	if claim.Name != configVolumeName {
+		t.Fatalf("expected declared claim Name to be %q, got %q", configVolumeName, claim.Name)
+	}
+	if configVolume.PersistentVolumeClaim.ClaimName != claim.Name {
+		t.Fatalf("expected the volume's placeholder ClaimName (%q) to match the declared claim's logical Name (%q) — the reconciler rewrites this using the match", configVolume.PersistentVolumeClaim.ClaimName, claim.Name)
+	}
+	if claim.StorageSize.IsZero() {
+		t.Fatalf("expected a non-zero storage size, got %+v", claim.StorageSize)
+	}
+}

@@ -18,6 +18,7 @@ package catalog
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -27,6 +28,14 @@ const (
 
 	paramKeyClaudeToken     = "claudeCodeOauthToken"
 	paramKeyAnthropicAPIKey = "anthropicApiKey"
+
+	// codeServerConfigVolumeSize is /config's PVC request — sized generously
+	// for a coding workspace (installed tooling, node_modules, a Claude Code
+	// install, project checkouts), not just the tiny bit of state (Claude
+	// Code's OAuth credentials) that actually motivated making this volume
+	// persistent in the first place. See CodeServer's own doc comment for
+	// why /config must be a PersistentVolumeClaim, not an EmptyDir.
+	codeServerConfigVolumeSize = "10Gi"
 
 	// claudeInstallHome is where the init container installs Claude Code —
 	// the shared /config volume, so the binary is already present on
@@ -337,8 +346,32 @@ var CodeServer = Template{
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(codeServerPort)},
 			},
+			// PersistentVolumeClaim, not EmptyDir like this package's
+			// browser templates — /config holds Claude Code's one-time
+			// interactive OAuth login state (~/.claude and friends), which
+			// must survive a pod restart the same way it survives one in a
+			// real, persistent-$HOME Coder workspace (see
+			// kubernetes-generic's claude-code module). An EmptyDir here
+			// wiped that login on every pod restart, so code-server always
+			// came up unauthenticated even with claudeCodeOauthToken set —
+			// confirmed live, 2026-07-23. The ClaimName below is a
+			// placeholder the reconciler rewrites to the real,
+			// workload-scoped PVC name it creates — see
+			// PersistentVolumeClaimSpec's own doc comment.
 			Volumes: []corev1.Volume{
-				{Name: configVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{
+					Name: configVolumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: configVolumeName},
+					},
+				},
+			},
+			PersistentVolumeClaims: []PersistentVolumeClaimSpec{
+				{
+					Name:        configVolumeName,
+					StorageSize: resource.MustParse(codeServerConfigVolumeSize),
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				},
 			},
 		}, nil
 	},
