@@ -26,8 +26,9 @@ import (
 )
 
 const (
-	testNamespace  = "default"
-	testFirefoxPod = "firefox-abc"
+	testNamespace          = "default"
+	testFirefoxPod         = "firefox-abc"
+	testProfileDownloadURL = "https://example.com/profile.tar.gz"
 
 	// Parameter keys reused across the synthetic Templates below.
 	paramKeyName  = "name"
@@ -276,7 +277,7 @@ func TestNginxBuildUsesResolvedParams(t *testing.T) {
 
 func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 	tmpl, _ := Get(templateIDFirefox)
-	rendered, err := tmpl.Build(map[string]any{paramKeyProfileURL: "https://example.com/profile.tar.gz"})
+	rendered, err := tmpl.Build(map[string]any{paramKeyProfileURL: testProfileDownloadURL})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -285,7 +286,7 @@ func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 	}
 	found := false
 	for _, env := range rendered.InitContainers[0].Env {
-		if env.Name == envProfileDownloadURL && env.Value == "https://example.com/profile.tar.gz" {
+		if env.Name == envProfileDownloadURL && env.Value == testProfileDownloadURL {
 			found = true
 		}
 	}
@@ -439,7 +440,7 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 		t.Fatalf("expected at least 2 trailing args, got %+v", exec.command)
 	}
 	lastTwo := exec.command[len(exec.command)-2:]
-	if lastTwo[0] != ".mozilla/firefox" {
+	if lastTwo[0] != "." {
 		t.Fatalf("expected profile path as second-to-last arg, got %q", lastTwo[0])
 	}
 	if lastTwo[1] != "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900" {
@@ -468,6 +469,127 @@ func TestFirefoxBuildWithoutProfileURLStartsFresh(t *testing.T) {
 	for _, env := range rendered.InitContainers[0].Env {
 		if env.Name == envProfileDownloadURL && env.Value != "" {
 			t.Fatalf("expected empty PROFILE_DOWNLOAD_URL when not provided, got %q", env.Value)
+		}
+	}
+}
+
+// TestBrowserBuildSetsStartURLWhenProvided guards startURLParameter's actual
+// wiring: chrome maps it to CHROME_CLI, firefox to FIREFOX_CLI — the
+// linuxserver-documented "pass this string straight to the app's own argv"
+// mechanism for each image.
+func TestBrowserBuildSetsStartURLWhenProvided(t *testing.T) {
+	cases := []struct {
+		id     string
+		envVar string
+	}{
+		{templateIDChrome, envChromeCLI},
+		{templateIDFirefox, envFirefoxCLI},
+	}
+	for _, tc := range cases {
+		tmpl, _ := Get(tc.id)
+		rendered, err := tmpl.Build(map[string]any{paramKeyStartURL: "https://example.com"})
+		if err != nil {
+			t.Fatalf("%s: build: %v", tc.id, err)
+		}
+		env := map[string]string{}
+		for _, e := range rendered.Containers[0].Env {
+			env[e.Name] = e.Value
+		}
+		if env[tc.envVar] != "https://example.com" {
+			t.Fatalf("%s: expected %s=https://example.com, got %+v", tc.id, tc.envVar, env)
+		}
+	}
+}
+
+// TestBrowserBuildOmitsStartURLEnvWhenBlank guards the "leave blank to use
+// the browser's own default" case: an unset startUrl must not set
+// CHROME_CLI/FIREFOX_CLI to an empty string (which would still override the
+// image's own default argv) — the env var must be absent entirely.
+func TestBrowserBuildOmitsStartURLEnvWhenBlank(t *testing.T) {
+	for _, tc := range []struct {
+		id     string
+		envVar string
+	}{
+		{templateIDChrome, envChromeCLI},
+		{templateIDFirefox, envFirefoxCLI},
+	} {
+		tmpl, _ := Get(tc.id)
+		rendered, err := tmpl.Build(map[string]any{})
+		if err != nil {
+			t.Fatalf("%s: build: %v", tc.id, err)
+		}
+		for _, e := range rendered.Containers[0].Env {
+			if e.Name == tc.envVar {
+				t.Fatalf("%s: expected no %s env var when startUrl is blank, got %+v", tc.id, tc.envVar, rendered.Containers[0].Env)
+			}
+		}
+	}
+}
+
+// TestSelkiesTemplatesSetFileManagerPath guards the fix for a real,
+// live-observed UX gap: with FILE_MANAGER_PATH unset, Selkies' own "Files"
+// tab rooted at $browserConfigMountPath/Desktop, a sibling of
+// .../Downloads — reachable from one, not the other. Every template built
+// on docker-baseimage-selkies (firefox, chrome, webtop) must set it one
+// level up, at browserConfigMountPath itself, so both are reachable. Not
+// code-server (a different, non-Selkies image) or nginx (no desktop UI at
+// all).
+func TestSelkiesTemplatesSetFileManagerPath(t *testing.T) {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
+		tmpl, _ := Get(id)
+		rendered, err := tmpl.Build(map[string]any{})
+		if err != nil {
+			t.Fatalf("%s: build: %v", id, err)
+		}
+		found := false
+		for _, e := range rendered.Containers[0].Env {
+			if e.Name == envFileManagerPath {
+				if e.Value != browserConfigMountPath {
+					t.Fatalf("%s: expected FILE_MANAGER_PATH=%q, got %q", id, browserConfigMountPath, e.Value)
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s: expected a FILE_MANAGER_PATH env var, got %+v", id, rendered.Containers[0].Env)
+		}
+	}
+}
+
+// TestBrowserBackupAndRestoreScopeIsWholeConfigDir guards the widened
+// backup/restore scope: firefox/chrome now carry the entire /config home
+// directory (".", same as webtop always has), not just their own
+// browser-internal profile subdirectory — otherwise files a user saves
+// through Selkies' Files tab (now reachable at .../Desktop and
+// .../Downloads, see TestSelkiesTemplatesSetFileManagerPath) would silently
+// not survive a backup/restore cycle.
+func TestBrowserBackupAndRestoreScopeIsWholeConfigDir(t *testing.T) {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
+		tmpl, _ := Get(id)
+
+		rendered, err := tmpl.Build(map[string]any{paramKeyProfileURL: testProfileDownloadURL})
+		if err != nil {
+			t.Fatalf("%s: build: %v", id, err)
+		}
+		if len(rendered.InitContainers) != 1 {
+			t.Fatalf("%s: expected 1 init container, got %d", id, len(rendered.InitContainers))
+		}
+		if script := rendered.InitContainers[0].Command; len(script) < 3 || !strings.Contains(script[2], `PROFILE_DIR="/config/.`) {
+			t.Fatalf("%s: expected the init container script to restore into /config/. (whole home dir), got %+v", id, script)
+		}
+
+		fn, ok := GetOperation(tmpl, "backup_state")
+		if !ok {
+			t.Fatalf("%s: expected a backup_state operation", id)
+		}
+		exec := &fakePodExecutor{}
+		if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: "pod"}, map[string]any{
+			paramKeyUploadURL: "https://r2.example.com/upload",
+		}); err != nil {
+			t.Fatalf("%s: unexpected error: %v", id, err)
+		}
+		if len(exec.command) < 2 || exec.command[len(exec.command)-2] != "." {
+			t.Fatalf("%s: expected \".\" as the backup profile path, got %+v", id, exec.command)
 		}
 	}
 }
