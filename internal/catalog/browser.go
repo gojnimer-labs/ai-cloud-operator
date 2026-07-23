@@ -75,12 +75,6 @@ const (
 	linuxserverUID      = "1000"
 	linuxserverTimezone = "Etc/UTC"
 
-	// envPassword names the linuxserver.io web-GUI password env var
-	// firefox/chrome don't use (they have no auth of their own) but
-	// code-server does — shared here anyway since a template + its own
-	// tests both reference the literal, tripping goconst at 3 occurrences.
-	envPassword = "PASSWORD"
-
 	// shShellPath is the interpreter every init/exec script in this package
 	// runs under — 3+ occurrences of the bare literal trips goconst.
 	shShellPath = "/bin/sh"
