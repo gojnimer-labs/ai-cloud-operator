@@ -56,6 +56,7 @@ const (
 	// apps and Chromium both need real shared memory, more than the tiny
 	// default Kubernetes gives a container's /dev/shm.
 	dshmVolumeName = "dshm"
+	dshmMountPath  = "/dev/shm"
 
 	browserConfigMountPath = "/config"
 	configVolumeName       = "config"

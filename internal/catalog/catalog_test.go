@@ -924,3 +924,106 @@ func TestCodeServerConfigVolumeIsPersistent(t *testing.T) {
 		t.Fatalf("expected a non-zero storage size, got %+v", claim.StorageSize)
 	}
 }
+
+// TestChromiumTrackerUsesChromiumNotChrome guards the exact reason this
+// template exists as a separate one from Chrome: branded Google Chrome
+// (stable channel) silently ignores --load-extension outside Chrome for
+// Testing — confirmed live, 2026-07-24 (chrome.go's own image kept loading
+// fine, but chrome://extensions never listed the unpacked extension, and
+// Chrome's own extensions.settings Preferences record for it was simply
+// absent, no error). Chromium doesn't have that restriction.
+func TestChromiumTrackerUsesChromiumNotChrome(t *testing.T) {
+	tmpl, _ := Get(templateIDChromiumTracker)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := rendered.Containers[0].Image; got != "lscr.io/linuxserver/chromium:latest" {
+		t.Fatalf("expected the chromium image (not chrome), got %q", got)
+	}
+}
+
+// TestChromiumTrackerLoadsExtensionAndOpensChatGPT guards the CHROME_CLI
+// wiring: the extension must be force-loaded from the exact directory the
+// init container installs it into (trackerExtensionInstallDir), and the
+// browser must open straight to chatgpt.com — this template exists
+// specifically to run gojnimer-labs/ai-cloud-tracker against that site, not
+// as a general-purpose browser.
+func TestChromiumTrackerLoadsExtensionAndOpensChatGPT(t *testing.T) {
+	tmpl, _ := Get(templateIDChromiumTracker)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range rendered.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	cli := env[envChromeCLI]
+	if !strings.Contains(cli, "--load-extension="+trackerExtensionInstallDir) {
+		t.Fatalf("expected CHROME_CLI to load the extension from %q, got %q", trackerExtensionInstallDir, cli)
+	}
+	if !strings.Contains(cli, "--disable-extensions-except="+trackerExtensionInstallDir) {
+		t.Fatalf("expected CHROME_CLI to restrict extensions to %q, got %q", trackerExtensionInstallDir, cli)
+	}
+	if !strings.Contains(cli, trackerStartURL) {
+		t.Fatalf("expected CHROME_CLI to open %q, got %q", trackerStartURL, cli)
+	}
+	if env[envFileManagerPath] != browserConfigMountPath {
+		t.Fatalf("expected FILE_MANAGER_PATH=%q, got %q", browserConfigMountPath, env[envFileManagerPath])
+	}
+}
+
+// TestChromiumTrackerInstallsExtensionViaInitContainer guards the shared
+// EmptyDir handoff between the init container that fetches the extension
+// and the main container that loads it — both must reference the exact
+// same volume, and the init container's script must actually reach out to
+// ai-cloud-tracker's own installer.
+func TestChromiumTrackerInstallsExtensionViaInitContainer(t *testing.T) {
+	tmpl, _ := Get(templateIDChromiumTracker)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(rendered.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(rendered.InitContainers))
+	}
+	init := rendered.InitContainers[0]
+	if len(init.Command) < 3 || !strings.Contains(init.Command[2], trackerInstallScriptURL) {
+		t.Fatalf("expected the init container script to fetch %q, got %+v", trackerInstallScriptURL, init.Command)
+	}
+
+	var initMount, mainMount *corev1.VolumeMount
+	for i := range init.VolumeMounts {
+		if init.VolumeMounts[i].Name == trackerExtensionsVolumeName {
+			initMount = &init.VolumeMounts[i]
+		}
+	}
+	for i := range rendered.Containers[0].VolumeMounts {
+		if rendered.Containers[0].VolumeMounts[i].Name == trackerExtensionsVolumeName {
+			mainMount = &rendered.Containers[0].VolumeMounts[i]
+		}
+	}
+	if initMount == nil || mainMount == nil {
+		t.Fatalf("expected both the init and main containers to mount %q", trackerExtensionsVolumeName)
+	}
+	if initMount.MountPath != mainMount.MountPath {
+		t.Fatalf("expected both containers to mount %q at the same path, got init=%q main=%q", trackerExtensionsVolumeName, initMount.MountPath, mainMount.MountPath)
+	}
+	if !mainMount.ReadOnly {
+		t.Fatalf("expected the main container's mount of %q to be read-only", trackerExtensionsVolumeName)
+	}
+
+	found := false
+	for _, v := range rendered.Volumes {
+		if v.Name == trackerExtensionsVolumeName {
+			found = true
+			if v.EmptyDir == nil {
+				t.Fatalf("expected %q to be an EmptyDir (re-fetched fresh every start), got %+v", trackerExtensionsVolumeName, v.VolumeSource)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a %q volume declared, got %+v", trackerExtensionsVolumeName, rendered.Volumes)
+	}
+}
