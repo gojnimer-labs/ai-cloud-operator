@@ -75,8 +75,11 @@ type WorkloadNotifier interface {
 //
 // It derives a Deployment + Service from the Workload spec (owner-referenced
 // for garbage collection) and writes their observed state back onto
-// Workload.Status. Secret/PVC/HTTPRoute/Middleware/TunnelBinding reconciliation
-// is deliberately out of scope for this POC.
+// Workload.Status. It also reconciles any PersistentVolumeClaims a template
+// declares (see reconcilePVCs) — needed for state that must survive a pod
+// restart, e.g. code-server's one-time Claude Code OAuth login. Secret/
+// HTTPRoute/Middleware/TunnelBinding reconciliation is deliberately out of
+// scope for this POC.
 type WorkloadReconciler struct {
 	client.Client
 	Scheme       *runtime.Scheme
@@ -172,6 +175,7 @@ const (
 // +kubebuilder:rbac:groups=apps.aicloud.dev,resources=workloads/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -252,6 +256,13 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// this, a later genuine "active" report (once the Deployment really
 	// does become ready) is rejected as stale and the row is stuck at
 	// "failed" forever, even though nothing was ever wrong.
+	if err := r.reconcilePVCs(ctx, &workload, objectLabels, rendered); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{}, err
+		}
+		return r.setFailed(ctx, &workload, fmt.Errorf("reconciling persistent volume claims: %w", err))
+	}
+
 	if err := r.reconcileDeployment(ctx, &workload, selectorLabels, objectLabels, rendered); err != nil {
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{}, err
@@ -718,6 +729,59 @@ func desiredReplicaCount(workload *appsv1alpha1.Workload) int32 {
 	return appsv1alpha1.DefaultReplicas
 }
 
+// pvcName derives a workload-scoped PersistentVolumeClaim name from a
+// template's logical volume name (catalog.PersistentVolumeClaimSpec.Name) —
+// so two workloads sharing a namespace never collide on the same claim name.
+// Used both by reconcilePVCs (to create the claim) and reconcileDeployment
+// (to rewrite the placeholder ClaimName a template's Build sets on the
+// matching Volume into this real name) — see
+// catalog.PersistentVolumeClaimSpec's own doc comment for why a template
+// can't just know this name itself.
+func pvcName(workloadName, logicalName string) string {
+	return workloadName + "-" + logicalName
+}
+
+// reconcilePVCs creates or updates every PersistentVolumeClaim rendered's
+// template declared (see catalog.PersistentVolumeClaimSpec), owner-referenced
+// to workload for garbage collection. Runs before reconcileDeployment so the
+// Deployment's Pod template never references a claim that doesn't exist yet.
+//
+// A PVC's Spec (AccessModes/StorageClassName/Resources.Requests) is mostly
+// immutable after creation — only Resources.Requests can grow, and only if
+// the bound StorageClass allows expansion. Since a given template's Build
+// always declares the same values on every reconcile, setting them
+// unconditionally here is idempotent on the common path (no drift to
+// reconcile) and, on the one dimension that can legitimately change (a
+// template bumping its declared StorageSize), lets that resize request reach
+// the apiserver the normal way rather than needing special-casing.
+func (r *WorkloadReconciler) reconcilePVCs(ctx context.Context, workload *appsv1alpha1.Workload, objectLabels map[string]string, rendered catalog.Rendered) error {
+	for _, spec := range rendered.PersistentVolumeClaims {
+		accessModes := spec.AccessModes
+		if len(accessModes) == 0 {
+			accessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+		}
+
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      pvcName(workload.Name, spec.Name),
+				Namespace: workload.Namespace,
+			},
+		}
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+			pvc.Labels = objectLabels
+			pvc.Spec.AccessModes = accessModes
+			pvc.Spec.Resources.Requests = corev1.ResourceList{
+				corev1.ResourceStorage: spec.StorageSize,
+			}
+			return controllerutil.SetControllerReference(workload, pvc, r.Scheme)
+		})
+		if err != nil {
+			return fmt.Errorf("claim %q: %w", spec.Name, err)
+		}
+	}
+	return nil
+}
+
 func (r *WorkloadReconciler) reconcileDeployment(ctx context.Context, workload *appsv1alpha1.Workload, selectorLabels, objectLabels map[string]string, rendered catalog.Rendered) error {
 	replicas := desiredReplicaCount(workload)
 
@@ -735,10 +799,43 @@ func (r *WorkloadReconciler) reconcileDeployment(ctx context.Context, workload *
 		deployment.Spec.Template.Labels = objectLabels
 		deployment.Spec.Template.Spec.Containers = rendered.Containers
 		deployment.Spec.Template.Spec.InitContainers = rendered.InitContainers
-		deployment.Spec.Template.Spec.Volumes = rendered.Volumes
+		deployment.Spec.Template.Spec.Volumes = volumesWithClaimNames(workload.Name, rendered.Volumes)
+		if len(rendered.PersistentVolumeClaims) > 0 {
+			// A PVC-backed volume is almost always ReadWriteOnce and, on
+			// this cluster's default StorageClass (k3s local-path,
+			// node-pinned via nodeAffinity), only mountable on the node it
+			// was first provisioned on. RollingUpdate's default behavior —
+			// bring up the new Pod before tearing down the old one — can try
+			// to schedule that new Pod on a different node and leave it
+			// stuck forever waiting to attach a volume the old Pod still
+			// holds. Recreate avoids that: the old Pod (and its volume
+			// attachment) is torn down first.
+			deployment.Spec.Strategy.Type = appsv1.RecreateDeploymentStrategyType
+		}
 		return controllerutil.SetControllerReference(workload, deployment, r.Scheme)
 	})
 	return err
+}
+
+// volumesWithClaimNames returns a copy of volumes with every
+// PersistentVolumeClaim-backed entry's ClaimName rewritten from the
+// logical/placeholder name a template's Build sets (see
+// catalog.PersistentVolumeClaimSpec's own doc comment) to the real,
+// workload-scoped name reconcilePVCs actually created. Copies rather than
+// mutating in place: rendered.Volumes came straight from the catalog
+// template's Build call and must not be modified out from under it (Build
+// results aren't guaranteed to be freshly allocated on every call).
+func volumesWithClaimNames(workloadName string, volumes []corev1.Volume) []corev1.Volume {
+	out := make([]corev1.Volume, len(volumes))
+	for i, v := range volumes {
+		if v.PersistentVolumeClaim != nil {
+			claim := *v.PersistentVolumeClaim
+			claim.ClaimName = pvcName(workloadName, claim.ClaimName)
+			v.PersistentVolumeClaim = &claim
+		}
+		out[i] = v
+	}
+	return out
 }
 
 func (r *WorkloadReconciler) reconcileService(ctx context.Context, workload *appsv1alpha1.Workload, selectorLabels, objectLabels map[string]string, rendered catalog.Rendered) error {
@@ -764,6 +861,7 @@ func (r *WorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&appsv1alpha1.Workload{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Named("workload").
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Complete(r)

@@ -56,10 +56,33 @@ const (
 	// apps and Chromium both need real shared memory, more than the tiny
 	// default Kubernetes gives a container's /dev/shm.
 	dshmVolumeName = "dshm"
+	dshmMountPath  = "/dev/shm"
 
 	browserConfigMountPath = "/config"
 	configVolumeName       = "config"
 	envProfileDownloadURL  = "PROFILE_DOWNLOAD_URL"
+
+	// envFileManagerPath is docker-baseimage-selkies's own env var
+	// (https://github.com/linuxserver/docker-baseimage-selkies) for where its
+	// Selkies web UI's file-transfer ("Files") tab reads/writes uploads and
+	// downloads. Every template built on that base image (firefox, chrome,
+	// webtop — code-server and nginx use unrelated, non-Selkies images) sets
+	// it to browserConfigMountPath itself, one level above the unset
+	// default. Confirmed live, 2026-07-23: with FILE_MANAGER_PATH unset, the
+	// tab was rooted at "$browserConfigMountPath/Desktop" — a sibling of
+	// "$browserConfigMountPath/Downloads" (where the desktop's own
+	// XDG_DOWNLOAD_DIR and any in-browser "Save file" dialog actually land
+	// files), so a user could reach one but not the other depending on which
+	// folder they happened to save into. Rooting one level higher, at
+	// browserConfigMountPath itself, makes both reachable in the same tab.
+	envFileManagerPath = "FILE_MANAGER_PATH"
+
+	// paramKeyStartURL is the shared key for the optional "open this URL on
+	// launch" deploy-time parameter chrome/firefox each declare (see
+	// startURLParameter) — not webtop, which runs a full desktop rather than
+	// one specific browser, so "the URL to open" isn't a meaningful concept
+	// for it.
+	paramKeyStartURL = "startUrl"
 
 	// envPUID/envPGID/envTZ are the standard linuxserver.io image env var
 	// *names* (see
@@ -74,6 +97,14 @@ const (
 	envTZ               = "TZ"
 	linuxserverUID      = "1000"
 	linuxserverTimezone = "Etc/UTC"
+
+	// shShellPath is the interpreter every init/exec script in this package
+	// runs under — 3+ occurrences of the bare literal trips goconst.
+	shShellPath = "/bin/sh"
+
+	// alpineImage is this package's standard lightweight init-container
+	// base — 3+ occurrences of the bare literal trips goconst.
+	alpineImage = "alpine:latest"
 
 	paramKeyLogLevel       = "logLevel"
 	logLevelInfo           = "info"
@@ -160,10 +191,13 @@ func browserParameters(profileSourceKey string) []Parameter {
 // container that, in the common no-restore-requested case, needs no network
 // at all. Any wget failure (missing profile, network error) is treated as
 // "start fresh" rather than distinguished by HTTP status.
-func restoreProfileInitContainer(profilePath string, profileDownloadURL string) corev1.Container {
-	script := fmt.Sprintf(`set -e
-PROFILE_DIR="/config/%s"
-mkdir -p "$PROFILE_DIR"
+//
+// Restores into /config as a whole (not a browser-specific subdirectory) —
+// see backupStateFunction's own doc comment for why every caller here
+// widened to that scope.
+func restoreProfileInitContainer(profileDownloadURL string) corev1.Container {
+	const script = `set -e
+mkdir -p /config
 if [ -n "$PROFILE_DOWNLOAD_URL" ]; then
   echo "Attempting profile restore from R2..."
   if wget -q -O /tmp/profile.tar.gz "$PROFILE_DOWNLOAD_URL"; then
@@ -179,14 +213,14 @@ else
 fi
 chown -R 1000:1000 /config
 chmod -R 755 /config
-`, profilePath)
+`
 
 	return corev1.Container{
-		Command: []string{"/bin/sh", "-c", script},
+		Command: []string{shShellPath, "-c", script},
 		Env: []corev1.EnvVar{
 			{Name: envProfileDownloadURL, Value: profileDownloadURL},
 		},
-		Image: "alpine:latest",
+		Image: alpineImage,
 		Name:  "restore-profile",
 		VolumeMounts: []corev1.VolumeMount{
 			{MountPath: browserConfigMountPath, Name: configVolumeName},
@@ -194,24 +228,35 @@ chmod -R 755 /config
 	}
 }
 
-// backupStateFunction builds the "backup_state" Operation shared by
-// firefox/chrome: the first instance of the reusable operation pattern (see
-// catalog.Operation) — a named operation against an already-running
-// workload, discovered by the frontend through the same catalog response as
-// deploy-time parameters, with its own Parameters (including a
-// file-sourced uploadUrl Convex computes, mirroring how profileDownloadUrl
-// works for deploy-time restore).
+// backupStateFunction builds the "backup_state" Operation shared by every
+// browser/desktop template: the first instance of the reusable operation
+// pattern (see catalog.Operation) — a named operation against an
+// already-running workload, discovered by the frontend through the same
+// catalog response as deploy-time parameters, with its own Parameters
+// (including a file-sourced uploadUrl Convex computes, mirroring how
+// profileDownloadUrl works for deploy-time restore).
 //
-// profilePath and uploadUrl are passed as sh positional parameters ($1, $2)
-// rather than interpolated into the script string, so a URL containing
-// shell-meaningful characters (S3 presigned URLs are full of & and % in
-// their query string) can never be misparsed as script syntax.
+// Always backs up all of /config, not a browser-specific subdirectory —
+// every caller used to pass its own narrower path (e.g.
+// ".config/google-chrome"), but since Selkies' own Files tab makes
+// .../Desktop and .../Downloads directly reachable (see
+// envFileManagerPath's doc comment), a backup scoped to just the browser's
+// internal profile db would silently drop anything a user saved there.
+// Widened to "." for every template rather than kept as a parameter, since
+// by the time every caller needed the same value, a parameter that never
+// varies was just unnecessary indirection (see restoreProfileInitContainer's
+// own identical simplification).
+//
+// uploadUrl is passed as a sh positional parameter ($1) rather than
+// interpolated into the script string, so a URL containing shell-meaningful
+// characters (S3 presigned URLs are full of & and % in their query string)
+// can never be misparsed as script syntax.
 //
 // profileSourceKey is the same dynamic-select source browserParameters
 // scopes the restore picker to (see its own doc comment) — passed
 // explicitly here rather than derived from containerName, which only
 // happens to equal the template ID for today's browser templates.
-func backupStateFunction(profilePath, containerName, profileSourceKey string) Operation {
+func backupStateFunction(containerName, profileSourceKey string) Operation {
 	return Operation{
 		Key:         "backup_state",
 		Label:       "Backup profile",
@@ -263,16 +308,16 @@ func backupStateFunction(profilePath, containerName, profileSourceKey string) Op
 			// directly on the tar line) is what lets the script inspect
 			// that exit code instead of aborting on any nonzero status.
 			const script = `set -e
-tar czf /tmp/backup.tar.gz -C /config "$1" || {
+tar czf /tmp/backup.tar.gz -C /config . || {
   rc=$?
   if [ "$rc" -gt 1 ]; then
     exit "$rc"
   fi
 }
-curl -sf -X PUT --upload-file /tmp/backup.tar.gz "$2"
+curl -sf -X PUT --upload-file /tmp/backup.tar.gz "$1"
 rm -f /tmp/backup.tar.gz
 `
-			command := []string{"/bin/sh", "-c", script, "sh", profilePath, uploadURL}
+			command := []string{shShellPath, "-c", script, "sh", uploadURL}
 			_, stderr, err := exec.Exec(ctx, pod.Namespace, pod.PodName, containerName, command)
 			if err != nil {
 				return OperationResult{}, fmt.Errorf("backup exec failed: %w (stderr: %s)", err, stderr)
@@ -288,6 +333,29 @@ rm -f /tmp/backup.tar.gz
 				File: &FileResult{Type: "browser_profile_backup", Label: label},
 			}, nil
 		},
+	}
+}
+
+// fileManagerPathEnv is the envFileManagerPath env var every Selkies-based
+// template (firefox, chrome, webtop) sets identically — see
+// envFileManagerPath's own doc comment for why browserConfigMountPath (not
+// its default) is the right value.
+func fileManagerPathEnv() corev1.EnvVar {
+	return corev1.EnvVar{Name: envFileManagerPath, Value: browserConfigMountPath}
+}
+
+// startURLParameter returns the optional deploy-time parameter chrome and
+// firefox each declare for themselves (never folded into browserParameters,
+// which webtop also uses via the same append pattern — an "open this URL on
+// launch" field would be meaningless on a full desktop). appLabel names the
+// application in the description text (e.g. "Chrome", "Firefox").
+func startURLParameter(appLabel string) Parameter {
+	return Parameter{
+		Key:         paramKeyStartURL,
+		Label:       "Default URL",
+		Description: fmt.Sprintf("URL to open automatically when %s starts. Leave blank to use the browser's own default new-tab page.", appLabel),
+		Type:        ParameterTypeString,
+		DataSource:  DataSource{Kind: DataSourceStatic},
 	}
 }
 

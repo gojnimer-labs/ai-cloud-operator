@@ -31,6 +31,19 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumeclaims
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - pods/exec
   - secrets
   verbs:
@@ -51,27 +64,6 @@ rules:
   resources:
   - secrets
   verbs:
-  - get
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - services/proxy
-  verbs:
-  - create
-  - delete
   - get
   - update
 - apiGroups:

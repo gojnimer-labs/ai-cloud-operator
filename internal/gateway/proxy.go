@@ -16,18 +16,15 @@ limitations under the License.
 
 package gateway
 
-// +kubebuilder:rbac:groups="",resources=services/proxy,verbs=get;create;update;delete
-
 import (
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -40,57 +37,121 @@ import (
 // definition without either importing the other.
 const gatewayPageRefreshSeconds = 3
 
-// ServiceProxy relays HTTP requests into a cluster-internal Service via the
-// Kubernetes API server's services/proxy subresource — the same mechanism
-// `kubectl proxy`/the Dashboard use. The operator therefore never needs
-// direct pod-network reachability to expose a workload.
+// serviceProxyScheme is the corev1.ServicePort.Name a template opts into to
+// mark its entrypoint as TLS-backed — same convention every template in
+// internal/catalog already follows for its *container* port names
+// (portNameHTTPS = "https"). No template uses it today (code-server's own
+// investigation found linuxserver/code-server actually speaks plain HTTP on
+// its port), but the convention is kept for any future template whose
+// backend genuinely does terminate TLS itself.
+const serviceProxyScheme = "https"
+
+// schemeHTTP is every other entrypoint's scheme — the default unless a
+// ServicePort is named exactly serviceProxyScheme.
+const schemeHTTP = "http"
+
+// ServiceProxy relays HTTP requests directly into a cluster-internal
+// Service's ClusterIP — ordinary in-cluster networking, the same path any
+// other pod in the cluster would use, not the Kubernetes API server's
+// services/proxy subresource. This package used to go through that
+// subresource (see git history) specifically so the operator would never
+// need direct pod-network reachability to expose a workload.
+//
+// That subresource is what's behind this package's history of code-server
+// specifically hitting trouble here: first an HTTP/2 stream reset on large
+// responses (fixed by forcing HTTP/1.1, see the old NewServiceProxy's
+// history), then later a live deploy logging `httputil: ReverseProxy read
+// error during body copy: unexpected EOF` serving the same editor UI's
+// static assets. Direct proxying removes that whole subresource hop, which
+// is reason enough on its own (fewer moving parts, no api-server RBAC just
+// to reach a Service, and it's the standard way a Kubernetes-native
+// gateway is built) — but be precise about what's actually confirmed vs.
+// suspected for the EOF specifically: a live A/B (2026-07-23) fetching
+// code-server's real ~17MB workbench.js through the apiserver subresource
+// over HTTP/1.1 — both a single fetch and 10 concurrent fetches — came back
+// byte-identical (sha256-verified) to fetching it straight from the pod
+// IP. That does NOT reproduce the EOF, so this rewrite is not a confirmed
+// fix for that exact incident — the trigger might have been specific to
+// the *old* transport (client-go's rest.TransportFor-built one, which this
+// package no longer uses at all) rather than the subresource itself, e.g.
+// its own connection-pooling/reuse behavior, or something concurrency- or
+// session-shaped that a scripted curl fetch doesn't reproduce. What direct
+// proxying does concretely fix, independent of that unresolved question:
+// it removes a class of risk around httputil.ReverseProxy's WebSocket
+// hijack path (handleUpgradeResponse type-asserts the RoundTripper's
+// response body to io.ReadWriteCloser, which a decorated/wrapped
+// RoundTripper — like client-go's — isn't guaranteed to preserve; a bare
+// *http.Transport is, see TestHandlerProxiesWebSocketUpgrade), something
+// code-server depends on immediately after page load for its terminal and
+// extension host. Verify against a real browser session once this is
+// redeployed rather than trusting this comment alone.
+//
+// This does mean the operator now needs real pod-network reachability
+// into WORKLOAD_NAMESPACE — true by default on a flat cluster network
+// (confirmed live: no NetworkPolicy exists in either namespace as of this
+// change, and a direct curl from a pod in the operator's own namespace to
+// a workload Service's ClusterIP DNS name succeeded); if a NetworkPolicy
+// is later added restricting egress from the operator's namespace or
+// ingress into the workload namespace, it must allow this path.
 type ServiceProxy struct {
 	k8sClient client.Client
 	transport http.RoundTripper
-	apiURL    *url.URL
 	// namespace is the single, fixed WORKLOAD_NAMESPACE every workload this
 	// operator manages lives in — an install-time config value, not
 	// something the caller sends per-request (see internal/api.Server).
 	namespace string
 }
 
-// NewServiceProxy builds a ServiceProxy that authenticates to the API server
-// using cfg — the same *rest.Config the manager already uses for every other
-// client-go call, so TLS/auth is handled identically, with one deliberate
-// difference: this transport forces HTTP/1.1. The API server's
-// services/proxy subresource (used below) is known to reset the connection
-// mid-response over HTTP/2 for anything beyond small/simple payloads —
-// surfaced here as "stream error: ...; INTERNAL_ERROR; received from peer"
-// on every request once a workload's response gets large enough (code-server
-// serving its editor UI/static assets hits this consistently; nginx's
-// one-line demo page and firefox/chrome's much simpler frames didn't).
-// cfg is copied first — it's the manager's own shared config (see
-// cmd/main.go), and forcing HTTP/1.1 on it directly would also downgrade
-// every other client-go call built from it (watches, the controller's own
-// client), not just this proxy's.
-func NewServiceProxy(k8sClient client.Client, cfg *rest.Config, namespace string) (*ServiceProxy, error) {
-	cfg = rest.CopyConfig(cfg)
-	cfg.NextProtos = []string{"http/1.1"}
-	transport, err := rest.TransportFor(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("building api-server transport: %w", err)
+// NewServiceProxy builds a ServiceProxy. The transport talks directly to
+// workload Services over plain in-cluster networking — no Kubernetes API
+// server authentication involved, unlike the services/proxy-subresource
+// approach this replaced, since a normal network connection to a
+// ClusterIP needs none. TLSClientConfig only matters for the rare
+// serviceProxyScheme("https")-named entrypoint: certs on an in-cluster
+// backend are almost always self-signed, hence InsecureSkipVerify, and
+// NextProtos is pinned to HTTP/1.1 on the same defensive grounds as this
+// package's prior HTTP/2 incident (see ServiceProxy's doc comment) — no
+// backend here is known to need h2c/h2, so there's nothing to lose by
+// ruling it out up front. Proxy is explicitly nil so this never
+// accidentally honors an HTTP_PROXY-style env var and routes workload
+// traffic somewhere unexpected — every target here is always a
+// same-cluster ClusterIP.
+func NewServiceProxy(k8sClient client.Client, namespace string) *ServiceProxy {
+	// Cloned from DefaultTransport rather than built from a zero value — a
+	// bare &http.Transport{} drops DefaultTransport's dial timeout and idle
+	// connection reuse, so a dead ClusterIP would hang on the OS's own TCP
+	// timeout instead of failing fast, and every request would pay a fresh
+	// TCP handshake. No overall response/idle timeout is added on top: a
+	// long-lived WebSocket (code-server's terminal, extension host) must
+	// not get killed by one.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil // always a same-cluster ClusterIP — never honor an ambient HTTP_PROXY-style env var
+	transport.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // in-cluster backend, no external CA to verify against
+		NextProtos:         []string{"http/1.1"},
 	}
-	apiURL, err := url.Parse(cfg.Host)
-	if err != nil {
-		return nil, fmt.Errorf("parsing api server host %q: %w", cfg.Host, err)
-	}
-	return &ServiceProxy{k8sClient: k8sClient, transport: transport, apiURL: apiURL, namespace: namespace}, nil
+	// DefaultTransport also carries ForceAttemptHTTP2 plus a pre-wired
+	// TLSNextProto upgrade handler, which negotiates h2 over ALPN
+	// regardless of TLSClientConfig.NextProtos above — Clone() copies both.
+	// An empty, non-nil TLSNextProto map is the documented way to actually
+	// disable that (see http.Transport.TLSNextProto's doc comment); setting
+	// NextProtos alone was not sufficient here (caught by
+	// TestHandlerUsesHTTPSForHTTPSNamedEntrypoint negotiating HTTP/2 anyway
+	// before this line was added).
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	return &ServiceProxy{k8sClient: k8sClient, transport: transport, namespace: namespace}
 }
 
-// Handler proxies requests for {name}/{entrypoint}/{subpath} through the API
-// server's services/proxy subresource, always against p.namespace — the
-// single fixed WORKLOAD_NAMESPACE this operator instance manages. The target
-// Service's port is resolved with a live Get (not from the Workload CR's
-// spec) — this doubles as an existence check (404 if the Service is gone)
-// and avoids drift between the CR spec and actual cluster state. entrypoint
-// selects which of the Service's (possibly several) named ports to route to
-// — it matches a catalog.Entrypoint.Name, which by construction equals a
-// real corev1.ServicePort.Name (see catalog.TestEntrypointsMatchRenderedServicePorts).
+// Handler proxies requests for {name}/{entrypoint}/{subpath} directly to the
+// target Service's ClusterIP, always against p.namespace — the single fixed
+// WORKLOAD_NAMESPACE this operator instance manages. The target Service is
+// resolved with a live Get (not from the Workload CR's spec) — this doubles
+// as an existence check (404 if the Service is gone) and avoids drift
+// between the CR spec and actual cluster state. entrypoint selects which of
+// the Service's (possibly several) named ports to route to — it matches a
+// catalog.Entrypoint.Name, which by construction equals a real
+// corev1.ServicePort.Name (see catalog.TestEntrypointsMatchRenderedServicePorts).
 func (p *ServiceProxy) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
@@ -148,11 +209,26 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 			http.Error(w, "workload service exposes no ports", http.StatusBadGateway)
 			return
 		}
+		// ClusterIP is what makes this a real, dialable network target — a
+		// headless Service (ClusterIP: None) has none, and reconcileService
+		// (internal/controller/workload_controller.go) never sets one, so
+		// this is a defensive check against a future change there, not a
+		// case expected to trigger today.
+		if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone {
+			log.Error(fmt.Errorf("service has no usable ClusterIP: %q", svc.Spec.ClusterIP), "resolving target service")
+			http.Error(w, "workload service has no usable ClusterIP", http.StatusBadGateway)
+			return
+		}
 		var port int32
+		var scheme string
 		var found bool
 		for _, sp := range svc.Spec.Ports {
 			if sp.Name == entrypoint {
 				port, found = sp.Port, true
+				scheme = schemeHTTP
+				if sp.Name == serviceProxyScheme {
+					scheme = serviceProxyScheme
+				}
 				break
 			}
 		}
@@ -161,18 +237,18 @@ func (p *ServiceProxy) Handler() http.HandlerFunc {
 			return
 		}
 
-		targetPath := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%d/proxy/%s", p.namespace, name, port, subpath)
+		targetHost := fmt.Sprintf("%s:%d", svc.Spec.ClusterIP, port)
 
 		proxy := &httputil.ReverseProxy{
 			Transport: p.transport,
 			Director: func(req *http.Request) {
 				q := req.URL.Query()
 				q.Del("token") // never forward our own gateway token upstream
-				req.URL.Scheme = p.apiURL.Scheme
-				req.URL.Host = p.apiURL.Host
-				req.URL.Path = targetPath
+				req.URL.Scheme = scheme
+				req.URL.Host = targetHost
+				req.URL.Path = "/" + subpath
 				req.URL.RawQuery = q.Encode()
-				req.Host = p.apiURL.Host
+				req.Host = targetHost
 			},
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 				log.Error(err, "proxying to workload service")

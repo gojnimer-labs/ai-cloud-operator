@@ -18,15 +18,18 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 )
 
 const (
-	testNamespace  = "default"
-	testFirefoxPod = "firefox-abc"
+	testNamespace          = "default"
+	testFirefoxPod         = "firefox-abc"
+	testProfileDownloadURL = "https://example.com/profile.tar.gz"
 
 	// Parameter keys reused across the synthetic Templates below.
 	paramKeyName  = "name"
@@ -108,13 +111,41 @@ func TestEstimatedResourcesMatchesHardcodedBrowserValues(t *testing.T) {
 }
 
 func TestGetReturnsKnownTemplates(t *testing.T) {
-	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome, templateIDWebtop} {
+	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDCodeServer, templateIDChromiumTracker} {
 		if _, ok := Get(id); !ok {
 			t.Fatalf("expected template %q to be registered", id)
 		}
 	}
 	if _, ok := Get("does-not-exist"); ok {
 		t.Fatalf("expected unknown template id to be absent")
+	}
+}
+
+// TestTemplateParametersMarshalAsArrayNeverNull is a regression guard for a
+// real production incident: Template.Parameters has no `omitempty` (see its
+// own doc comment — Convex expects this field always present as an array,
+// "[] for no input", never absent/null), but a template whose Go literal
+// simply never sets Parameters gets Go's slice zero value (nil), which
+// encoding/json marshals as `null`, not `[]`. Convex's /operators/register
+// rejected the operator's ENTIRE catalog registration with a 400 the moment
+// ChromiumTracker — the first template in this package to ever leave
+// Parameters unset — joined it, taking the whole operator down in a crash
+// loop (register failing is fatal to manager startup). A template with
+// nothing to configure must explicitly set Parameters: []Parameter{}.
+func TestTemplateParametersMarshalAsArrayNeverNull(t *testing.T) {
+	for _, tmpl := range List() {
+		if tmpl.Parameters == nil {
+			t.Errorf("template %q: Parameters is nil (marshals to JSON null) — set it to []Parameter{} explicitly if the template truly has none", tmpl.ID)
+			continue
+		}
+		b, err := json.Marshal(tmpl.Parameters)
+		if err != nil {
+			t.Errorf("template %q: marshaling Parameters: %v", tmpl.ID, err)
+			continue
+		}
+		if string(b) == "null" {
+			t.Errorf("template %q: Parameters marshals to JSON null, expected an array", tmpl.ID)
+		}
 	}
 }
 
@@ -275,7 +306,7 @@ func TestNginxBuildUsesResolvedParams(t *testing.T) {
 
 func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 	tmpl, _ := Get(templateIDFirefox)
-	rendered, err := tmpl.Build(map[string]any{paramKeyProfileURL: "https://example.com/profile.tar.gz"})
+	rendered, err := tmpl.Build(map[string]any{paramKeyProfileURL: testProfileDownloadURL})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -284,7 +315,7 @@ func TestFirefoxBuildPassesProfileDownloadURL(t *testing.T) {
 	}
 	found := false
 	for _, env := range rendered.InitContainers[0].Env {
-		if env.Name == envProfileDownloadURL && env.Value == "https://example.com/profile.tar.gz" {
+		if env.Name == envProfileDownloadURL && env.Value == testProfileDownloadURL {
 			found = true
 		}
 	}
@@ -322,7 +353,7 @@ func TestBrowserRequiresProfileNameWhenRestoreProfileIsOn(t *testing.T) {
 }
 
 func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
-	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDChromiumTracker} {
 		tmpl, _ := Get(id)
 		fn, ok := GetOperation(tmpl, "backup_state")
 		if !ok {
@@ -355,7 +386,7 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 // workloads/actions.ts#deployWorkload), so a missing/wrong value here would
 // silently break restore.
 func TestBrowserProfileDownloadURLDeclaresDownloadDirection(t *testing.T) {
-	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDChromiumTracker} {
 		tmpl, _ := Get(id)
 		source := findParameter(t, tmpl.Parameters, paramKeyProfileURL).DataSource
 		if source.Kind != DataSourceFile || source.Direction != DirectionDownload ||
@@ -431,18 +462,15 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 	if exec.namespace != testNamespace || exec.podName != testFirefoxPod || exec.container != templateIDFirefox {
 		t.Fatalf("unexpected exec target: namespace=%q podName=%q container=%q", exec.namespace, exec.podName, exec.container)
 	}
-	// The profile path and upload URL must travel as trailing positional
-	// args (not interpolated into the script string) — see
-	// backupStateFunction's doc comment for why.
-	if len(exec.command) < 2 {
-		t.Fatalf("expected at least 2 trailing args, got %+v", exec.command)
+	// The upload URL must travel as a trailing positional arg (not
+	// interpolated into the script string) — see backupStateFunction's doc
+	// comment for why.
+	if len(exec.command) < 1 {
+		t.Fatalf("expected at least 1 trailing arg, got %+v", exec.command)
 	}
-	lastTwo := exec.command[len(exec.command)-2:]
-	if lastTwo[0] != ".mozilla/firefox" {
-		t.Fatalf("expected profile path as second-to-last arg, got %q", lastTwo[0])
-	}
-	if lastTwo[1] != "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900" {
-		t.Fatalf("expected upload URL as last arg, got %q", lastTwo[1])
+	last := exec.command[len(exec.command)-1]
+	if last != "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900" {
+		t.Fatalf("expected upload URL as last arg, got %q", last)
 	}
 }
 
@@ -467,6 +495,127 @@ func TestFirefoxBuildWithoutProfileURLStartsFresh(t *testing.T) {
 	for _, env := range rendered.InitContainers[0].Env {
 		if env.Name == envProfileDownloadURL && env.Value != "" {
 			t.Fatalf("expected empty PROFILE_DOWNLOAD_URL when not provided, got %q", env.Value)
+		}
+	}
+}
+
+// TestBrowserBuildSetsStartURLWhenProvided guards startURLParameter's actual
+// wiring: chrome maps it to CHROME_CLI, firefox to FIREFOX_CLI — the
+// linuxserver-documented "pass this string straight to the app's own argv"
+// mechanism for each image.
+func TestBrowserBuildSetsStartURLWhenProvided(t *testing.T) {
+	cases := []struct {
+		id     string
+		envVar string
+	}{
+		{templateIDChrome, envChromeCLI},
+		{templateIDFirefox, envFirefoxCLI},
+	}
+	for _, tc := range cases {
+		tmpl, _ := Get(tc.id)
+		rendered, err := tmpl.Build(map[string]any{paramKeyStartURL: "https://example.com"})
+		if err != nil {
+			t.Fatalf("%s: build: %v", tc.id, err)
+		}
+		env := map[string]string{}
+		for _, e := range rendered.Containers[0].Env {
+			env[e.Name] = e.Value
+		}
+		if env[tc.envVar] != "https://example.com" {
+			t.Fatalf("%s: expected %s=https://example.com, got %+v", tc.id, tc.envVar, env)
+		}
+	}
+}
+
+// TestBrowserBuildOmitsStartURLEnvWhenBlank guards the "leave blank to use
+// the browser's own default" case: an unset startUrl must not set
+// CHROME_CLI/FIREFOX_CLI to an empty string (which would still override the
+// image's own default argv) — the env var must be absent entirely.
+func TestBrowserBuildOmitsStartURLEnvWhenBlank(t *testing.T) {
+	for _, tc := range []struct {
+		id     string
+		envVar string
+	}{
+		{templateIDChrome, envChromeCLI},
+		{templateIDFirefox, envFirefoxCLI},
+	} {
+		tmpl, _ := Get(tc.id)
+		rendered, err := tmpl.Build(map[string]any{})
+		if err != nil {
+			t.Fatalf("%s: build: %v", tc.id, err)
+		}
+		for _, e := range rendered.Containers[0].Env {
+			if e.Name == tc.envVar {
+				t.Fatalf("%s: expected no %s env var when startUrl is blank, got %+v", tc.id, tc.envVar, rendered.Containers[0].Env)
+			}
+		}
+	}
+}
+
+// TestSelkiesTemplatesSetFileManagerPath guards the fix for a real,
+// live-observed UX gap: with FILE_MANAGER_PATH unset, Selkies' own "Files"
+// tab rooted at $browserConfigMountPath/Desktop, a sibling of
+// .../Downloads — reachable from one, not the other. Every template built
+// on docker-baseimage-selkies (firefox, chrome, webtop) must set it one
+// level up, at browserConfigMountPath itself, so both are reachable. Not
+// code-server (a different, non-Selkies image) or nginx (no desktop UI at
+// all).
+func TestSelkiesTemplatesSetFileManagerPath(t *testing.T) {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDChromiumTracker} {
+		tmpl, _ := Get(id)
+		rendered, err := tmpl.Build(map[string]any{})
+		if err != nil {
+			t.Fatalf("%s: build: %v", id, err)
+		}
+		found := false
+		for _, e := range rendered.Containers[0].Env {
+			if e.Name == envFileManagerPath {
+				if e.Value != browserConfigMountPath {
+					t.Fatalf("%s: expected FILE_MANAGER_PATH=%q, got %q", id, browserConfigMountPath, e.Value)
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s: expected a FILE_MANAGER_PATH env var, got %+v", id, rendered.Containers[0].Env)
+		}
+	}
+}
+
+// TestBrowserBackupAndRestoreScopeIsWholeConfigDir guards the widened
+// backup/restore scope: firefox/chrome now carry the entire /config home
+// directory (".", same as webtop always has), not just their own
+// browser-internal profile subdirectory — otherwise files a user saves
+// through Selkies' Files tab (now reachable at .../Desktop and
+// .../Downloads, see TestSelkiesTemplatesSetFileManagerPath) would silently
+// not survive a backup/restore cycle.
+func TestBrowserBackupAndRestoreScopeIsWholeConfigDir(t *testing.T) {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
+		tmpl, _ := Get(id)
+
+		rendered, err := tmpl.Build(map[string]any{paramKeyProfileURL: testProfileDownloadURL})
+		if err != nil {
+			t.Fatalf("%s: build: %v", id, err)
+		}
+		if len(rendered.InitContainers) != 1 {
+			t.Fatalf("%s: expected 1 init container, got %d", id, len(rendered.InitContainers))
+		}
+		if script := rendered.InitContainers[0].Command; len(script) < 3 || !strings.Contains(script[2], `tar -xzf /tmp/profile.tar.gz -C /config`) {
+			t.Fatalf("%s: expected the init container script to restore into all of /config (whole home dir), got %+v", id, script)
+		}
+
+		fn, ok := GetOperation(tmpl, "backup_state")
+		if !ok {
+			t.Fatalf("%s: expected a backup_state operation", id)
+		}
+		exec := &fakePodExecutor{}
+		if _, err := fn.Run(context.Background(), exec, PodRef{Namespace: testNamespace, PodName: "pod"}, map[string]any{
+			paramKeyUploadURL: "https://r2.example.com/upload",
+		}); err != nil {
+			t.Fatalf("%s: unexpected error: %v", id, err)
+		}
+		if len(exec.command) < 3 || !strings.Contains(exec.command[2], "-C /config .") {
+			t.Fatalf("%s: expected the backup script to tar all of /config (\".\"), got %+v", id, exec.command)
 		}
 	}
 }
@@ -559,5 +708,356 @@ func TestWebtopUsesDistinctProfileSourceKeyFromBrowsers(t *testing.T) {
 
 	if webtopGroup == "" || webtopGroup == firefoxGroup || webtopGroup == chromeGroup {
 		t.Fatalf("expected webtop's profileName group %q to be distinct and non-empty (firefox=%q chrome=%q)", webtopGroup, firefoxGroup, chromeGroup)
+	}
+}
+
+func TestCodeServerBuildDefaultsWithoutToken(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	container := rendered.Containers[0]
+	if container.Name != templateIDCodeServer || container.Image != "lscr.io/linuxserver/code-server:latest" {
+		t.Fatalf("unexpected container name/image: %+v", container)
+	}
+	env := map[string]string{}
+	for _, e := range container.Env {
+		env[e.Name] = e.Value
+		if e.Name == "PASSWORD" || e.Name == "SUDO_PASSWORD" || e.Name == "HASHED_PASSWORD" || e.Name == "CLAUDE_CODE_OAUTH_TOKEN" || e.Name == "ANTHROPIC_API_KEY" {
+			t.Fatalf("did not expect %s to be set, got %+v", e.Name, container.Env)
+		}
+	}
+	if env["DEFAULT_WORKSPACE"] != defaultWorkspacePath {
+		t.Fatalf("expected DEFAULT_WORKSPACE=%q, got %+v", defaultWorkspacePath, env)
+	}
+	if len(container.Ports) != 1 || container.Ports[0].ContainerPort != codeServerPort || container.Ports[0].Name != portNameHTTP {
+		t.Fatalf("unexpected container ports: %+v", container.Ports)
+	}
+	if len(rendered.ServicePorts) != 1 || rendered.ServicePorts[0].TargetPort.IntVal != codeServerPort {
+		t.Fatalf("unexpected service ports: %+v", rendered.ServicePorts)
+	}
+}
+
+func TestCodeServerBuildAppliesClaudeToken(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{paramKeyClaudeToken: "sk-ant-oat-test"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range rendered.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["CLAUDE_CODE_OAUTH_TOKEN"] != "sk-ant-oat-test" {
+		t.Fatalf("expected CLAUDE_CODE_OAUTH_TOKEN to be passed through, got %+v", env)
+	}
+}
+
+// TestCodeServerBuildAppliesAnthropicAPIKey guards the credential that
+// actually works today — see codeServerLifecycleHook's doc comment for why
+// claudeCodeNpmVersion's pin predates OAuth-token auth, leaving
+// ANTHROPIC_API_KEY as the only functional option.
+func TestCodeServerBuildAppliesAnthropicAPIKey(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	resolved, err := ResolveParams(tmpl.Parameters, map[string]any{paramKeyAnthropicAPIKey: "sk-ant-api-test"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rendered, err := tmpl.Build(resolved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range rendered.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["ANTHROPIC_API_KEY"] != "sk-ant-api-test" {
+		t.Fatalf("expected ANTHROPIC_API_KEY to be passed through, got %+v", env)
+	}
+}
+
+// TestCodeServerPreparesConfigDirs is the regression guard for a real
+// incident: code-server runs as uid 1000 ("abc"), but linuxserver/
+// code-server's own startup creates /config/workspace, /config/data, and
+// /config/extensions fresh as root:root and never chowns them afterward —
+// confirmed live via `kubectl exec ... stat`, surfacing as "EACCES:
+// permission denied" the moment a user tried to save a file. The init
+// container must create (and therefore, via its later blanket chown, own)
+// all three before code-server ever starts. This init container no longer
+// installs Claude Code at all (see codeServerLifecycleHook's doc comment
+// for why that moved to a postStart hook on the main container) — its only
+// job now is this directory prep, so it's back on alpine like this
+// package's other init containers.
+// TestCodeServerInstallsClaudeCodeViaInitContainer guards the mechanism this
+// template exists for: the Claude Code CLI must be installed into the
+// shared /config volume (via the official claude.ai installer) before
+// code-server starts, regardless of whether a credential was supplied — an
+// empty credential only skips authentication, never the install itself.
+func TestCodeServerInstallsClaudeCodeViaInitContainer(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(rendered.InitContainers) != 1 {
+		t.Fatalf("expected exactly one init container, got %d", len(rendered.InitContainers))
+	}
+	init := rendered.InitContainers[0]
+	if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != configVolumeName {
+		t.Fatalf("expected init container to mount the shared config volume, got %+v", init.VolumeMounts)
+	}
+	// Regression guard for a real incident: an alpine (musl) init container
+	// makes claude.ai/install.sh download a musl-linked claude binary,
+	// which then fails to execute at all ("required file not found") once
+	// copied via the shared volume into the glibc-based main container
+	// (linuxserver/code-server is Ubuntu) — see this function's own doc
+	// comment for the full story. Must stay glibc-based.
+	if strings.Contains(init.Image, "alpine") {
+		t.Fatalf("expected a glibc-based init container image (musl produces a binary the main container can't execute), got %q", init.Image)
+	}
+	script := init.Command[len(init.Command)-1]
+	if !strings.Contains(script, "claude.ai/install.sh") {
+		t.Fatalf("expected init container command to install Claude Code from claude.ai/install.sh, got: %s", script)
+	}
+	// Regression guard: the install step must tolerate failure rather than
+	// block the pod — code-server has to come up whether or not Claude
+	// Code does, even now that the underlying hang is fixed at the
+	// infrastructure level (see this function's doc comment).
+	if !strings.Contains(script, "|| echo") {
+		t.Fatalf("expected the install step to tolerate failure (|| echo ...) rather than block the pod, got: %s", script)
+	}
+	// Regression guard for a real incident: with no CPU request, the
+	// installer got starved on an oversubscribed node and Init:0/1 sat for
+	// minutes looking stuck.
+	if init.Resources.Requests.Cpu().IsZero() {
+		t.Fatalf("expected init container to declare a CPU request, got %+v", init.Resources)
+	}
+}
+
+// TestCodeServerPreparesConfigDirs is the regression guard for a real
+// incident: code-server runs as uid 1000 ("abc"), but linuxserver/
+// code-server's own startup creates /config/workspace, /config/data, and
+// /config/extensions fresh as root:root and never chowns them afterward —
+// confirmed live via `kubectl exec ... stat`, surfacing as "EACCES:
+// permission denied" the moment a user tried to save a file. The init
+// container must create (and therefore, via its later blanket chown, own)
+// all three before code-server ever starts.
+func TestCodeServerPreparesConfigDirs(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	script := rendered.InitContainers[0].Command[len(rendered.InitContainers[0].Command)-1]
+	for _, want := range []string{`"$HOME/data"`, `"$HOME/extensions"`, defaultWorkspacePath} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected init container script to reference %s, got: %s", want, script)
+		}
+	}
+}
+
+// TestCodeServerWrapsEnvAndPrintenvViaPostStartHook guards the deterrent
+// against a non-technical end-user casually running a familiar command to
+// dump CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY (see
+// disableCasualEnvDumpHook's doc comment for why this is a deterrent, not a
+// security boundary, and why it targets exactly these two commands and no
+// others). The actual wrapper shell logic was verified end-to-end in a
+// real container, not just read — this test pins the wiring: the hook
+// exists, runs on postStart (not some other lifecycle point), and its
+// script references both binaries plus an explicit `exit 0` so a re-run
+// (both already wrapped) can't return a non-zero PostStart status and get
+// the container killed.
+func TestCodeServerWrapsEnvAndPrintenvViaPostStartHook(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	lifecycle := rendered.Containers[0].Lifecycle
+	if lifecycle == nil || lifecycle.PostStart == nil || lifecycle.PostStart.Exec == nil {
+		t.Fatalf("expected a postStart exec hook on the code-server container, got %+v", lifecycle)
+	}
+	cmd := lifecycle.PostStart.Exec.Command
+	if len(cmd) == 0 {
+		t.Fatalf("expected a non-empty postStart command")
+	}
+	script := cmd[len(cmd)-1]
+	for _, want := range []string{"for cmd in env printenv", `"/usr/bin/$cmd"`, "exit 0"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected postStart script to reference %q, got: %s", want, script)
+		}
+	}
+	// This hook must be scoped to env/printenv wrapping only now — Claude
+	// Code install lives back in the init container (see
+	// TestCodeServerInstallsClaudeCodeViaInitContainer).
+	if strings.Contains(script, "claude-code") {
+		t.Fatalf("did not expect the postStart hook to reference Claude Code install, got: %s", script)
+	}
+}
+
+// TestCodeServerConfigVolumeIsPersistent is the regression guard for the
+// real incident that motivated it: with /config as an EmptyDir, a pod
+// restart wiped Claude Code's one-time interactive OAuth login, so
+// code-server always came up unauthenticated even with claudeCodeOauthToken
+// set — unlike a real, persistent-$HOME Coder workspace. /config must be
+// backed by a PersistentVolumeClaim instead, and the Volume's placeholder
+// ClaimName must match the declared claim's logical Name so the reconciler
+// (internal/controller's volumesWithClaimNames) can rewrite it to the real,
+// workload-scoped name — see PersistentVolumeClaimSpec's own doc comment.
+func TestCodeServerConfigVolumeIsPersistent(t *testing.T) {
+	tmpl, _ := Get(templateIDCodeServer)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	var configVolume *corev1.Volume
+	for i := range rendered.Volumes {
+		if rendered.Volumes[i].Name == configVolumeName {
+			configVolume = &rendered.Volumes[i]
+		}
+	}
+	if configVolume == nil {
+		t.Fatalf("expected a %q volume, got %+v", configVolumeName, rendered.Volumes)
+	}
+	if configVolume.EmptyDir != nil {
+		t.Fatalf("expected %q to be PersistentVolumeClaim-backed, not EmptyDir — an EmptyDir wipes Claude Code's OAuth login on every pod restart", configVolumeName)
+	}
+	if configVolume.PersistentVolumeClaim == nil {
+		t.Fatalf("expected %q to have a PersistentVolumeClaim source, got %+v", configVolumeName, configVolume.VolumeSource)
+	}
+
+	if len(rendered.PersistentVolumeClaims) != 1 {
+		t.Fatalf("expected exactly one declared PersistentVolumeClaim, got %+v", rendered.PersistentVolumeClaims)
+	}
+	claim := rendered.PersistentVolumeClaims[0]
+	if claim.Name != configVolumeName {
+		t.Fatalf("expected declared claim Name to be %q, got %q", configVolumeName, claim.Name)
+	}
+	if configVolume.PersistentVolumeClaim.ClaimName != claim.Name {
+		t.Fatalf("expected the volume's placeholder ClaimName (%q) to match the declared claim's logical Name (%q) — the reconciler rewrites this using the match", configVolume.PersistentVolumeClaim.ClaimName, claim.Name)
+	}
+	if claim.StorageSize.IsZero() {
+		t.Fatalf("expected a non-zero storage size, got %+v", claim.StorageSize)
+	}
+}
+
+// TestChromiumTrackerUsesChromiumNotChrome guards the exact reason this
+// template exists as a separate one from Chrome: branded Google Chrome
+// (stable channel) silently ignores --load-extension outside Chrome for
+// Testing — confirmed live, 2026-07-24 (chrome.go's own image kept loading
+// fine, but chrome://extensions never listed the unpacked extension, and
+// Chrome's own extensions.settings Preferences record for it was simply
+// absent, no error). Chromium doesn't have that restriction.
+func TestChromiumTrackerUsesChromiumNotChrome(t *testing.T) {
+	tmpl, _ := Get(templateIDChromiumTracker)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := rendered.Containers[0].Image; got != "lscr.io/linuxserver/chromium:latest" {
+		t.Fatalf("expected the chromium image (not chrome), got %q", got)
+	}
+}
+
+// TestChromiumTrackerLoadsExtensionAndOpensChatGPT guards the CHROME_CLI
+// wiring: the extension must be force-loaded from the exact directory the
+// init container installs it into (trackerExtensionInstallDir), and the
+// browser must open straight to chatgpt.com — this template exists
+// specifically to run gojnimer-labs/ai-cloud-tracker against that site, not
+// as a general-purpose browser.
+func TestChromiumTrackerLoadsExtensionAndOpensChatGPT(t *testing.T) {
+	tmpl, _ := Get(templateIDChromiumTracker)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range rendered.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	cli := env[envChromeCLI]
+	if !strings.Contains(cli, "--load-extension="+trackerExtensionInstallDir) {
+		t.Fatalf("expected CHROME_CLI to load the extension from %q, got %q", trackerExtensionInstallDir, cli)
+	}
+	if !strings.Contains(cli, "--disable-extensions-except="+trackerExtensionInstallDir) {
+		t.Fatalf("expected CHROME_CLI to restrict extensions to %q, got %q", trackerExtensionInstallDir, cli)
+	}
+	if !strings.Contains(cli, trackerStartURL) {
+		t.Fatalf("expected CHROME_CLI to open %q, got %q", trackerStartURL, cli)
+	}
+	if env[envFileManagerPath] != browserConfigMountPath {
+		t.Fatalf("expected FILE_MANAGER_PATH=%q, got %q", browserConfigMountPath, env[envFileManagerPath])
+	}
+}
+
+// TestChromiumTrackerInstallsExtensionViaInitContainer guards the shared
+// EmptyDir handoff between the init container that fetches the extension
+// and the main container that loads it — both must reference the exact
+// same volume, and the init container's script must actually reach out to
+// ai-cloud-tracker's own installer.
+func TestChromiumTrackerInstallsExtensionViaInitContainer(t *testing.T) {
+	tmpl, _ := Get(templateIDChromiumTracker)
+	rendered, err := tmpl.Build(map[string]any{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(rendered.InitContainers) != 2 {
+		t.Fatalf("expected 2 init containers (restore-profile, install-tracker-extension), got %d", len(rendered.InitContainers))
+	}
+	var init *corev1.Container
+	for i := range rendered.InitContainers {
+		if rendered.InitContainers[i].Name == "install-tracker-extension" {
+			init = &rendered.InitContainers[i]
+		}
+	}
+	if init == nil {
+		t.Fatalf("expected an install-tracker-extension init container, got %+v", rendered.InitContainers)
+	}
+	if len(init.Command) < 3 || !strings.Contains(init.Command[2], trackerInstallScriptURL) {
+		t.Fatalf("expected the init container script to fetch %q, got %+v", trackerInstallScriptURL, init.Command)
+	}
+
+	var initMount, mainMount *corev1.VolumeMount
+	for i := range init.VolumeMounts {
+		if init.VolumeMounts[i].Name == trackerExtensionsVolumeName {
+			initMount = &init.VolumeMounts[i]
+		}
+	}
+	for i := range rendered.Containers[0].VolumeMounts {
+		if rendered.Containers[0].VolumeMounts[i].Name == trackerExtensionsVolumeName {
+			mainMount = &rendered.Containers[0].VolumeMounts[i]
+		}
+	}
+	if initMount == nil || mainMount == nil {
+		t.Fatalf("expected both the init and main containers to mount %q", trackerExtensionsVolumeName)
+	}
+	if initMount.MountPath != mainMount.MountPath {
+		t.Fatalf("expected both containers to mount %q at the same path, got init=%q main=%q", trackerExtensionsVolumeName, initMount.MountPath, mainMount.MountPath)
+	}
+	if !mainMount.ReadOnly {
+		t.Fatalf("expected the main container's mount of %q to be read-only", trackerExtensionsVolumeName)
+	}
+
+	found := false
+	for _, v := range rendered.Volumes {
+		if v.Name == trackerExtensionsVolumeName {
+			found = true
+			if v.EmptyDir == nil {
+				t.Fatalf("expected %q to be an EmptyDir (re-fetched fresh every start), got %+v", trackerExtensionsVolumeName, v.VolumeSource)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a %q volume declared, got %+v", trackerExtensionsVolumeName, rendered.Volumes)
 	}
 }

@@ -33,6 +33,8 @@ var templates = []Template{
 	Firefox,
 	Chrome,
 	Webtop,
+	CodeServer,
+	ChromiumTracker,
 }
 
 // List returns all catalog templates, in a stable order.

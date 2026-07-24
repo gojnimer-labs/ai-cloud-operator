@@ -37,6 +37,11 @@ operator manages gets deployed into — not something Convex chooses or sends
 per-request. The operator creates it automatically on first boot if it
 doesn't already exist. Only override it (the same `kubectl set env` way) if
 you want workloads somewhere other than the default `ai-cloud-workloads`.
+The manager's cache/watch is scoped to this namespace, so running a second
+operator instance in the same cluster needs a distinct `WORKLOAD_NAMESPACE`
+too — see [argocd-helm-deploy.md](./argocd-helm-deploy.md)'s "Running two
+instances in one cluster" for the full requirements (also applies to a
+second `kubectl apply`-based install, not just Helm).
 
 `OPERATOR_TAGS` (optional, comma-separated, e.g. `gpu,on-prem`) reports this
 operator's own tags to Convex on every register call. Setting it — even to

@@ -31,6 +31,7 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // ParameterType tells the frontend which form widget to render.
@@ -183,13 +184,39 @@ type Parameter struct {
 	Validation Validation  `json:"validation"`
 }
 
+// PersistentVolumeClaimSpec declares a PersistentVolumeClaim a template needs
+// provisioned before its Pod can start — e.g. code-server's /config, which
+// must survive a pod restart for a one-time interactive Claude Code OAuth
+// login to still be there next time. Name is a logical volume name, not the
+// actual PVC name on the cluster: the reconciler owns naming (workload-scoped,
+// so two workloads in the same namespace never collide) and rewrites the
+// matching corev1.Volume's PersistentVolumeClaimVolumeSource.ClaimName —
+// which a template's Build sets to this same logical Name as a placeholder —
+// to the real, workload-scoped name it actually creates. See
+// WorkloadReconciler.reconcilePVC and pvcName.
+type PersistentVolumeClaimSpec struct {
+	// Name is the logical volume name. Must match the Name of a Volume in
+	// the same Rendered.Volumes whose VolumeSource is a
+	// PersistentVolumeClaimVolumeSource, and that source's ClaimName must
+	// also be set to this same value as a placeholder for the reconciler to
+	// rewrite.
+	Name string
+	// StorageSize is how much storage to request — required, since a PVC
+	// with no storage request is rejected by the apiserver.
+	StorageSize resource.Quantity
+	// AccessModes defaults to [ReadWriteOnce] if left empty — every current
+	// use case is a single Pod, single-writer volume.
+	AccessModes []corev1.PersistentVolumeAccessMode
+}
+
 // Rendered is what a template's Build function produces: the pieces the
 // reconciler plugs into a Deployment's PodSpec and a Service's ports.
 type Rendered struct {
-	Containers     []corev1.Container
-	InitContainers []corev1.Container
-	Volumes        []corev1.Volume
-	ServicePorts   []corev1.ServicePort
+	Containers             []corev1.Container
+	InitContainers         []corev1.Container
+	Volumes                []corev1.Volume
+	PersistentVolumeClaims []PersistentVolumeClaimSpec
+	ServicePorts           []corev1.ServicePort
 }
 
 // PodExecutor runs a command inside a specific container of a running pod

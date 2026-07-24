@@ -48,12 +48,18 @@ var webtopFlavors = []SelectOption{
 	{Value: "ubuntu-xfce", Label: "Ubuntu + XFCE"},
 }
 
-// Webtop deploys a full Linux desktop (KasmVNC) accessible via the operator's
-// gateway — same linuxserver.io PUID/PGID/TZ/config-volume/profile-restore
-// shape as Firefox/Chrome (which are themselves built on this same webtop
-// base image), except the "profile" being restored/backed up is the entire
-// /config home directory rather than one browser's profile subdirectory, so
-// it's passed as "." rather than a browser-specific path.
+// Webtop deploys a full Linux desktop (Selkies —
+// github.com/linuxserver/docker-baseimage-selkies) accessible via the
+// operator's gateway — same linuxserver.io PUID/PGID/TZ/config-volume/
+// profile-restore/FILE_MANAGER_PATH shape as Firefox/Chrome (which are
+// themselves built on this same Selkies base image), except there's no
+// single-application "default URL" concept for a full desktop, so unlike
+// Firefox/Chrome it declares no startURLParameter. The "profile" being
+// restored/backed up is, and always was, the entire /config home directory
+// — Firefox/Chrome/ChromiumTracker now do the same, see
+// restoreProfileInitContainer's own doc comment for why — rather than one
+// browser's profile subdirectory, since a desktop has no single well-known
+// profile path to narrow it to.
 var Webtop = Template{
 	Build: func(params map[string]any) (Rendered, error) {
 		flavor := paramString(params, "flavor", "latest")
@@ -66,6 +72,7 @@ var Webtop = Template{
 						{Name: envPUID, Value: linuxserverUID},
 						{Name: envPGID, Value: linuxserverUID},
 						{Name: envTZ, Value: linuxserverTimezone},
+						fileManagerPathEnv(),
 					},
 					Image:         "lscr.io/linuxserver/webtop:" + flavor,
 					LivenessProbe: browserProbe(30),
@@ -78,12 +85,12 @@ var Webtop = Template{
 					Resources:      browserResources("1500m", "2Gi", "4Gi"),
 					VolumeMounts: []corev1.VolumeMount{
 						{MountPath: browserConfigMountPath, Name: configVolumeName},
-						{MountPath: "/dev/shm", Name: dshmVolumeName},
+						{MountPath: dshmMountPath, Name: dshmVolumeName},
 					},
 				},
 			},
 			InitContainers: []corev1.Container{
-				restoreProfileInitContainer(".", profileDownloadURL),
+				restoreProfileInitContainer(profileDownloadURL),
 			},
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(browserHTTPPort)},
@@ -102,7 +109,7 @@ var Webtop = Template{
 			},
 		}, nil
 	},
-	Operations:  []Operation{backupStateFunction(".", templateIDWebtop, profileSourceKeyWebtop)},
+	Operations:  []Operation{backupStateFunction(templateIDWebtop, profileSourceKeyWebtop)},
 	Description: "Full Linux desktop environment accessible via web browser",
 	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDWebtop,
