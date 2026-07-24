@@ -64,7 +64,7 @@ var Chrome = Template{
 					Resources:      browserResources("1000m", "1500Mi", "3Gi"),
 					VolumeMounts: []corev1.VolumeMount{
 						{MountPath: browserConfigMountPath, Name: configVolumeName},
-						{MountPath: "/dev/shm", Name: dshmVolumeName},
+						{MountPath: dshmMountPath, Name: dshmVolumeName},
 					},
 				},
 			},

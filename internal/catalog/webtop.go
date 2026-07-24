@@ -84,7 +84,7 @@ var Webtop = Template{
 					Resources:      browserResources("1500m", "2Gi", "4Gi"),
 					VolumeMounts: []corev1.VolumeMount{
 						{MountPath: browserConfigMountPath, Name: configVolumeName},
-						{MountPath: "/dev/shm", Name: dshmVolumeName},
+						{MountPath: dshmMountPath, Name: dshmVolumeName},
 					},
 				},
 			},
