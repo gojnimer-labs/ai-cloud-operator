@@ -56,9 +56,10 @@ var webtopFlavors = []SelectOption{
 // single-application "default URL" concept for a full desktop, so unlike
 // Firefox/Chrome it declares no startURLParameter. The "profile" being
 // restored/backed up is, and always was, the entire /config home directory
-// (passed as "." — Firefox/Chrome now do the same, see their own doc
-// comments on why) rather than one browser's profile subdirectory, since a
-// desktop has no single well-known profile path to narrow it to.
+// — Firefox/Chrome/ChromiumTracker now do the same, see
+// restoreProfileInitContainer's own doc comment for why — rather than one
+// browser's profile subdirectory, since a desktop has no single well-known
+// profile path to narrow it to.
 var Webtop = Template{
 	Build: func(params map[string]any) (Rendered, error) {
 		flavor := paramString(params, "flavor", "latest")
@@ -89,7 +90,7 @@ var Webtop = Template{
 				},
 			},
 			InitContainers: []corev1.Container{
-				restoreProfileInitContainer(".", profileDownloadURL),
+				restoreProfileInitContainer(profileDownloadURL),
 			},
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(browserHTTPPort)},
@@ -108,7 +109,7 @@ var Webtop = Template{
 			},
 		}, nil
 	},
-	Operations:  []Operation{backupStateFunction(".", templateIDWebtop, profileSourceKeyWebtop)},
+	Operations:  []Operation{backupStateFunction(templateIDWebtop, profileSourceKeyWebtop)},
 	Description: "Full Linux desktop environment accessible via web browser",
 	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDWebtop,
