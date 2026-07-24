@@ -25,6 +25,15 @@ import (
 const (
 	templateIDChromiumTracker = "chromium-tracker"
 
+	// profileSourceKeyChromiumTracker scopes this template's own saved-
+	// profile catalog — same reasoning as profileSourceKeyFirefox/Chrome/
+	// Webtop (browser.go): never share a files-table group with another
+	// template's profiles, since a Chrome/Firefox/Webtop profile tarball
+	// isn't interchangeable with this template's (which additionally
+	// carries the ai-cloud-tracker extension's own captured usage history —
+	// see ChromiumTracker's own doc comment).
+	profileSourceKeyChromiumTracker = "profiles_" + templateIDChromiumTracker
+
 	// trackerInstallScriptURL is gojnimer-labs/ai-cloud-tracker's own
 	// self-installer (github.com/gojnimer-labs/ai-cloud-tracker/blob/main/
 	// scripts/install.sh) — downloads that repo's prebuilt, unpacked
@@ -46,11 +55,13 @@ const (
 	trackerExtensionsMountPath  = "/extensions"
 	trackerExtensionsVolumeName = "extensions"
 
-	// trackerStartURL is fixed, not user-configurable — this template
-	// exists specifically to run gojnimer-labs/ai-cloud-tracker against
-	// chatgpt.com (see that repo's own README for what it captures), not as
-	// a general-purpose Chromium browser. Use the plain "chrome" template
-	// for that instead.
+	// trackerStartURL is the startUrl parameter's Default (see
+	// startURLParameter) — this template exists specifically to run
+	// gojnimer-labs/ai-cloud-tracker against chatgpt.com (see that repo's
+	// own README for what it captures), so unlike Chrome/Firefox's blank
+	// default (their own new-tab page), a blank default here would defeat
+	// the template's whole purpose. Still user-overridable, not hardcoded,
+	// in case a future ai-cloud-tracker version targets a different site.
 	trackerStartURL = "https://chatgpt.com"
 
 	trackerConfigVolumeSize = "2Gi"
@@ -92,20 +103,27 @@ chown -R 1000:1000 ` + trackerExtensionsMountPath + `
 // see the ai-cloud-tracker repo's own README for why that distinction is
 // load-bearing here: stable-channel Chrome silently ignores
 // --load-extension outside Chrome for Testing, Chromium doesn't) with
-// gojnimer-labs/ai-cloud-tracker's usage-tracking extension force-loaded
-// and pointed at chatgpt.com.
+// gojnimer-labs/ai-cloud-tracker's usage-tracking extension force-loaded,
+// plus the same restoreProfile/backup_state/startUrl support Chrome/Firefox
+// have (see browserParameters/backupStateFunction/startURLParameter in
+// browser.go) — this is a real Chromium profile like any other browser
+// template's, so there's no reason it shouldn't be saveable/restorable too.
 //
 // Unlike Firefox/Chrome/Webtop, /config is a PersistentVolumeClaim, not an
 // EmptyDir — this template's whole purpose is tracking a logged-in user's
 // usage over time, so the chatgpt.com login (and therefore the extension's
-// own captured usage history) must survive a pod restart, the same
-// reasoning as CodeServer's /config (see its own doc comment). The
+// own captured usage history, which chrome.storage.local persists inside
+// the profile directory under /config) must survive a pod restart, the
+// same reasoning as CodeServer's /config (see its own doc comment). The
 // extensions volume is the opposite: a plain EmptyDir, deliberately
 // re-fetched fresh by the init container on every start (see
 // trackerInstallScriptURL's doc comment) rather than persisted, so a
 // restart always picks up the latest ai-cloud-tracker main.
 var ChromiumTracker = Template{
 	Build: func(params map[string]any) (Rendered, error) {
+		profileDownloadURL := paramString(params, paramKeyProfileURL, "")
+		startURL := paramString(params, paramKeyStartURL, trackerStartURL)
+
 		return Rendered{
 			Containers: []corev1.Container{
 				{
@@ -118,7 +136,7 @@ var ChromiumTracker = Template{
 							Name: envChromeCLI,
 							Value: "--load-extension=" + trackerExtensionInstallDir +
 								" --disable-extensions-except=" + trackerExtensionInstallDir +
-								" " + trackerStartURL,
+								" " + startURL,
 						},
 					},
 					Image:         "lscr.io/linuxserver/chromium:latest",
@@ -138,6 +156,14 @@ var ChromiumTracker = Template{
 				},
 			},
 			InitContainers: []corev1.Container{
+				// Restores into all of /config — same reasoning as chrome.go/
+				// firefox.go's own identical comment: this backs up the
+				// whole Chromium profile, not just a browser-internal
+				// subdirectory, which here also means the extension's own
+				// captured usage history (stored via chrome.storage.local
+				// inside the profile dir) survives a restore too, not just
+				// login/cookies.
+				restoreProfileInitContainer(profileDownloadURL),
 				installTrackerExtensionInitContainer(),
 			},
 			ServicePorts: []corev1.ServicePort{
@@ -170,10 +196,22 @@ var ChromiumTracker = Template{
 			},
 		}, nil
 	},
+	Operations:  []Operation{backupStateFunction(templateIDChromiumTracker, profileSourceKeyChromiumTracker)},
 	Description: "Chromium pre-loaded with gojnimer-labs/ai-cloud-tracker, tracking ChatGPT usage limits",
 	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDChromiumTracker,
 	Icon:        "📊",
 	Name:        "ChatGPT Usage Tracker",
 	Version:     initialTemplateVersion,
+	Parameters: append(
+		browserParameters(profileSourceKeyChromiumTracker),
+		Parameter{
+			Key:         paramKeyStartURL,
+			Label:       "Default URL",
+			Description: "URL to open automatically when the browser starts.",
+			Type:        ParameterTypeString,
+			DataSource:  DataSource{Kind: DataSourceStatic},
+			Default:     trackerStartURL,
+		},
+	),
 }

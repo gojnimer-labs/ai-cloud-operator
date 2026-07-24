@@ -18,6 +18,7 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -110,13 +111,41 @@ func TestEstimatedResourcesMatchesHardcodedBrowserValues(t *testing.T) {
 }
 
 func TestGetReturnsKnownTemplates(t *testing.T) {
-	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDCodeServer} {
+	for _, id := range []string{templateIDNginx, templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDCodeServer, templateIDChromiumTracker} {
 		if _, ok := Get(id); !ok {
 			t.Fatalf("expected template %q to be registered", id)
 		}
 	}
 	if _, ok := Get("does-not-exist"); ok {
 		t.Fatalf("expected unknown template id to be absent")
+	}
+}
+
+// TestTemplateParametersMarshalAsArrayNeverNull is a regression guard for a
+// real production incident: Template.Parameters has no `omitempty` (see its
+// own doc comment — Convex expects this field always present as an array,
+// "[] for no input", never absent/null), but a template whose Go literal
+// simply never sets Parameters gets Go's slice zero value (nil), which
+// encoding/json marshals as `null`, not `[]`. Convex's /operators/register
+// rejected the operator's ENTIRE catalog registration with a 400 the moment
+// ChromiumTracker — the first template in this package to ever leave
+// Parameters unset — joined it, taking the whole operator down in a crash
+// loop (register failing is fatal to manager startup). A template with
+// nothing to configure must explicitly set Parameters: []Parameter{}.
+func TestTemplateParametersMarshalAsArrayNeverNull(t *testing.T) {
+	for _, tmpl := range List() {
+		if tmpl.Parameters == nil {
+			t.Errorf("template %q: Parameters is nil (marshals to JSON null) — set it to []Parameter{} explicitly if the template truly has none", tmpl.ID)
+			continue
+		}
+		b, err := json.Marshal(tmpl.Parameters)
+		if err != nil {
+			t.Errorf("template %q: marshaling Parameters: %v", tmpl.ID, err)
+			continue
+		}
+		if string(b) == "null" {
+			t.Errorf("template %q: Parameters marshals to JSON null, expected an array", tmpl.ID)
+		}
 	}
 }
 
@@ -324,7 +353,7 @@ func TestBrowserRequiresProfileNameWhenRestoreProfileIsOn(t *testing.T) {
 }
 
 func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
-	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDChromiumTracker} {
 		tmpl, _ := Get(id)
 		fn, ok := GetOperation(tmpl, "backup_state")
 		if !ok {
@@ -357,7 +386,7 @@ func TestFirefoxAndChromeExposeBackupStateFunction(t *testing.T) {
 // workloads/actions.ts#deployWorkload), so a missing/wrong value here would
 // silently break restore.
 func TestBrowserProfileDownloadURLDeclaresDownloadDirection(t *testing.T) {
-	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDChromiumTracker} {
 		tmpl, _ := Get(id)
 		source := findParameter(t, tmpl.Parameters, paramKeyProfileURL).DataSource
 		if source.Kind != DataSourceFile || source.Direction != DirectionDownload ||
@@ -433,18 +462,15 @@ func TestBackupStateFunctionExecutesTarAndCurl(t *testing.T) {
 	if exec.namespace != testNamespace || exec.podName != testFirefoxPod || exec.container != templateIDFirefox {
 		t.Fatalf("unexpected exec target: namespace=%q podName=%q container=%q", exec.namespace, exec.podName, exec.container)
 	}
-	// The profile path and upload URL must travel as trailing positional
-	// args (not interpolated into the script string) — see
-	// backupStateFunction's doc comment for why.
-	if len(exec.command) < 2 {
-		t.Fatalf("expected at least 2 trailing args, got %+v", exec.command)
+	// The upload URL must travel as a trailing positional arg (not
+	// interpolated into the script string) — see backupStateFunction's doc
+	// comment for why.
+	if len(exec.command) < 1 {
+		t.Fatalf("expected at least 1 trailing arg, got %+v", exec.command)
 	}
-	lastTwo := exec.command[len(exec.command)-2:]
-	if lastTwo[0] != "." {
-		t.Fatalf("expected profile path as second-to-last arg, got %q", lastTwo[0])
-	}
-	if lastTwo[1] != "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900" {
-		t.Fatalf("expected upload URL as last arg, got %q", lastTwo[1])
+	last := exec.command[len(exec.command)-1]
+	if last != "https://r2.example.com/profiles/firefox/user-1/123.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900" {
+		t.Fatalf("expected upload URL as last arg, got %q", last)
 	}
 }
 
@@ -535,7 +561,7 @@ func TestBrowserBuildOmitsStartURLEnvWhenBlank(t *testing.T) {
 // code-server (a different, non-Selkies image) or nginx (no desktop UI at
 // all).
 func TestSelkiesTemplatesSetFileManagerPath(t *testing.T) {
-	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop} {
+	for _, id := range []string{templateIDFirefox, templateIDChrome, templateIDWebtop, templateIDChromiumTracker} {
 		tmpl, _ := Get(id)
 		rendered, err := tmpl.Build(map[string]any{})
 		if err != nil {
@@ -574,8 +600,8 @@ func TestBrowserBackupAndRestoreScopeIsWholeConfigDir(t *testing.T) {
 		if len(rendered.InitContainers) != 1 {
 			t.Fatalf("%s: expected 1 init container, got %d", id, len(rendered.InitContainers))
 		}
-		if script := rendered.InitContainers[0].Command; len(script) < 3 || !strings.Contains(script[2], `PROFILE_DIR="/config/.`) {
-			t.Fatalf("%s: expected the init container script to restore into /config/. (whole home dir), got %+v", id, script)
+		if script := rendered.InitContainers[0].Command; len(script) < 3 || !strings.Contains(script[2], `tar -xzf /tmp/profile.tar.gz -C /config`) {
+			t.Fatalf("%s: expected the init container script to restore into all of /config (whole home dir), got %+v", id, script)
 		}
 
 		fn, ok := GetOperation(tmpl, "backup_state")
@@ -588,8 +614,8 @@ func TestBrowserBackupAndRestoreScopeIsWholeConfigDir(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("%s: unexpected error: %v", id, err)
 		}
-		if len(exec.command) < 2 || exec.command[len(exec.command)-2] != "." {
-			t.Fatalf("%s: expected \".\" as the backup profile path, got %+v", id, exec.command)
+		if len(exec.command) < 3 || !strings.Contains(exec.command[2], "-C /config .") {
+			t.Fatalf("%s: expected the backup script to tar all of /config (\".\"), got %+v", id, exec.command)
 		}
 	}
 }
@@ -985,10 +1011,18 @@ func TestChromiumTrackerInstallsExtensionViaInitContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(rendered.InitContainers) != 1 {
-		t.Fatalf("expected 1 init container, got %d", len(rendered.InitContainers))
+	if len(rendered.InitContainers) != 2 {
+		t.Fatalf("expected 2 init containers (restore-profile, install-tracker-extension), got %d", len(rendered.InitContainers))
 	}
-	init := rendered.InitContainers[0]
+	var init *corev1.Container
+	for i := range rendered.InitContainers {
+		if rendered.InitContainers[i].Name == "install-tracker-extension" {
+			init = &rendered.InitContainers[i]
+		}
+	}
+	if init == nil {
+		t.Fatalf("expected an install-tracker-extension init container, got %+v", rendered.InitContainers)
+	}
 	if len(init.Command) < 3 || !strings.Contains(init.Command[2], trackerInstallScriptURL) {
 		t.Fatalf("expected the init container script to fetch %q, got %+v", trackerInstallScriptURL, init.Command)
 	}

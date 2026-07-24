@@ -65,10 +65,10 @@ var Firefox = Template{
 				},
 			},
 			InitContainers: []corev1.Container{
-				// "." (all of /config) — see chrome.go's identical comment on
-				// the same change; the reasoning is byte-for-byte the same
-				// here, only the profile subdirectory name differs.
-				restoreProfileInitContainer(".", profileDownloadURL),
+				// Restores into all of /config — see chrome.go's identical
+				// comment on the same change; the reasoning is byte-for-byte
+				// the same here, only the profile subdirectory name differs.
+				restoreProfileInitContainer(profileDownloadURL),
 			},
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(browserHTTPPort)},
@@ -78,7 +78,7 @@ var Firefox = Template{
 			},
 		}, nil
 	},
-	Operations:  []Operation{backupStateFunction(".", templateIDFirefox, profileSourceKeyFirefox)},
+	Operations:  []Operation{backupStateFunction(templateIDFirefox, profileSourceKeyFirefox)},
 	Description: "Full Firefox browser accessible via web interface",
 	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDFirefox,

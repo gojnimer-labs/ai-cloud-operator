@@ -191,10 +191,13 @@ func browserParameters(profileSourceKey string) []Parameter {
 // container that, in the common no-restore-requested case, needs no network
 // at all. Any wget failure (missing profile, network error) is treated as
 // "start fresh" rather than distinguished by HTTP status.
-func restoreProfileInitContainer(profilePath string, profileDownloadURL string) corev1.Container {
-	script := fmt.Sprintf(`set -e
-PROFILE_DIR="/config/%s"
-mkdir -p "$PROFILE_DIR"
+//
+// Restores into /config as a whole (not a browser-specific subdirectory) —
+// see backupStateFunction's own doc comment for why every caller here
+// widened to that scope.
+func restoreProfileInitContainer(profileDownloadURL string) corev1.Container {
+	const script = `set -e
+mkdir -p /config
 if [ -n "$PROFILE_DOWNLOAD_URL" ]; then
   echo "Attempting profile restore from R2..."
   if wget -q -O /tmp/profile.tar.gz "$PROFILE_DOWNLOAD_URL"; then
@@ -210,7 +213,7 @@ else
 fi
 chown -R 1000:1000 /config
 chmod -R 755 /config
-`, profilePath)
+`
 
 	return corev1.Container{
 		Command: []string{shShellPath, "-c", script},
@@ -225,24 +228,35 @@ chmod -R 755 /config
 	}
 }
 
-// backupStateFunction builds the "backup_state" Operation shared by
-// firefox/chrome: the first instance of the reusable operation pattern (see
-// catalog.Operation) — a named operation against an already-running
-// workload, discovered by the frontend through the same catalog response as
-// deploy-time parameters, with its own Parameters (including a
-// file-sourced uploadUrl Convex computes, mirroring how profileDownloadUrl
-// works for deploy-time restore).
+// backupStateFunction builds the "backup_state" Operation shared by every
+// browser/desktop template: the first instance of the reusable operation
+// pattern (see catalog.Operation) — a named operation against an
+// already-running workload, discovered by the frontend through the same
+// catalog response as deploy-time parameters, with its own Parameters
+// (including a file-sourced uploadUrl Convex computes, mirroring how
+// profileDownloadUrl works for deploy-time restore).
 //
-// profilePath and uploadUrl are passed as sh positional parameters ($1, $2)
-// rather than interpolated into the script string, so a URL containing
-// shell-meaningful characters (S3 presigned URLs are full of & and % in
-// their query string) can never be misparsed as script syntax.
+// Always backs up all of /config, not a browser-specific subdirectory —
+// every caller used to pass its own narrower path (e.g.
+// ".config/google-chrome"), but since Selkies' own Files tab makes
+// .../Desktop and .../Downloads directly reachable (see
+// envFileManagerPath's doc comment), a backup scoped to just the browser's
+// internal profile db would silently drop anything a user saved there.
+// Widened to "." for every template rather than kept as a parameter, since
+// by the time every caller needed the same value, a parameter that never
+// varies was just unnecessary indirection (see restoreProfileInitContainer's
+// own identical simplification).
+//
+// uploadUrl is passed as a sh positional parameter ($1) rather than
+// interpolated into the script string, so a URL containing shell-meaningful
+// characters (S3 presigned URLs are full of & and % in their query string)
+// can never be misparsed as script syntax.
 //
 // profileSourceKey is the same dynamic-select source browserParameters
 // scopes the restore picker to (see its own doc comment) — passed
 // explicitly here rather than derived from containerName, which only
 // happens to equal the template ID for today's browser templates.
-func backupStateFunction(profilePath, containerName, profileSourceKey string) Operation {
+func backupStateFunction(containerName, profileSourceKey string) Operation {
 	return Operation{
 		Key:         "backup_state",
 		Label:       "Backup profile",
@@ -294,16 +308,16 @@ func backupStateFunction(profilePath, containerName, profileSourceKey string) Op
 			// directly on the tar line) is what lets the script inspect
 			// that exit code instead of aborting on any nonzero status.
 			const script = `set -e
-tar czf /tmp/backup.tar.gz -C /config "$1" || {
+tar czf /tmp/backup.tar.gz -C /config . || {
   rc=$?
   if [ "$rc" -gt 1 ]; then
     exit "$rc"
   fi
 }
-curl -sf -X PUT --upload-file /tmp/backup.tar.gz "$2"
+curl -sf -X PUT --upload-file /tmp/backup.tar.gz "$1"
 rm -f /tmp/backup.tar.gz
 `
-			command := []string{shShellPath, "-c", script, "sh", profilePath, uploadURL}
+			command := []string{shShellPath, "-c", script, "sh", uploadURL}
 			_, stderr, err := exec.Exec(ctx, pod.Namespace, pod.PodName, containerName, command)
 			if err != nil {
 				return OperationResult{}, fmt.Errorf("backup exec failed: %w (stderr: %s)", err, stderr)

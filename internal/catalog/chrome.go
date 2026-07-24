@@ -69,15 +69,15 @@ var Chrome = Template{
 				},
 			},
 			InitContainers: []corev1.Container{
-				// "." (all of /config), not just ".config/google-chrome" —
-				// see Webtop's own doc comment for why the whole home
-				// directory, not one browser-internal subdirectory, is the
-				// right scope: since fileManagerPathEnv now makes
-				// $browserConfigMountPath/Downloads and .../Desktop directly
-				// reachable through Selkies' own Files tab, a backup/restore
-				// cycle needs to carry those too, not just Chrome's own
-				// profile database.
-				restoreProfileInitContainer(".", profileDownloadURL),
+				// Restores into all of /config, not just
+				// ".config/google-chrome" — see restoreProfileInitContainer's
+				// own doc comment for why the whole home directory, not one
+				// browser-internal subdirectory, is the right scope: since
+				// fileManagerPathEnv now makes $browserConfigMountPath/
+				// Downloads and .../Desktop directly reachable through
+				// Selkies' own Files tab, a backup/restore cycle needs to
+				// carry those too, not just Chrome's own profile database.
+				restoreProfileInitContainer(profileDownloadURL),
 			},
 			ServicePorts: []corev1.ServicePort{
 				{Name: portNameHTTP, Port: 80, TargetPort: intstr.FromInt32(browserHTTPPort)},
@@ -96,7 +96,7 @@ var Chrome = Template{
 			},
 		}, nil
 	},
-	Operations:  []Operation{backupStateFunction(".", templateIDChrome, profileSourceKeyChrome)},
+	Operations:  []Operation{backupStateFunction(templateIDChrome, profileSourceKeyChrome)},
 	Description: "Full Chrome browser accessible via web interface",
 	Entrypoints: []Entrypoint{{Name: portNameHTTP, Label: entrypointLabelWeb}},
 	ID:          templateIDChrome,
